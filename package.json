@@ -1,0 +1,19 @@
+{
+  "name": "petow",
+  "version": "1.0.0",
+  "description": "PetMatch - Pet Adoption & Breeding Platform",
+  "private": true,
+  "scripts": {
+    "dev": "cd petmatch-nextjs && npm run dev",
+    "build": "cd petmatch-nextjs && npm run build",
+    "start": "cd petmatch-nextjs && npm start",
+    "lint": "cd petmatch-nextjs && npm run lint"
+  },
+  "workspaces": [
+    "petmatch-nextjs"
+  ],
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+} 
