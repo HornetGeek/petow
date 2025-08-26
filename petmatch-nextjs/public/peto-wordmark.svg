@@ -1,0 +1,40 @@
+<svg width="520" height="180" viewBox="0 0 520 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Peto wordmark">
+  <defs>
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#02B7B4"/>
+      <stop offset="100%" stop-color="#14B8A6"/>
+    </linearGradient>
+    <linearGradient id="purpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Brand Word: Pet -->
+  <text x="40" y="108" font-family="Poppins, Cairo, 'Segoe UI', system-ui, sans-serif" font-weight="800" font-size="86" fill="url(#tealGrad)">Pet</text>
+
+  <!-- O as ring + paw -->
+  <g transform="translate(265,30)">
+    <!-- outer ring -->
+    <circle cx="40" cy="60" r="42" fill="none" stroke="url(#purpleGrad)" stroke-width="14"/>
+    <!-- inner paw (solid) -->
+    <g transform="translate(16,36)">
+      <circle cx="12" cy="10" r="6" fill="#7C3AED"/>
+      <circle cx="26" cy="6.5" r="5.5" fill="#7C3AED"/>
+      <circle cx="40" cy="7.5" r="5.5" fill="#7C3AED"/>
+      <circle cx="52" cy="12" r="6.5" fill="#7C3AED"/>
+      <path d="M18 34c0-10 9-18 20-18s20 8 20 18c0 8-8 14-20 14S18 42 18 34z" fill="#7C3AED"/>
+    </g>
+    <!-- accent arcs above "O" -->
+    <path d="M6 22c12-12 30-18 48-18 16 0 30 5 42 14" fill="none" stroke="#10B981" stroke-width="6" stroke-linecap="round" opacity="0.75"/>
+    <path d="M86 18c5 3 10 7 14 12" fill="none" stroke="#F59E0B" stroke-width="6" stroke-linecap="round"/>
+    <!-- small heart -->
+    <path d="M98 35c2-5 10-5 12 2 0 6-7 9-12 14-5-5-12-8-12-14 0-7 10-7 12-2z" fill="#F59E0B"/>
+  </g>
+
+  <!-- w -->
+  <text x="368" y="108" font-family="Poppins, Cairo, 'Segoe UI', system-ui, sans-serif" font-weight="800" font-size="86" fill="url(#purpleGrad)">w</text>
+
+  <!-- Tagline -->
+  <text x="260" y="160" text-anchor="middle" font-family="Poppins, Cairo, 'Segoe UI', system-ui, sans-serif" font-weight="600" font-size="22" fill="#1F2937" opacity="0.9">Match • Care • Love</text>
+</svg> 
