@@ -39,8 +39,8 @@ services:
       - SECRET_KEY=your-secret-key-here
       - DATABASE_URL=postgresql://petmatch_user:petmatch_password@db:5432/petmatch
       - REDIS_URL=redis://redis:6379
-      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
-      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://frontend:3000
+      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,petow.app,www.petow.app,api.petow.app
+      - CORS_ALLOWED_ORIGINS=https://petow.app,https://www.petow.app,https://api.petow.app
     volumes:
       - ./patmatch:/app
       - static_files:/app/staticfiles
@@ -58,23 +58,6 @@ services:
               python manage.py collectstatic --noinput &&
               gunicorn --bind 0.0.0.0:8000 --workers 3 patmatch_backend.wsgi:application"
 
-  # Next.js Frontend
-  frontend:
-    build:
-      context: ./petmatch-nextjs
-      dockerfile: Dockerfile
-    container_name: petmatch_frontend
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000/api
-      - NODE_ENV=production
-    ports:
-      - "3000:3000"
-    depends_on:
-      - backend
-    networks:
-      - petmatch_network
-    restart: unless-stopped
-
   # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
@@ -89,7 +72,6 @@ services:
       - media_files:/var/www/media
       - ./ssl:/etc/nginx/ssl
     depends_on:
-      - frontend
       - backend
     networks:
       - petmatch_network
