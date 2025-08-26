@@ -1,0 +1,1238 @@
+from rest_framework import generics, status, filters
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny
+from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Q
+from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
+from .serializers import (
+    BreedSerializer, PetSerializer, PetListSerializer, 
+    BreedingRequestSerializer, FavoriteSerializer, VeterinaryClinicSerializer,
+    NotificationSerializer, ChatRoomSerializer, ChatRoomListSerializer,
+    ChatContextSerializer, ChatStatusSerializer, ChatCreationSerializer,
+    AdoptionRequestSerializer, AdoptionRequestCreateSerializer, 
+    AdoptionRequestListSerializer, AdoptionRequestResponseSerializer
+)
+from .notifications import (
+    notify_breeding_request_received, notify_breeding_request_approved,
+    notify_breeding_request_rejected, notify_breeding_request_completed,
+    notify_favorite_added
+)
+import logging
+import time
+from django.db import models
+
+logger = logging.getLogger(__name__)
+
+class BreedListView(generics.ListAPIView):
+    """قائمة السلالات"""
+    queryset = Breed.objects.all()
+    serializer_class = BreedSerializer
+    permission_classes = []
+    authentication_classes = []  # No authentication needed
+
+class PetListCreateView(generics.ListCreateAPIView):
+    """قائمة الحيوانات وإنشاء حيوان جديد"""
+    queryset = Pet.objects.all()
+    serializer_class = PetListSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    
+    def get_permissions(self):
+        """Allow read access without authentication, require auth for create"""
+        print(f"🔐 Django: get_permissions called for method: {self.request.method}")
+        print(f"🔐 Django: User: {self.request.user}")
+        print(f"🔐 Django: Is authenticated: {self.request.user.is_authenticated}")
+        print(f"🔐 Django: User ID: {getattr(self.request.user, 'id', 'NO_ID')}")
+        print(f"🔐 Django: User email: {getattr(self.request.user, 'email', 'NO_EMAIL')}")
+        print(f"🔐 Django: Request headers: {dict(self.request.headers)}")
+        print(f"🔐 Django: Authorization header: {self.request.headers.get('Authorization', 'NOT_FOUND')}")
+        print(f"🔐 Django: All headers keys: {list(self.request.headers.keys())}")
+        
+        if self.request.method == 'GET':
+            print(f"🔐 Django: GET request - no permissions required")
+            return []
+        
+        print(f"🔐 Django: POST request - requiring IsAuthenticated")
+        return [IsAuthenticated()]
+    
+    def create(self, request, *args, **kwargs):
+        """Override create to add detailed logging"""
+        print(f"🆕 Django: Create request from user: {request.user}")
+        print(f"🆕 Django: User ID: {request.user.id if request.user.is_authenticated else 'Anonymous'}")
+        print(f"🆕 Django: User email: {request.user.email if request.user.is_authenticated else 'Anonymous'}")
+        print(f"🆕 Django: Is authenticated: {request.user.is_authenticated}")
+        print(f"🆕 Django: Request data keys: {list(request.data.keys())}")
+        print(f"🆕 Django: Request headers: {dict(request.headers)}")
+        print(f"🆕 Django: Authorization header: {request.headers.get('Authorization', 'NOT_FOUND')}")
+        print(f"🆕 Django: Request method: {request.method}")
+        print(f"🆕 Django: Request user: {request.user}")
+        print(f"🆕 Django: Request user backend: {getattr(request.user, 'backend', 'NO_BACKEND')}")
+        
+        try:
+            return super().create(request, *args, **kwargs)
+        except Exception as e:
+            print(f"❌ Django: Create error: {str(e)}")
+            print(f"❌ Django: Error type: {type(e)}")
+            raise
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['pet_type', 'gender', 'status', 'is_fertile', 'breed']
+    search_fields = ['name', 'breed__name', 'location', 'description']
+    ordering_fields = ['created_at', 'age_months', 'breeding_fee']
+    ordering = ['-created_at']
+    
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return PetSerializer
+        return PetListSerializer
+    
+    def get_queryset(self):
+        # استبعاد حيوانات التبني من القائمة العامة
+        queryset = Pet.objects.select_related('breed', 'owner').exclude(
+            status__in=['available_for_adoption', 'adoption_pending', 'adopted']
+        )
+        
+        # فلترة حسب المنطقة
+        location = self.request.query_params.get('location', None)
+        if location:
+            queryset = queryset.filter(location__icontains=location)
+        
+        # فلترة حسب النطاق السعري
+        min_price = self.request.query_params.get('min_price', None)
+        max_price = self.request.query_params.get('max_price', None)
+        if min_price:
+            queryset = queryset.filter(
+                Q(breeding_fee__gte=min_price) | Q(is_free=True)
+            )
+        if max_price:
+            queryset = queryset.filter(
+                Q(breeding_fee__lte=max_price) | Q(is_free=True)
+            )
+        
+        # فلترة المفضلات فقط
+        favorites_only = self.request.query_params.get('favorites_only', None)
+        if favorites_only and self.request.user.is_authenticated:
+            favorite_pets = Favorite.objects.filter(user=self.request.user).values_list('pet_id', flat=True)
+            queryset = queryset.filter(id__in=favorite_pets)
+        
+        return queryset
+
+class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """تفاصيل الحيوان"""
+    queryset = Pet.objects.select_related('breed', 'owner').prefetch_related('additional_images')
+    serializer_class = PetSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    
+    def get_permissions(self):
+        """Allow read access without authentication, require auth for create"""
+        if self.request.method in ['PUT', 'PATCH', 'DELETE']:
+            return [IsAuthenticated()]
+        return []
+    
+    def update(self, request, *args, **kwargs):
+        """Override update to add detailed error logging"""
+        print(f"🔄 Django: Update request data: {request.data}")
+        try:
+            return super().update(request, *args, **kwargs)
+        except Exception as e:
+            print(f"❌ Django: Update error: {str(e)}")
+            print(f"❌ Django: Error type: {type(e)}")
+            raise
+    
+    def get_queryset(self):
+        if self.request.method in ['PUT', 'PATCH', 'DELETE']:
+            # المالك فقط يمكنه التعديل أو الحذف
+            print(f"🔍 Django: Checking ownership for user: {self.request.user}")
+            print(f"🔍 Django: User ID: {self.request.user.id}")
+            print(f"🔍 Django: User email: {self.request.user.email}")
+            print(f"🔍 Django: Is authenticated: {self.request.user.is_authenticated}")
+            
+            # Get the pet being requested
+            pet_id = self.kwargs.get('pk')
+            try:
+                pet = Pet.objects.get(pk=pet_id)
+                print(f"🐾 Django: Pet owner: {pet.owner}")
+                print(f"🐾 Django: Pet owner ID: {pet.owner.id}")
+                print(f"🐾 Django: Pet owner email: {pet.owner.email}")
+                print(f"🔍 Django: Ownership match: {pet.owner == self.request.user}")
+            except Pet.DoesNotExist:
+                print(f"❌ Django: Pet with ID {pet_id} not found")
+            
+            queryset = Pet.objects.filter(owner=self.request.user)
+            print(f"🔍 Django: Filtered queryset count: {queryset.count()}")
+            return queryset
+        return Pet.objects.all()
+
+class MyPetsView(generics.ListAPIView):
+    """حيواناتي الأليفة"""
+    serializer_class = PetListSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Pet.objects.filter(owner=self.request.user).select_related('breed')
+
+class BreedingRequestListCreateView(generics.ListCreateAPIView):
+    """قائمة طلبات التزاوج وإنشاء طلب جديد"""
+    serializer_class = BreedingRequestSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['status']
+    ordering = ['-created_at']
+    
+    def get_queryset(self):
+        # عرض الطلبات المرسلة والمستقبلة
+        return BreedingRequest.objects.filter(
+            Q(requester=self.request.user) | Q(receiver=self.request.user)
+        ).select_related('male_pet', 'female_pet', 'requester', 'receiver')
+
+class BreedingRequestDetailView(generics.RetrieveUpdateAPIView):
+    """تفاصيل طلب التزاوج"""
+    serializer_class = BreedingRequestSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return BreedingRequest.objects.filter(
+            Q(requester=self.request.user) | Q(receiver=self.request.user)
+        )
+    
+    def get_permissions(self):
+        # فقط المستقبل يمكنه تحديث الطلب (الموافقة/الرفض)
+        if self.request.method in ['PUT', 'PATCH']:
+            return [IsAuthenticated()]
+        return [IsAuthenticated()]
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def respond_to_breeding_request(request, pk):
+    """الرد على طلب التزاوج"""
+    try:
+        breeding_request = BreedingRequest.objects.get(
+            pk=pk, receiver=request.user
+        )
+    except BreedingRequest.DoesNotExist:
+        return Response(
+            {'error': 'طلب التزاوج غير موجود'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    action = request.data.get('action')  # 'approve' or 'reject'
+    response_message = request.data.get('response_message', '')
+    
+    if action == 'approve':
+        breeding_request.status = 'approved'
+        # تحديث حالة الحيوانات إلى "في عملية التزاوج"
+        breeding_request.male_pet.status = 'mating'
+        breeding_request.female_pet.status = 'mating'
+        breeding_request.male_pet.save()
+        breeding_request.female_pet.save()
+    elif action == 'reject':
+        breeding_request.status = 'rejected'
+    else:
+        return Response(
+            {'error': 'إجراء غير صحيح'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    breeding_request.response_message = response_message
+    breeding_request.save()
+    
+    serializer = BreedingRequestSerializer(breeding_request)
+    return Response(serializer.data)
+
+class FavoriteListCreateView(generics.ListCreateAPIView):
+    """قائمة المفضلات وإضافة للمفضلات"""
+    serializer_class = FavoriteSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Favorite.objects.filter(user=self.request.user).select_related('pet__breed', 'pet__owner')
+
+class FavoriteDetailView(generics.DestroyAPIView):
+    """حذف من المفضلات"""
+    serializer_class = FavoriteSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Favorite.objects.filter(user=self.request.user)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def toggle_favorite(request, pet_id):
+    """إضافة أو حذف من المفضلات"""
+    try:
+        pet = Pet.objects.get(pk=pet_id)
+    except Pet.DoesNotExist:
+        return Response(
+            {'error': 'الحيوان غير موجود'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    favorite, created = Favorite.objects.get_or_create(
+        user=request.user, pet=pet
+    )
+    
+    if not created:
+        favorite.delete()
+        return Response({'favorited': False})
+    
+    return Response({'favorited': True})
+
+@api_view(['GET'])
+@permission_classes([])
+def pet_stats(request):
+    """إحصائيات الحيوانات"""
+    stats = {
+        'total_pets': Pet.objects.count(),
+        'available_pets': Pet.objects.filter(status='available').count(),
+        'breeding_requests': BreedingRequest.objects.count(),
+        'successful_matings': BreedingRequest.objects.filter(status='completed').count(),
+        'by_type': {}
+    }
+    
+    # إحصائيات حسب النوع
+    for choice in Pet.PET_TYPE_CHOICES:
+        pet_type = choice[0]
+        count = Pet.objects.filter(pet_type=pet_type).count()
+        stats['by_type'][pet_type] = count
+    
+    return Response(stats)
+
+# العيادات البيطرية
+class VeterinaryClinicListView(generics.ListAPIView):
+    """قائمة العيادات البيطرية المتاحة"""
+    queryset = VeterinaryClinic.objects.filter(is_active=True)
+    serializer_class = VeterinaryClinicSerializer
+    permission_classes = []
+    authentication_classes = []
+
+# طلبات المقابلة
+class BreedingRequestListCreateView(generics.ListCreateAPIView):
+    """قائمة طلبات المقابلة وإنشاء طلب جديد"""
+    serializer_class = BreedingRequestSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """إرجاع طلبات المقابلة الخاصة بالمستخدم"""
+        user = self.request.user
+        # طلبات مرسلة أو واردة للمستخدم
+        return BreedingRequest.objects.filter(
+            Q(requester=user) | Q(receiver=user)
+        ).order_by('-created_at')
+    
+    def create(self, request, *args, **kwargs):
+        """إنشاء طلب مقابلة جديد مع إرسال إشعار"""
+        response = super().create(request, *args, **kwargs)
+        
+        # إرسال إشعار للمستقبل
+        if response.status_code == 201:
+            breeding_request = BreedingRequest.objects.get(id=response.data['id'])
+            notify_breeding_request_received(breeding_request)
+        
+        return response
+
+class BreedingRequestDetailView(generics.RetrieveUpdateAPIView):
+    """تفاصيل طلب المقابلة وتحديثه"""
+    serializer_class = BreedingRequestSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """المستخدم يمكنه رؤية طلباته المرسلة والواردة فقط"""
+        user = self.request.user
+        return BreedingRequest.objects.filter(
+            Q(requester=user) | Q(receiver=user)
+        )
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def my_breeding_requests(request):
+    """طلبات المقابلة المرسلة من المستخدم"""
+    user = request.user
+    sent_requests = BreedingRequest.objects.filter(requester=user).order_by('-created_at')
+    serializer = BreedingRequestSerializer(sent_requests, many=True)
+    return Response(serializer.data)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def received_breeding_requests(request):
+    """طلبات المقابلة الواردة للمستخدم"""
+    user = request.user
+    received_requests = BreedingRequest.objects.filter(receiver=user).order_by('-created_at')
+    serializer = BreedingRequestSerializer(received_requests, many=True)
+    return Response(serializer.data)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def respond_to_breeding_request(request, request_id):
+    """الرد على طلب مقابلة (قبول/رفض)"""
+    try:
+        breeding_request = BreedingRequest.objects.get(
+            id=request_id,
+            receiver=request.user
+        )
+    except BreedingRequest.DoesNotExist:
+        return Response(
+            {'error': 'طلب المقابلة غير موجود أو ليس لديك صلاحية للرد عليه'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    response_type = request.data.get('response')  # 'approve' or 'reject'
+    response_message = request.data.get('message', '')
+    
+    if response_type == 'approve':
+        breeding_request.status = 'approved'
+        # إرسال إشعار بالقبول
+        notify_breeding_request_approved(breeding_request)
+    elif response_type == 'reject':
+        breeding_request.status = 'rejected'
+        # إرسال إشعار بالرفض
+        notify_breeding_request_rejected(breeding_request)
+    else:
+        return Response(
+            {'error': 'نوع الرد غير صحيح. يجب أن يكون approve أو reject'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    breeding_request.response_message = response_message
+    breeding_request.save()
+    
+    serializer = BreedingRequestSerializer(breeding_request)
+    return Response(serializer.data)
+
+# الإشعارات
+class NotificationListView(generics.ListAPIView):
+    """قائمة إشعارات المستخدم"""
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Notification.objects.filter(user=self.request.user).select_related(
+            'related_pet', 'related_breeding_request', 'related_chat_room'
+        )
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mark_notification_as_read(request, notification_id):
+    """تعيين إشعار كمقروء"""
+    try:
+        notification = Notification.objects.get(
+            id=notification_id, 
+            user=request.user
+        )
+        notification.mark_as_read()
+        return Response({'message': 'تم تعيين الإشعار كمقروء'}, status=status.HTTP_200_OK)
+    except Notification.DoesNotExist:
+        return Response(
+            {'error': 'الإشعار غير موجود'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mark_all_notifications_as_read(request):
+    """تعيين جميع الإشعارات كمقروءة"""
+    from django.utils import timezone
+    
+    updated_count = Notification.objects.filter(
+        user=request.user, 
+        is_read=False
+    ).update(is_read=True, read_at=timezone.now())
+    
+    return Response({
+        'message': f'تم تعيين {updated_count} إشعار كمقروء'
+    }, status=status.HTTP_200_OK)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_unread_notifications_count(request):
+    """عدد الإشعارات غير المقروءة"""
+    count = Notification.objects.filter(
+        user=request.user, 
+        is_read=False
+    ).count()
+    
+    return Response({'unread_count': count}, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_chat_message_notification(request):
+    """إرسال إشعار عند وصول رسالة جديدة"""
+    try:
+        chat_id = request.data.get('chat_id')
+        message_content = request.data.get('message', '')
+        
+        if not chat_id:
+            return Response(
+                {'error': 'معرف المحادثة مطلوب'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # البحث عن المحادثة
+        try:
+            chat_room = ChatRoom.objects.get(firebase_chat_id=chat_id)
+        except ChatRoom.DoesNotExist:
+            return Response(
+                {'error': 'المحادثة غير موجودة'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # تحديد المرسل والمستقبل
+        participants = chat_room.get_participants()
+        if len(participants) < 2:
+            return Response(
+                {'error': 'المحادثة غير صالحة'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # إرسال إشعار للمشارك الآخر
+        sender = request.user
+        for participant in participants:
+            if participant.id != sender.id:
+                notification = Notification.create_chat_message_notification(
+                    recipient_user=participant,
+                    sender_user=sender,
+                    chat_room=chat_room,
+                    message_content=message_content
+                )
+                break
+        
+        return Response(
+            {'message': 'تم إرسال الإشعار بنجاح'}, 
+            status=status.HTTP_201_CREATED
+        )
+        
+    except Exception as e:
+        return Response(
+            {'error': f'خطأ في إرسال الإشعار: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_rooms(request):
+    """قائمة المحادثات للمستخدم الحالي"""
+    try:
+        # الحصول على جميع المحادثات النشطة للمستخدم
+        user_chat_rooms = ChatRoom.objects.filter(
+            Q(breeding_request__requester_id=request.user.id) |
+            Q(breeding_request__target_pet__owner_id=request.user.id),
+            is_active=True
+        ).select_related(
+            'breeding_request__requester',
+            'breeding_request__target_pet__owner',
+            'breeding_request__target_pet'
+        ).order_by('-updated_at')
+        
+        serializer = ChatRoomListSerializer(
+            user_chat_rooms, 
+            many=True, 
+            context={'request': request}
+        )
+        
+        return Response({
+            'results': serializer.data,
+            'count': user_chat_rooms.count()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching chat rooms: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل المحادثات'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_room_detail(request, chat_id):
+    """تفاصيل محادثة محددة"""
+    try:
+        chat_room = ChatRoom.objects.select_related(
+            'breeding_request__requester',
+            'breeding_request__target_pet__owner',
+            'breeding_request__target_pet'
+        ).get(
+            id=chat_id,
+            is_active=True
+        )
+        
+        # التحقق من أن المستخدم مشارك في المحادثة
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مسموح لك بالوصول لهذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = ChatRoomSerializer(chat_room, context={'request': request})
+        return Response(serializer.data)
+        
+    except ChatRoom.DoesNotExist:
+        return Response(
+            {'error': 'المحادثة غير موجودة'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error fetching chat room {chat_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_room_by_firebase_id(request, firebase_chat_id):
+    """الحصول على غرفة محادثة بواسطة معرف Firebase"""
+    try:
+        chat_room = ChatRoom.objects.select_related(
+            'breeding_request__requester',
+            'breeding_request__target_pet__owner',
+            'breeding_request__target_pet'
+        ).get(
+            firebase_chat_id=firebase_chat_id,
+            is_active=True
+        )
+        
+        # التحقق من أن المستخدم مشارك في المحادثة
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مخول لك بالوصول لهذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = ChatRoomSerializer(chat_room, context={'request': request})
+        return Response(serializer.data)
+        
+    except ChatRoom.DoesNotExist:
+        return Response(
+            {'error': 'المحادثة غير موجودة'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error fetching chat room by Firebase ID {firebase_chat_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_room_by_breeding_request(request, breeding_request_id):
+    """الحصول على غرفة محادثة بواسطة معرف طلب التزاوج"""
+    try:
+        # التحقق من أن المستخدم مشارك في طلب التزاوج
+        breeding_request = BreedingRequest.objects.get(id=breeding_request_id)
+        if request.user not in [breeding_request.requester, breeding_request.target_pet.owner]:
+            return Response(
+                {'error': 'غير مخول لك بالوصول لهذا الطلب'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # البحث عن غرفة المحادثة
+        try:
+            chat_room = ChatRoom.objects.get(breeding_request=breeding_request)
+            serializer = ChatRoomSerializer(chat_room, context={'request': request})
+            return Response(serializer.data)
+        except ChatRoom.DoesNotExist:
+            return Response(
+                {'error': 'لا توجد محادثة لهذا الطلب'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+    except BreedingRequest.DoesNotExist:
+        return Response(
+            {'error': 'طلب التزاوج غير موجود'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error fetching chat room by breeding request {breeding_request_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_chat_room(request):
+    """إنشاء غرفة محادثة جديدة لطلب تزاوج مقبول"""
+    try:
+        # Debug logging
+        print(f"DEBUG: Request data: {request.data}")
+        print(f"DEBUG: Request user: {request.user}")
+        
+        # استخدام السيريلايزر للتحقق من البيانات
+        creation_serializer = ChatCreationSerializer(data=request.data)
+        if not creation_serializer.is_valid():
+            print(f"DEBUG: Serializer errors: {creation_serializer.errors}")
+            return Response(
+                {'error': creation_serializer.errors}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        breeding_request_id = creation_serializer.validated_data['breeding_request_id']
+        print(f"DEBUG: Breeding request ID: {breeding_request_id}")
+        
+        breeding_request = BreedingRequest.objects.get(id=breeding_request_id)
+        print(f"DEBUG: Breeding request status: {breeding_request.status}")
+        
+        # التحقق من أن المستخدم مخول لإنشاء المحادثة
+        if request.user not in [breeding_request.requester, breeding_request.target_pet.owner]:
+            print(f"DEBUG: User not authorized. User: {request.user}, Requester: {breeding_request.requester}, Owner: {breeding_request.target_pet.owner}")
+            return Response(
+                {'error': 'غير مخول لإنشاء هذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # التحقق من أن الطلب مقبول
+        if breeding_request.status != 'approved':
+            print(f"DEBUG: Request not approved. Status: {breeding_request.status}")
+            return Response(
+                {'error': 'لا يمكن إنشاء محادثة إلا للطلبات المقبولة'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # إنشاء غرفة المحادثة
+        chat_room = ChatRoom.objects.create(breeding_request=breeding_request)
+        print(f"DEBUG: Chat room created with ID: {chat_room.id}")
+        
+        # إرجاع بيانات المحادثة مع السياق الكامل
+        context_serializer = ChatContextSerializer(chat_room, context={'request': request})
+        
+        return Response({
+            'chat_room': ChatRoomSerializer(chat_room, context={'request': request}).data,
+            'context': context_serializer.data['chat_context'],
+            'message': 'تم إنشاء المحادثة بنجاح'
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        print(f"DEBUG: Exception occurred: {str(e)}")
+        logger.error(f"Error creating chat room: {str(e)}")
+        return Response(
+            {'error': 'خطأ في إنشاء المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def archive_chat_room(request, chat_id):
+    """أرشفة غرفة محادثة (إنهاء المحادثة)"""
+    try:
+        chat_room = ChatRoom.objects.get(id=chat_id)
+        
+        # التحقق من أن المستخدم مشارك في المحادثة
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مسموح لك بأرشفة هذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # أرشفة المحادثة
+        chat_room.archive()
+        
+        return Response({'message': 'تم أرشفة المحادثة بنجاح'})
+        
+    except ChatRoom.DoesNotExist:
+        return Response(
+            {'error': 'المحادثة غير موجودة'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error archiving chat room {chat_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في أرشفة المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_room_status(request, chat_id):
+    """الحصول على حالة غرفة محادثة محددة"""
+    try:
+        chat_room = ChatRoom.objects.select_related(
+            'breeding_request__requester',
+            'breeding_request__target_pet__owner'
+        ).get(id=chat_id)
+        
+        # التحقق من أن المستخدم مشارك في المحادثة
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مسموح لك بالوصول لهذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        participants = chat_room.get_participants()
+        return Response({
+            'id': chat_room.id,
+            'firebase_chat_id': chat_room.firebase_chat_id,
+            'is_active': chat_room.is_active,
+            'created_at': chat_room.created_at,
+            'updated_at': chat_room.updated_at,
+            'breeding_request_status': chat_room.breeding_request.status,
+            'participants_count': len(participants)
+        })
+        
+    except ChatRoom.DoesNotExist:
+        return Response(
+            {'error': 'المحادثة غير موجودة'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error fetching chat room status {chat_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل حالة المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def user_chat_status(request):
+    """إحصائيات المحادثات للمستخدم الحالي"""
+    try:
+        user = request.user
+        
+        # المحادثات النشطة
+        active_chats = ChatRoom.objects.filter(
+            Q(breeding_request__requester_id=user.id) |
+            Q(breeding_request__target_pet__owner_id=user.id),
+            is_active=True
+        ).count()
+        
+        # المحادثات المؤرشفة
+        archived_chats = ChatRoom.objects.filter(
+            Q(breeding_request__requester_id=user.id) |
+            Q(breeding_request__target_pet__owner_id=user.id),
+            is_active=False
+        ).count()
+        
+        # إجمالي المحادثات
+        total_chats = active_chats + archived_chats
+        
+        # طلبات التزاوج المقبولة بدون محادثة
+        pending_chat_creation = BreedingRequest.objects.filter(
+            Q(requester_id=user.id) | Q(target_pet__owner_id=user.id),
+            status='approved'
+        ).exclude(
+            id__in=ChatRoom.objects.values_list('breeding_request_id', flat=True)
+        ).count()
+        
+        return Response({
+            'active_chats': active_chats,
+            'archived_chats': archived_chats,
+            'total_chats': total_chats,
+            'pending_chat_creation': pending_chat_creation,
+            'user_id': user.id,
+            'user_name': f"{user.first_name} {user.last_name}"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching user chat status: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل إحصائيات المحادثات'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def archived_chat_rooms(request):
+    """قائمة المحادثات المؤرشفة للمستخدم الحالي"""
+    try:
+        # الحصول على جميع المحادثات المؤرشفة للمستخدم
+        user_archived_chats = ChatRoom.objects.filter(
+            Q(breeding_request__requester_id=request.user.id) |
+            Q(breeding_request__target_pet__owner_id=request.user.id),
+            is_active=False
+        ).select_related(
+            'breeding_request__requester',
+            'breeding_request__target_pet__owner',
+            'breeding_request__target_pet'
+        ).order_by('-updated_at')
+        
+        serializer = ChatRoomListSerializer(
+            user_archived_chats, 
+            many=True, 
+            context={'request': request}
+        )
+        
+        return Response({
+            'results': serializer.data,
+            'count': user_archived_chats.count()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error fetching archived chat rooms: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل المحادثات المؤرشفة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_room_context(request, chat_id):
+    """الحصول على السياق الكامل لمحادثة محددة"""
+    try:
+        chat_room = ChatRoom.objects.select_related(
+            'breeding_request__requester',
+            'breeding_request__target_pet__owner',
+            'breeding_request__target_pet'
+        ).get(id=chat_id)
+        
+        # التحقق من أن المستخدم مشارك في المحادثة
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مسموح لك بالوصول لهذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # إرجاع السياق الكامل للمحادثة
+        context_serializer = ChatContextSerializer(chat_room, context={'request': request})
+        return Response(context_serializer.data)
+        
+    except ChatRoom.DoesNotExist:
+        return Response(
+            {'error': 'المحادثة غير موجودة'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error fetching chat room context {chat_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل سياق المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def reactivate_chat_room(request, chat_id):
+    """إعادة تفعيل غرفة محادثة مؤرشفة"""
+    try:
+        chat_room = ChatRoom.objects.get(id=chat_id)
+        
+        # التحقق من أن المستخدم مشارك في المحادثة
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مسموح لك بإعادة تفعيل هذه المحادثة'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # التحقق من أن المحادثة مؤرشفة
+        if chat_room.is_active:
+            return Response(
+                {'error': 'المحادثة نشطة بالفعل'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # إعادة تفعيل المحادثة
+        chat_room.reactivate()
+        
+        return Response({
+            'message': 'تم إعادة تفعيل المحادثة بنجاح',
+            'chat_room': ChatRoomSerializer(chat_room, context={'request': request}).data
+        })
+        
+    except ChatRoom.DoesNotExist:
+        return Response(
+            {'error': 'المحادثة غير موجودة'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error reactivating chat room {chat_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في إعادة تفعيل المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Allow any user temporarily for testing
+def upload_chat_image(request):
+    """رفع صورة للمحادثة"""
+    try:
+        # Log request details for debugging
+        logger.info(f"Upload request from user: {getattr(request, 'user', 'Anonymous')}")
+        logger.info(f"Request headers: {dict(request.headers)}")
+        logger.info(f"Request FILES: {list(request.FILES.keys())}")
+        
+        if 'image' not in request.FILES:
+            logger.warning("No image file in request")
+            return Response(
+                {'error': 'لم يتم إرسال صورة'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        image_file = request.FILES['image']
+        logger.info(f"Image file: {image_file.name}, size: {image_file.size}, type: {image_file.content_type}")
+        
+        # التحقق من نوع الملف
+        if not image_file.content_type.startswith('image/'):
+            logger.warning(f"Invalid file type: {image_file.content_type}")
+            return Response(
+                {'error': 'يجب أن يكون الملف صورة'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # التحقق من حجم الملف (5MB max)
+        if image_file.size > 5 * 1024 * 1024:
+            logger.warning(f"File too large: {image_file.size} bytes")
+            return Response(
+                {'error': 'حجم الصورة يجب أن يكون أقل من 5 ميجابايت'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # حفظ الصورة
+        import os
+        from django.conf import settings
+        
+        # إنشاء مجلد للصور إذا لم يكن موجود
+        upload_dir = os.path.join(settings.MEDIA_ROOT, 'chat_images')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # إنشاء اسم فريد للملف
+        import uuid
+        file_extension = os.path.splitext(image_file.name)[1]
+        unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+        
+        # حفظ الملف
+        file_path = os.path.join(upload_dir, unique_filename)
+        with open(file_path, 'wb+') as destination:
+            for chunk in image_file.chunks():
+                destination.write(chunk)
+        
+        logger.info(f"Image saved successfully: {file_path}")
+        
+        # إرجاع URL الصورة (relative path فقط)
+        image_url = f"/media/chat_images/{unique_filename}"
+        
+        logger.info(f"Image URL generated: {image_url}")
+        
+        return Response({
+            'success': True,
+            'image_url': image_url,
+            'filename': unique_filename
+        })
+        
+    except Exception as e:
+        logger.error(f"Error uploading chat image: {str(e)}")
+        return Response(
+            {'error': 'خطأ في رفع الصورة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+# Adoption Views
+class AdoptionRequestListCreateView(generics.ListCreateAPIView):
+    """قائمة وإنشاء طلبات التبني"""
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """الحصول على طلبات التبني للمستخدم الحالي"""
+        return AdoptionRequest.objects.filter(adopter=self.request.user)
+    
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return AdoptionRequestCreateSerializer
+        return AdoptionRequestListSerializer
+
+
+class AdoptionRequestDetailView(generics.RetrieveAPIView):
+    """تفاصيل طلب التبني"""
+    serializer_class = AdoptionRequestSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return AdoptionRequest.objects.filter(adopter=self.request.user)
+
+
+class MyAdoptionRequestsView(generics.ListAPIView):
+    """طلبات التبني المرسلة من المستخدم"""
+    serializer_class = AdoptionRequestListSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return AdoptionRequest.objects.filter(adopter=self.request.user)
+
+
+class ReceivedAdoptionRequestsView(generics.ListAPIView):
+    """طلبات التبني المستقبلة لحيوانات المستخدم"""
+    serializer_class = AdoptionRequestListSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return AdoptionRequest.objects.filter(pet__owner=self.request.user)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def respond_to_adoption_request(request, request_id):
+    """الرد على طلب التبني (قبول/رفض/إكمال)"""
+    try:
+        adoption_request = AdoptionRequest.objects.get(
+            id=request_id,
+            pet__owner=request.user
+        )
+    except AdoptionRequest.DoesNotExist:
+        return Response(
+            {'error': 'طلب التبني غير موجود'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    serializer = AdoptionRequestResponseSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    action = serializer.validated_data['action']
+    notes = serializer.validated_data.get('notes', '')
+    admin_notes = serializer.validated_data.get('admin_notes', '')
+    
+    # تحديث الملاحظات
+    if notes:
+        adoption_request.notes = notes
+    if admin_notes:
+        adoption_request.admin_notes = admin_notes
+    
+    # تنفيذ الإجراء المطلوب
+    if action == 'approve':
+        if adoption_request.can_be_approved:
+            adoption_request.approve()
+            message = 'تم قبول طلب التبني'
+            
+            # إنشاء غرفة محادثة عند قبول طلب التبني
+            try:
+                from .models import ChatRoom
+                # التحقق من عدم وجود غرفة محادثة مسبقة
+                existing_chat = ChatRoom.objects.filter(
+                    breeding_request__isnull=True,
+                    adoption_request=adoption_request
+                ).first()
+                
+                if not existing_chat:
+                    # إنشاء غرفة محادثة جديدة
+                    chat_room = ChatRoom.objects.create(
+                        firebase_chat_id=f"adoption_{adoption_request.id}_{int(time.time())}",
+                        adoption_request=adoption_request,
+                        is_active=True
+                    )
+                    message += ' - تم إنشاء غرفة محادثة للتواصل'
+            except Exception as e:
+                # في حالة حدوث خطأ في إنشاء المحادثة، لا نوقف العملية
+                print(f"Error creating chat room: {e}")
+                message += ' - حدث خطأ في إنشاء غرفة المحادثة'
+        else:
+            return Response(
+                {'error': 'لا يمكن قبول هذا الطلب'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    elif action == 'reject':
+        adoption_request.reject()
+        message = 'تم رفض طلب التبني'
+    elif action == 'complete':
+        if adoption_request.can_be_completed:
+            adoption_request.complete()
+            message = 'تم إكمال عملية التبني'
+        else:
+            return Response(
+                {'error': 'لا يمكن إكمال هذا الطلب'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    adoption_request.save()
+    
+    return Response({
+        'message': message,
+        'adoption_request': AdoptionRequestSerializer(adoption_request).data
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def adoption_pets(request):
+    """الحيوانات المتاحة للتبني"""
+    pets = Pet.objects.filter(status='available_for_adoption')
+    
+    # تطبيق الفلاتر
+    pet_type = request.GET.get('pet_type')
+    if pet_type:
+        pets = pets.filter(pet_type=pet_type)
+    
+    breed_id = request.GET.get('breed')
+    if breed_id:
+        pets = pets.filter(breed_id=breed_id)
+    
+    gender = request.GET.get('gender')
+    if gender:
+        pets = pets.filter(gender=gender)
+    
+    location = request.GET.get('location')
+    if location:
+        pets = pets.filter(location__icontains=location)
+    
+    # الحصول على موقع المستخدم للترتيب حسب المسافة
+    user_lat = request.GET.get('user_lat')
+    user_lng = request.GET.get('user_lng')
+    
+    print(f"🔍 Django: user_lat={user_lat}, user_lng={user_lng}")
+    
+    # ترتيب النتائج
+    if user_lat and user_lng:
+        try:
+            user_lat = float(user_lat)
+            user_lng = float(user_lng)
+            # ترتيب حسب المسافة (الأقرب أولاً)
+            pets = sorted(pets, key=lambda pet: pet.calculate_distance(user_lat, user_lng) or float('inf'))
+            print(f"🔍 Django: Sorted {len(pets)} pets by distance")
+        except (ValueError, TypeError) as e:
+            print(f"❌ Django: Error sorting by distance: {e}")
+            pass
+    
+    # ترتيب افتراضي: الأحدث أولاً
+    if not (user_lat and user_lng):
+        pets = pets.order_by('-created_at')
+        print(f"🔍 Django: Sorted {len(pets)} pets by creation date")
+    
+    # إضافة موقع المستخدم للـ context
+    context = {'request': request}
+    
+    # تمرير موقع المستخدم مباشرة للـ context
+    if user_lat and user_lng:
+        context['user_lat'] = user_lat
+        context['user_lng'] = user_lng
+        print(f"🔍 Django: Added location to context: lat={user_lat}, lng={user_lng}")
+    
+    serializer = PetListSerializer(pets, many=True, context=context)
+    data = serializer.data
+    
+    # طباعة بيانات المسافة للتحقق
+    if user_lat and user_lng:
+        print(f"🔍 Django: First pet distance: {data[0].get('distance_display') if data else 'No pets'}")
+    
+    return Response(data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def adoption_stats(request):
+    """إحصائيات التبني"""
+    total_available = Pet.objects.filter(status='available_for_adoption').count()
+    total_pending = Pet.objects.filter(status='adoption_pending').count()
+    total_adopted = Pet.objects.filter(status='adopted').count()
+    
+    my_requests = AdoptionRequest.objects.filter(adopter=request.user).count()
+    my_pending_requests = AdoptionRequest.objects.filter(
+        adopter=request.user,
+        status='pending'
+    ).count()
+    
+    received_requests = AdoptionRequest.objects.filter(
+        pet__owner=request.user
+    ).count()
+    
+    return Response({
+        'total_available_for_adoption': total_available,
+        'total_adoption_pending': total_pending,
+        'total_adopted': total_adopted,
+        'my_adoption_requests': my_requests,
+        'my_pending_requests': my_pending_requests,
+        'received_requests': received_requests
+    })

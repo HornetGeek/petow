@@ -1,0 +1,32 @@
+# Django Core
+Django==4.2.17
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+django-filter==23.2
+django-extensions==3.2.3
+
+# Authentication & Security
+django-allauth==0.54.0
+dj-rest-auth==5.0.2
+PyJWT==2.9.0
+cryptography==45.0.6
+
+# Database
+psycopg2-binary==2.9.7
+
+# Image Processing
+Pillow==9.5.0
+
+# HTTP & API
+requests==2.32.4
+urllib3==2.2.3
+
+# Development & Debug
+python-decouple==3.8
+
+# Production
+gunicorn==21.2.0
+whitenoise==6.5.0
+
+# Additional Utilities
+defusedxml==0.7.1 
