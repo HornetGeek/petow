@@ -324,6 +324,24 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🚀 Quick Start
 
+### Option 1: Docker (Recommended) 🐳
+
+```bash
+# Clone the project
+git clone https://github.com/HornetGeek/petow.git
+cd petow
+
+# Start with Docker
+./scripts/start.sh
+
+# Or manually
+docker-compose up --build -d
+```
+
+**Visit**: http://localhost (Frontend + Backend via Nginx)
+
+### Option 2: Manual Setup
+
 ```bash
 # Clone and setup
 git clone https://github.com/HornetGeek/petow.git
@@ -342,4 +360,26 @@ npm install
 npm run dev
 ```
 
-**Visit**: http://localhost:3000 (Frontend) | http://localhost:8000 (Backend) 
+**Visit**: http://localhost:3000 (Frontend) | http://localhost:8000 (Backend)
+
+## 🐳 Docker Commands
+
+```bash
+# Start services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+
+# Restart specific service
+docker-compose restart backend
+
+# Rebuild and start
+docker-compose up --build -d
+
+# Production mode
+docker-compose -f docker-compose.prod.yml up -d
+``` 
