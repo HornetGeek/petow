@@ -7,7 +7,7 @@ This setup uses Cloudflare as a reverse proxy to provide HTTPS for your backend 
 ```
 Frontend (Vercel): https://petow.app ✅
 API Subdomain: https://api.petow.app ✅ (Cloudflare proxy)
-Backend Server: http://13.60.199.22:8000 ✅ (internal only)
+Backend Server: http://13.60.199.22:8080 ✅ (internal only)
 ```
 
 ## What We've Configured
@@ -15,7 +15,7 @@ Backend Server: http://13.60.199.22:8000 ✅ (internal only)
 ### 1. Updated Nginx Configuration
 - **Main domain**: `petow.app` → serves frontend (handled by Vercel)
 - **API subdomain**: `api.petow.app` → serves backend API
-- **Port 80**: Nginx listens on standard HTTP port
+- **Port 8080**: Nginx listens on port 8080 (avoids privileged port issues)
 - **Backend forwarding**: All API requests forwarded to `backend:8000`
 
 ### 2. Updated Docker Compose
