@@ -11,8 +11,6 @@ services:
       POSTGRES_PASSWORD: petmatch_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     networks:
       - petmatch_network
     restart: unless-stopped
@@ -21,8 +19,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: petmatch_redis
-    ports:
-      - "6379:6379"
     networks:
       - petmatch_network
     restart: unless-stopped
@@ -38,17 +34,12 @@ services:
       - SECRET_KEY=your-secret-key-here
       - DATABASE_URL=postgresql://petmatch_user:petmatch_password@db:5432/petmatch
       - REDIS_URL=redis://redis:6379
-      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,13.60.199.22
+      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0,your-ec2-ip
       - CORS_ALLOWED_ORIGINS=https://your-domain.vercel.app,http://localhost:3000
     volumes:
       - ./patmatch:/app
       - static_files:/app/staticfiles
       - media_files:/app/media
-    ports:
-      - "8000:8000"
-    depends_on:
-      - db
-      - redis
     networks:
       - petmatch_network
     restart: unless-stopped
@@ -56,6 +47,24 @@ services:
       sh -c "python manage.py migrate &&
               python manage.py collectstatic --noinput &&
               gunicorn --bind 0.0.0.0:8000 --workers 3 patmatch_backend.wsgi:application"
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: petmatch_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.backend.conf:/etc/nginx/nginx.conf
+      - static_files:/var/www/static
+      - media_files:/var/www/media
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - backend
+    networks:
+      - petmatch_network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
