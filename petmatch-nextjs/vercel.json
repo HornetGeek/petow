@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "http://your-ec2-ip:8000/api/$1"
+    },
+    {
+      "src": "/admin/(.*)",
+      "dest": "http://your-ec2-ip:8000/admin/$1"
+    },
+    {
+      "src": "/media/(.*)",
+      "dest": "http://your-ec2-ip:8000/media/$1"
+    },
+    {
+      "src": "/static/(.*)",
+      "dest": "http://your-ec2-ip:8000/static/$1"
+    }
+  ],
+  "env": {
+    "NEXT_PUBLIC_API_URL": "http://your-ec2-ip:8000/api"
+  }
+} 

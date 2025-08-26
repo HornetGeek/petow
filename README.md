@@ -324,14 +324,36 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🚀 Quick Start
 
-### Option 1: Docker (Recommended) 🐳
+### Option 1: Hybrid Deployment (Recommended) 🚀
 
+#### Backend on EC2:
 ```bash
 # Clone the project
 git clone https://github.com/HornetGeek/petow.git
 cd petow
 
-# Start with Docker
+# Start Backend only
+./scripts/start-backend.sh
+
+# Or manually
+docker-compose -f docker-compose.backend.yml up --build -d
+```
+
+#### Frontend on Vercel:
+1. **Fork/Clone** repository
+2. **Connect** to Vercel
+3. **Update** `vercel.json` with your EC2 IP
+4. **Deploy** automatically
+
+**Visit**: 
+- **Frontend**: https://your-domain.vercel.app
+- **Backend API**: http://your-ec2-ip:8000/api
+- **Admin Panel**: http://your-ec2-ip:8000/admin
+
+### Option 2: Full Docker Deployment 🐳
+
+```bash
+# Start all services
 ./scripts/start.sh
 
 # Or manually
