@@ -1,0 +1,20 @@
+# Ignore Backend files
+patmatch/
+docker-compose*.yml
+scripts/
+nginx/
+*.py
+*.pyc
+__pycache__/
+requirements.txt
+manage.py
+
+# Keep only Frontend
+!petmatch-nextjs/
+!petmatch-nextjs/src/
+!petmatch-nextjs/public/
+!petmatch-nextjs/package.json
+!petmatch-nextjs/next.config.ts
+!petmatch-nextjs/tsconfig.json
+!petmatch-nextjs/tailwind.config.js
+!petmatch-nextjs/postcss.config.mjs 
