@@ -163,9 +163,19 @@ CORS_ALLOWED_ORIGINS = [
     "https://api.petow.app",
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True  # For development - remove in production
+# Get CORS origins from environment variable if set
+if os.environ.get('CORS_ALLOWED_ORIGINS'):
+    cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS').split(',')
+    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins]
+    print(f"DEBUG: CORS_ALLOWED_ORIGINS set from environment: {CORS_ALLOWED_ORIGINS}")
+else:
+    print(f"DEBUG: Using default CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
 
+# Ensure CORS is properly configured
 CORS_ALLOW_CREDENTIALS = True
+
+# Additional CORS settings for better compatibility
+CORS_ALLOW_ALL_ORIGINS = False  # Explicitly disable this to avoid conflicts
 
 # Allow Authorization header
 CORS_ALLOW_HEADERS = [
