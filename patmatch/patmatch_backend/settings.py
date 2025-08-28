@@ -158,9 +158,24 @@ REST_FRAMEWORK = {
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://petow.app",
+    "https://www.petow.app",
+    "https://api.petow.app",
 ]
 
+# Get CORS origins from environment variable if set
+if os.environ.get('CORS_ALLOWED_ORIGINS'):
+    cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS').split(',')
+    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins]
+    print(f"DEBUG: CORS_ALLOWED_ORIGINS set from environment: {CORS_ALLOWED_ORIGINS}")
+else:
+    print(f"DEBUG: Using default CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
+
+# Ensure CORS is properly configured
 CORS_ALLOW_CREDENTIALS = True
+
+# Additional CORS settings for better compatibility
+CORS_ALLOW_ALL_ORIGINS = False  # Explicitly disable this to avoid conflicts
 
 # Allow Authorization header
 CORS_ALLOW_HEADERS = [
@@ -173,6 +188,21 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+]
+
+# Additional CORS settings
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+CORS_EXPOSE_HEADERS = [
+    'content-length',
+    'content-range',
 ]
 
 # Django Sites
