@@ -1,9 +1,10 @@
 from rest_framework import generics, status, filters
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
+from django.db import transaction
 from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, 
@@ -1257,3 +1258,100 @@ def adoption_stats(request):
         'my_pending_requests': my_pending_requests,
         'received_requests': received_requests
     })
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAdminUser])
+def delete_cats(request):
+    """حذف جميع القطط (للمشرفين فقط)"""
+    try:
+        # البحث عن جميع القطط
+        cats = Pet.objects.filter(pet_type='cats')
+        cat_count = cats.count()
+        
+        if cat_count == 0:
+            return Response({
+                'message': 'لا توجد قطط في قاعدة البيانات',
+                'deleted_count': 0
+            }, status=status.HTTP_200_OK)
+        
+        # حذف القطط
+        with transaction.atomic():
+            deleted_count = cats.delete()[0]
+        
+        return Response({
+            'message': f'تم حذف {deleted_count} قط بنجاح',
+            'deleted_count': deleted_count
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'حدث خطأ أثناء حذف القطط: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAdminUser])
+def delete_cats_by_breed(request, breed_name):
+    """حذف القطط حسب السلالة (للمشرفين فقط)"""
+    try:
+        # البحث عن السلالة
+        breed = Breed.objects.filter(name__icontains=breed_name, pet_type='cats').first()
+        
+        if not breed:
+            return Response({
+                'error': f'لم يتم العثور على سلالة القطط: {breed_name}'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # البحث عن القطط من هذه السلالة
+        cats = Pet.objects.filter(breed=breed, pet_type='cats')
+        cat_count = cats.count()
+        
+        if cat_count == 0:
+            return Response({
+                'message': f'لا توجد قطط من سلالة {breed.name}',
+                'deleted_count': 0
+            }, status=status.HTTP_200_OK)
+        
+        # حذف القطط
+        with transaction.atomic():
+            deleted_count = cats.delete()[0]
+        
+        return Response({
+            'message': f'تم حذف {deleted_count} قط من سلالة {breed.name} بنجاح',
+            'deleted_count': deleted_count
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'حدث خطأ أثناء حذف القطط: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def cats_summary(request):
+    """ملخص القطط في قاعدة البيانات (للمشرفين فقط)"""
+    try:
+        cats = Pet.objects.filter(pet_type='cats').select_related('breed', 'owner')
+        cat_count = cats.count()
+        
+        cats_data = []
+        for cat in cats:
+            cats_data.append({
+                'id': cat.id,
+                'name': cat.name,
+                'breed': cat.breed.name if cat.breed else 'بدون سلالة',
+                'owner': cat.owner.username if cat.owner else 'غير محدد',
+                'created_at': cat.created_at
+            })
+        
+        return Response({
+            'total_cats': cat_count,
+            'cats': cats_data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'حدث خطأ أثناء جلب ملخص القطط: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

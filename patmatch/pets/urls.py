@@ -37,6 +37,11 @@ urlpatterns = [
     # إحصائيات
     path('stats/', views.pet_stats, name='pet-stats'),
     
+    # إدارة القطط (للمشرفين فقط)
+    path('admin/cats/', views.cats_summary, name='cats-summary'),
+    path('admin/cats/delete/', views.delete_cats, name='delete-cats'),
+    path('admin/cats/delete/<str:breed_name>/', views.delete_cats_by_breed, name='delete-cats-by-breed'),
+    
     # Chat URLs
     path('chat/rooms/', views.chat_rooms, name='chat-rooms'),
     path('chat/rooms/archived/', views.archived_chat_rooms, name='archived-chat-rooms'),

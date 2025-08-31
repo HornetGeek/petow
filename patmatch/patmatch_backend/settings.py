@@ -210,3 +210,25 @@ SITE_ID = 1
 
 # Custom User Model
 AUTH_USER_MODEL = 'accounts.User'
+
+# CSRF Settings
+CSRF_TRUSTED_ORIGINS = [
+    "https://petow.app",
+    "https://www.petow.app",
+    "https://api.petow.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# Get CSRF trusted origins from environment variable if set
+if os.environ.get('CSRF_TRUSTED_ORIGINS'):
+    csrf_origins = os.environ.get('CSRF_TRUSTED_ORIGINS').split(',')
+    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins]
+    print(f"DEBUG: CSRF_TRUSTED_ORIGINS set from environment: {CSRF_TRUSTED_ORIGINS}")
+else:
+    print(f"DEBUG: Using default CSRF_TRUSTED_ORIGINS: {CSRF_TRUSTED_ORIGINS}")
+
+# Additional CSRF settings
+CSRF_COOKIE_SECURE = True  # Only send cookie over HTTPS
+CSRF_COOKIE_SAMESITE = 'Lax'  # CSRF cookie SameSite attribute
+CSRF_USE_SESSIONS = False  # Store CSRF token in cookie, not session
