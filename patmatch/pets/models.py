@@ -8,8 +8,6 @@ class Breed(models.Model):
     PET_TYPE_CHOICES = [
         ('cats', 'قطط'),
         ('dogs', 'كلاب'),
-        ('birds', 'طيور'),
-        ('fish', 'أسماك'),
     ]
     
     name = models.CharField(max_length=100)
@@ -50,8 +48,6 @@ class Pet(models.Model):
     PET_TYPE_CHOICES = [
         ('cats', 'قطط'),
         ('dogs', 'كلاب'),
-        ('birds', 'طيور'),
-        ('other', 'أخرى'),
     ]
     
     owner = models.ForeignKey(
@@ -80,6 +76,20 @@ class Pet(models.Model):
     is_trained = models.BooleanField(default=False, help_text="مدرب أم لا")
     good_with_kids = models.BooleanField(default=True, help_text="مناسب للأطفال")
     good_with_pets = models.BooleanField(default=True, help_text="مناسب مع الحيوانات الأخرى")
+    
+    # تفضيلات الأليف
+    HOSTING_PREFERENCE_CHOICES = [
+        ('my_place', 'عندي (في منزلي/حديقتي)'),
+        ('other_place', 'عند صاحب الحيوان الآخر'),
+        ('both', 'كلاهما مناسب'),
+        ('flexible', 'مرن'),
+    ]
+    hosting_preference = models.CharField(
+        max_length=20, 
+        choices=HOSTING_PREFERENCE_CHOICES, 
+        default='flexible',
+        help_text="تفضيل الأليف"
+    )
     
     # صور الحيوان
     main_image = models.ImageField(upload_to='pets/main/')
@@ -299,7 +309,7 @@ class BreedingRequest(models.Model):
     # تفاصيل المقابلة
     message = models.TextField(blank=True, null=True, help_text="رسالة من الطالب")
     meeting_date = models.DateField(help_text="تاريخ المقابلة المقترح")
-    veterinary_clinic = models.ForeignKey(VeterinaryClinic, on_delete=models.CASCADE, help_text="العيادة البيطرية للمقابلة")
+    veterinary_clinic = models.ForeignKey(VeterinaryClinic, on_delete=models.CASCADE, blank=True, null=True, help_text="العيادة البيطرية للمقابلة (اختياري)")
     contact_phone = models.CharField(max_length=20, help_text="رقم الهاتف للتواصل")
     
     # الاتفاق المالي
@@ -723,9 +733,23 @@ class AdoptionRequest(models.Model):
     adopter_age = models.PositiveIntegerField(verbose_name="العمر")
     adopter_occupation = models.CharField(max_length=100, verbose_name="المهنة")
     adopter_address = models.TextField(verbose_name="العنوان التفصيلي")
-    adopter_id_number = models.CharField(max_length=20, verbose_name="رقم الهوية")
+    # تم إزالة حقل رقم الهوية
     
-
+    # إحداثيات الموقع
+    adopter_latitude = models.DecimalField(
+        max_digits=10, 
+        decimal_places=8, 
+        blank=True, 
+        null=True, 
+        verbose_name="خط العرض"
+    )
+    adopter_longitude = models.DecimalField(
+        max_digits=11, 
+        decimal_places=8, 
+        blank=True, 
+        null=True, 
+        verbose_name="خط الطول"
+    )
     
     # معلومات السكن المبسطة
     housing_type = models.CharField(max_length=50, default='apartment', verbose_name="نوع السكن")

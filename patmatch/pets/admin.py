@@ -49,6 +49,21 @@ class BreedingRequestAdmin(admin.ModelAdmin):
     list_filter = ['status', 'created_at']
     search_fields = ['target_pet__name', 'requester_pet__name', 'requester__email', 'receiver__email']
     readonly_fields = ['created_at', 'updated_at']
+    
+    fieldsets = (
+        ('معلومات أساسية', {
+            'fields': ('target_pet', 'requester_pet', 'requester', 'receiver', 'status')
+        }),
+        ('تفاصيل المقابلة', {
+            'fields': ('meeting_date', 'contact_phone', 'veterinary_clinic', 'message')
+        }),
+        ('الرد والملاحظات', {
+            'fields': ('response_message',)
+        }),
+        ('التواريخ', {
+            'fields': ('created_at', 'updated_at', 'completed_at')
+        }),
+    )
 
 @admin.register(VeterinaryClinic)
 class VeterinaryClinicAdmin(admin.ModelAdmin):
@@ -106,7 +121,7 @@ class AdoptionRequestAdmin(admin.ModelAdmin):
             'fields': ('adopter', 'pet', 'status')
         }),
         ('معلومات طالب التبني', {
-            'fields': ('adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age', 'adopter_occupation', 'adopter_address', 'adopter_id_number')
+            'fields': ('adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age', 'adopter_occupation', 'adopter_address', 'adopter_latitude', 'adopter_longitude')
         }),
         ('معلومات السكن', {
             'fields': ('housing_type', 'family_members')

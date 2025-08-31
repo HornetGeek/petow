@@ -61,7 +61,7 @@ class PetSerializer(serializers.ModelSerializer):
             'weight', 'description', 'health_status', 'is_fertile', 
             'breeding_history', 'last_breeding_date', 'number_of_offspring',
             'temperament', 'is_trained', 'good_with_kids', 'good_with_pets',
-            'main_image', 'image_2', 'image_3', 'image_4', 'additional_images',
+            'hosting_preference', 'main_image', 'image_2', 'image_3', 'image_4', 'additional_images',
             'vaccination_certificate', 'health_certificate', 'disease_free_certificate', 'additional_certificate',
             'has_health_certificates', 'status', 'status_display', 'location', 
             'latitude', 'longitude', 'is_free', 'price_display', 'owner_name', 'owner_email', 
@@ -153,15 +153,11 @@ class PetListSerializer(serializers.ModelSerializer):
         user_lat = self.context.get('user_lat')
         user_lng = self.context.get('user_lng')
         
-        print(f"🔍 Serializer: user_lat={user_lat}, user_lng={user_lng}")
-        
         if user_lat and user_lng:
             try:
                 distance_display = obj.get_distance_display(float(user_lat), float(user_lng))
-                print(f"🔍 Serializer: Pet {obj.name} distance: {distance_display}")
                 return distance_display
             except (ValueError, TypeError) as e:
-                print(f"❌ Serializer: Error calculating distance: {e}")
                 return "الموقع غير محدد"
         else:
             print(f"❌ Serializer: No user coordinates in context")
@@ -192,7 +188,7 @@ class PetListSerializer(serializers.ModelSerializer):
             'age_display', 'gender', 'gender_display', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 
-            'is_fertile', 'has_health_certificates', 'created_at'
+            'is_fertile', 'has_health_certificates', 'hosting_preference', 'created_at'
         ]
 
 class BreedingRequestSerializer(serializers.ModelSerializer):
@@ -205,7 +201,7 @@ class BreedingRequestSerializer(serializers.ModelSerializer):
     receiver_name = serializers.CharField(source='receiver.get_full_name', read_only=True)
     
     # Clinic details
-    veterinary_clinic_details = VeterinaryClinicSerializer(source='veterinary_clinic', read_only=True)
+    veterinary_clinic_details = VeterinaryClinicSerializer(source='veterinary_clinic', read_only=True, required=False)
     
     # Status display
     status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -532,7 +528,7 @@ class AdoptionRequestSerializer(serializers.ModelSerializer):
             
             # معلومات أساسية
             'adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age',
-            'adopter_occupation', 'adopter_address', 'adopter_id_number',
+            'adopter_occupation', 'adopter_address', 'adopter_latitude', 'adopter_longitude',
             
             # معلومات السكن
             'housing_type', 'family_members',
@@ -567,7 +563,7 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
             'pet',
             # معلومات أساسية
             'adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age',
-            'adopter_occupation', 'adopter_address', 'adopter_id_number',
+            'adopter_occupation', 'adopter_address', 'adopter_latitude', 'adopter_longitude',
             
             # معلومات السكن
             'housing_type', 'family_members',

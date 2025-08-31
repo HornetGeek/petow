@@ -40,12 +40,26 @@ def create_notification(
 
 def notify_breeding_request_received(breeding_request):
     """إشعار باستلام طلب مقابلة جديد"""
+    receiver = breeding_request.receiver
     target_pet = breeding_request.target_pet
     requester_pet = breeding_request.requester_pet
-    receiver = breeding_request.receiver
     
-    title = f"طلب مقابلة جديد لـ {target_pet.name}"
-    message = f"تم استلام طلب مقابلة من {breeding_request.requester.get_full_name()} لحيوانك {target_pet.name} مع حيوانهم {requester_pet.name}"
+    title = f"طلب مقابلة جديد من {breeding_request.requester.get_full_name()}"
+    message = f"يريد {breeding_request.requester.get_full_name()} ترتيب مقابلة بين {requester_pet.name} و {target_pet.name}"
+    
+    # إضافة معلومات العيادة البيطرية إذا كانت متوفرة
+    extra_data = {
+        'requester_name': breeding_request.requester.get_full_name(),
+        'requester_pet_name': requester_pet.name,
+        'meeting_date': breeding_request.meeting_date.isoformat(),
+    }
+    
+    # إضافة معلومات العيادة البيطرية فقط إذا كانت متوفرة
+    if breeding_request.veterinary_clinic:
+        extra_data['clinic_name'] = breeding_request.veterinary_clinic.name
+        message += f" في {breeding_request.veterinary_clinic.name}"
+    else:
+        message += " (مكان المقابلة سيتم تحديده لاحقاً)"
     
     return create_notification(
         user=receiver,
@@ -54,12 +68,7 @@ def notify_breeding_request_received(breeding_request):
         message=message,
         related_pet=target_pet,
         related_breeding_request=breeding_request,
-        extra_data={
-            'requester_name': breeding_request.requester.get_full_name(),
-            'requester_pet_name': requester_pet.name,
-            'meeting_date': breeding_request.meeting_date.isoformat(),
-            'clinic_name': breeding_request.veterinary_clinic.name
-        }
+        extra_data=extra_data
     )
 
 def notify_breeding_request_approved(breeding_request):
@@ -67,8 +76,23 @@ def notify_breeding_request_approved(breeding_request):
     requester = breeding_request.requester
     target_pet = breeding_request.target_pet
     
-    title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
-    message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في {breeding_request.veterinary_clinic.name}"
+    # تخصيص الرسالة بناءً على وجود العيادة البيطرية
+    if breeding_request.veterinary_clinic:
+        title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
+        message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في {breeding_request.veterinary_clinic.name}"
+        
+        extra_data = {
+            'clinic_name': breeding_request.veterinary_clinic.name,
+            'clinic_phone': breeding_request.veterinary_clinic.phone,
+            'meeting_date': breeding_request.meeting_date.isoformat()
+        }
+    else:
+        title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
+        message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في المكان المناسب لكما."
+        
+        extra_data = {
+            'meeting_date': breeding_request.meeting_date.isoformat()
+        }
     
     return create_notification(
         user=requester,
@@ -77,11 +101,7 @@ def notify_breeding_request_approved(breeding_request):
         message=message,
         related_pet=target_pet,
         related_breeding_request=breeding_request,
-        extra_data={
-            'clinic_name': breeding_request.veterinary_clinic.name,
-            'clinic_phone': breeding_request.veterinary_clinic.phone,
-            'meeting_date': breeding_request.meeting_date.isoformat()
-        }
+        extra_data=extra_data
     )
 
 def notify_breeding_request_rejected(breeding_request):

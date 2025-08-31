@@ -115,6 +115,27 @@ class PetListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(id__in=favorite_pets)
         
         return queryset
+    
+    def get_serializer_context(self):
+        """تمرير context إضافي للسيريلايزر"""
+        context = super().get_serializer_context()
+        
+        # إضافة إحداثيات المستخدم من query parameters
+        user_lat = self.request.query_params.get('user_lat')
+        user_lng = self.request.query_params.get('user_lng')
+        
+        # محاولة الحصول من معاملات أخرى إذا لم تكن موجودة
+        if not user_lat:
+            user_lat = self.request.query_params.get('lat') or self.request.query_params.get('user_latitude') or self.request.query_params.get('latitude') or self.request.query_params.get('current_lat')
+        
+        if not user_lng:
+            user_lng = self.request.query_params.get('lng') or self.request.query_params.get('user_longitude') or self.request.query_params.get('longitude') or self.request.query_params.get('current_lng')
+        
+        if user_lat and user_lng:
+            context['user_lat'] = user_lat
+            context['user_lng'] = user_lng
+        
+        return context
 
 class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
     """تفاصيل الحيوان"""
