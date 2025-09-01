@@ -60,19 +60,14 @@ class Pet(models.Model):
     breed = models.ForeignKey(Breed, on_delete=models.CASCADE)
     age_months = models.PositiveIntegerField(help_text="العمر بالشهور")
     gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
-    color = models.CharField(max_length=50)
-    weight = models.DecimalField(max_digits=5, decimal_places=2, help_text="الوزن بالكيلو")
     description = models.TextField()
-    health_status = models.TextField(help_text="الحالة الصحية والتطعيمات")
     
     # معلومات التزاوج
-    is_fertile = models.BooleanField(default=True, help_text="قادر على التزاوج")
     breeding_history = models.TextField(blank=True, null=True, help_text="تاريخ التزاوج السابق")
     last_breeding_date = models.DateField(blank=True, null=True, help_text="تاريخ آخر تزاوج")
     number_of_offspring = models.PositiveIntegerField(default=0, help_text="عدد النتاج السابق")
     
     # خصائص سلوكية
-    temperament = models.CharField(max_length=100, help_text="المزاج والطباع")
     is_trained = models.BooleanField(default=False, help_text="مدرب أم لا")
     good_with_kids = models.BooleanField(default=True, help_text="مناسب للأطفال")
     good_with_pets = models.BooleanField(default=True, help_text="مناسب مع الحيوانات الأخرى")
@@ -124,50 +119,32 @@ class Pet(models.Model):
     )
     
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='available')
-    location = models.CharField(max_length=200, help_text="الموقع")
+    location = models.CharField(max_length=200, help_text="الموقع (المدينة/الحي)")
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
     
-    # إحداثيات الموقع
-    latitude = models.DecimalField(
-        max_digits=10, 
-        decimal_places=8, 
-        blank=True, 
-        null=True, 
-        help_text="خط العرض"
-    )
-    longitude = models.DecimalField(
-        max_digits=11, 
-        decimal_places=8, 
-        blank=True, 
-        null=True, 
-        help_text="خط الطول"
-    )
+    # معلومات التبني
+    is_free = models.BooleanField(default=True, help_text="هل التبني مجاني؟")
     
-    # معلومات التكلفة
-    # التزاوج متاح للجميع مجاناً
-    is_free = models.BooleanField(default=True, help_text="متاح للتزاوج")
-    
+    # معلومات التزاوج
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     def __str__(self):
-        return f"{self.name} - {self.breed.name}"
-    
-    @property
-    def age_years(self):
-        """حساب العمر بالسنوات"""
-        return self.age_months // 12
+        return f"{self.name} ({self.get_pet_type_display()})"
     
     @property
     def age_display(self):
-        """عرض العمر بشكل مفهوم"""
-        years = self.age_years
-        months = self.age_months % 12
-        
-        if years > 0:
-            if months > 0:
+        """عرض العمر بتنسيق مقروء"""
+        if self.age_months < 12:
+            return f"{self.age_months} شهر"
+        else:
+            years = self.age_months // 12
+            months = self.age_months % 12
+            if months == 0:
+                return f"{years} سنة"
+            else:
                 return f"{years} سنة و {months} شهر"
-            return f"{years} سنة"
-        return f"{months} شهر"
     
     @property
     def pet_type_display(self):
@@ -189,8 +166,13 @@ class Pet(models.Model):
     
     @property
     def price_display(self):
-        """عرض حالة التزاوج"""
-        return "متاح للتزاوج" if self.is_free else "غير متاح"
+        """عرض السعر بتنسيق مقروء"""
+        if self.is_free:
+            return "مجاني"
+        elif self.adoption_fee:
+            return f"{self.adoption_fee} ريال"
+        else:
+            return "غير محدد"
     
     @property
     def has_health_certificates(self):

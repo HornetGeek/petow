@@ -76,7 +76,7 @@ class PetListCreateView(generics.ListCreateAPIView):
             print(f"❌ Django: Error type: {type(e)}")
             raise
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['pet_type', 'gender', 'status', 'is_fertile', 'breed']
+    filterset_fields = ['pet_type', 'gender', 'status', 'breed']
     search_fields = ['name', 'breed__name', 'location', 'description']
     ordering_fields = ['created_at', 'age_months', 'breeding_fee']
     ordering = ['-created_at']

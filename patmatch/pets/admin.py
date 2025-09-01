@@ -13,17 +13,17 @@ class PetImageInline(admin.TabularInline):
 @admin.register(Pet)
 class PetAdmin(admin.ModelAdmin):
     list_display = ['name', 'breed', 'pet_type', 'gender', 'age_display', 'status', 'location', 'has_health_certificates', 'owner']
-    list_filter = ['pet_type', 'gender', 'status', 'is_fertile', 'breed']
+    list_filter = ['pet_type', 'gender', 'status', 'breed']
     search_fields = ['name', 'breed__name', 'location', 'owner__email']
     readonly_fields = ['age_display', 'price_display', 'has_health_certificates']
     inlines = [PetImageInline]
     
     fieldsets = (
         ('معلومات أساسية', {
-            'fields': ('owner', 'name', 'pet_type', 'breed', 'age_months', 'gender', 'color', 'weight')
+            'fields': ('owner', 'name', 'pet_type', 'breed', 'age_months', 'gender', 'weight')
         }),
         ('التزاوج', {
-            'fields': ('is_fertile', 'breeding_history', 'last_breeding_date', 'number_of_offspring', 'temperament')
+            'fields': ('breeding_history', 'last_breeding_date', 'number_of_offspring')
         }),
         ('السلوك', {
             'fields': ('is_trained', 'good_with_kids', 'good_with_pets')
@@ -38,8 +38,8 @@ class PetAdmin(admin.ModelAdmin):
         ('الموقع والحالة', {
             'fields': ('location', 'status', 'is_free')
         }),
-        ('الصحة', {
-            'fields': ('description', 'health_status')
+        ('معلومات إضافية', {
+            'fields': ('description', 'hosting_preference')
         }),
     )
 

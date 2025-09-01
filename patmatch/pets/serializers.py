@@ -21,12 +21,8 @@ class PetSerializer(serializers.ModelSerializer):
     owner_email = serializers.CharField(source='owner.email', read_only=True)
     breed_name = serializers.CharField(source='breed.name', read_only=True)
     age_display = serializers.CharField(read_only=True)
-    price_display = serializers.CharField(read_only=True)
-    additional_images = PetImageSerializer(many=True, read_only=True)
-    pet_type_display = serializers.CharField(read_only=True)
-    status_display = serializers.CharField(read_only=True)
     gender_display = serializers.CharField(read_only=True)
-    has_health_certificates = serializers.BooleanField(read_only=True)
+    status_display = serializers.CharField(read_only=True)
     
     # Make main_image optional during updates
     main_image = serializers.ImageField(required=False)
@@ -56,15 +52,14 @@ class PetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pet
         fields = [
-            'id', 'name', 'pet_type', 'pet_type_display', 'breed', 'breed_name', 
-            'age_months', 'age_display', 'gender', 'gender_display', 'color', 
-            'weight', 'description', 'health_status', 'is_fertile', 
-            'breeding_history', 'last_breeding_date', 'number_of_offspring',
-            'temperament', 'is_trained', 'good_with_kids', 'good_with_pets',
+            'id', 'name', 'pet_type', 'breed', 'breed_name', 
+            'age_months', 'age_display', 'gender', 'gender_display', 
+            'description', 'breeding_history', 'last_breeding_date', 'number_of_offspring',
+            'is_trained', 'good_with_kids', 'good_with_pets',
             'hosting_preference', 'main_image', 'image_2', 'image_3', 'image_4', 'additional_images',
             'vaccination_certificate', 'health_certificate', 'disease_free_certificate', 'additional_certificate',
-            'has_health_certificates', 'status', 'status_display', 'location', 
-            'latitude', 'longitude', 'is_free', 'price_display', 'owner_name', 'owner_email', 
+            'status', 'status_display', 'location', 
+            'latitude', 'longitude', 'is_free', 'owner_name', 'owner_email', 
             'created_at', 'updated_at'
         ]
         read_only_fields = ['owner', 'created_at', 'updated_at']
@@ -188,7 +183,7 @@ class PetListSerializer(serializers.ModelSerializer):
             'age_display', 'gender', 'gender_display', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 
-            'is_fertile', 'has_health_certificates', 'hosting_preference', 'created_at'
+            'has_health_certificates', 'hosting_preference', 'created_at'
         ]
 
 class BreedingRequestSerializer(serializers.ModelSerializer):
@@ -247,12 +242,6 @@ class BreedingRequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("الحيوان المطلوب غير متاح للمقابلات")
         if requester_pet.status != 'available':
             raise serializers.ValidationError("حيوانك غير متاح للمقابلات")
-        
-        # التحقق من أن الحيوانين قادرين على التزاوج
-        if not target_pet.is_fertile:
-            raise serializers.ValidationError("الحيوان المطلوب غير قادر على التزاوج")
-        if not requester_pet.is_fertile:
-            raise serializers.ValidationError("حيوانك غير قادر على التزاوج")
         
         # التحقق من أن الحيوانين من نفس النوع
         if target_pet.pet_type != requester_pet.pet_type:
