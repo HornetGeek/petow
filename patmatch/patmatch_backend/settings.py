@@ -234,7 +234,7 @@ CSRF_COOKIE_SECURE = True  # Only send cookie over HTTPS
 CSRF_COOKIE_SAMESITE = 'Lax'  # CSRF cookie SameSite attribute
 CSRF_USE_SESSIONS = False  # Store CSRF token in cookie, not session
 
-# Firebase Configuration
+# Firebase Configuration with environment variables
 FIREBASE_CONFIG = {
     'apiKey': "AIzaSyBZqT72-0nfA4gibpKihOTnj4PP-X37f9s",
     'authDomain': "petmatch-1e75d.firebaseapp.com",
@@ -245,13 +245,12 @@ FIREBASE_CONFIG = {
     'measurementId': "G-D2M2P5S7M6"
 }
 
-# Firebase Admin SDK Environment Variables (for production)
-# Set these in your environment or .env file:
-# FIREBASE_PRIVATE_KEY_ID=your_private_key_id
-# FIREBASE_PRIVATE_KEY=your_private_key
-# FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@petmatch-1e75d.iam.gserviceaccount.com
-# FIREBASE_CLIENT_ID=your_client_id
-# FIREBASE_CLIENT_X509_CERT_URL=your_cert_url
+# Firebase Admin SDK Environment Variables
+FIREBASE_PRIVATE_KEY_ID = config('FIREBASE_PRIVATE_KEY_ID', default='')
+FIREBASE_PRIVATE_KEY = config('FIREBASE_PRIVATE_KEY', default='')
+FIREBASE_CLIENT_EMAIL = config('FIREBASE_CLIENT_EMAIL', default='')
+FIREBASE_CLIENT_ID = config('FIREBASE_CLIENT_ID', default='')
+FIREBASE_CLIENT_X509_CERT_URL = config('FIREBASE_CLIENT_X509_CERT_URL', default='')
 
 # Brevo (Sendinblue) SMTP Configuration
 BREVO_API_KEY = config('BREVO_API_KEY', default='')

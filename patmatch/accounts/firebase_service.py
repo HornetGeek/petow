@@ -11,42 +11,69 @@ class FirebaseService:
     
     def __init__(self):
         self.app = None
+        self.is_initialized = False
         self._initialize_firebase()
     
     def _initialize_firebase(self):
         """تهيئة Firebase Admin SDK"""
         try:
-            # استخدام Firebase config من المتغيرات البيئية
+            # استخدام إعدادات Django بدلاً من os.environ مباشرة
+            firebase_credentials = {
+                'private_key_id': getattr(settings, 'FIREBASE_PRIVATE_KEY_ID', ''),
+                'private_key': getattr(settings, 'FIREBASE_PRIVATE_KEY', ''),
+                'client_email': getattr(settings, 'FIREBASE_CLIENT_EMAIL', ''),
+                'client_id': getattr(settings, 'FIREBASE_CLIENT_ID', ''),
+                'client_x509_cert_url': getattr(settings, 'FIREBASE_CLIENT_X509_CERT_URL', '')
+            }
+            
+            # التحقق من وجود جميع المتغيرات المطلوبة
+            missing_vars = []
+            for key, value in firebase_credentials.items():
+                if not value or value.startswith('your_') or value.startswith('firebase-adminsdk-xxxxx'):
+                    missing_vars.append(key.upper())
+            
+            if missing_vars:
+                logger.warning(f"⚠️ Firebase credentials not properly configured. Missing or invalid: {missing_vars}")
+                logger.warning("⚠️ Firebase notifications will be disabled. Set proper environment variables to enable.")
+                return
+            
+            # تحويل escaped newlines إلى newlines فعلية
+            private_key = firebase_credentials['private_key'].replace('\\n', '\n')
+            
+            # استخدام Firebase config من إعدادات Django
             firebase_config = {
                 "type": "service_account",
                 "project_id": "petmatch-1e75d",
-                "private_key_id": os.environ.get('FIREBASE_PRIVATE_KEY_ID', 'your_private_key_id'),
-                "private_key": os.environ.get('FIREBASE_PRIVATE_KEY', '-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n'),
-                "client_email": os.environ.get('FIREBASE_CLIENT_EMAIL', 'firebase-adminsdk-xxxxx@petmatch-1e75d.iam.gserviceaccount.com'),
-                "client_id": os.environ.get('FIREBASE_CLIENT_ID', 'your_client_id'),
+                "private_key_id": firebase_credentials['private_key_id'],
+                "private_key": private_key,
+                "client_email": firebase_credentials['client_email'],
+                "client_id": firebase_credentials['client_id'],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                "client_x509_cert_url": os.environ.get('FIREBASE_CLIENT_X509_CERT_URL', 'https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-xxxxx%40petmatch-1e75d.iam.gserviceaccount.com')
+                "client_x509_cert_url": firebase_credentials['client_x509_cert_url']
             }
             
             # تهيئة Firebase إذا لم تكن مهيأة
             if not firebase_admin._apps:
                 cred = credentials.Certificate(firebase_config)
                 self.app = firebase_admin.initialize_app(cred)
+                self.is_initialized = True
                 logger.info("✅ Firebase Admin SDK initialized successfully")
             else:
                 self.app = firebase_admin.get_app()
+                self.is_initialized = True
                 logger.info("✅ Firebase Admin SDK already initialized")
                 
         except Exception as e:
             logger.error(f"❌ Failed to initialize Firebase: {str(e)}")
             self.app = None
+            self.is_initialized = False
     
     def send_notification(self, fcm_token, title, body, data=None):
         """إرسال إشعار لـ FCM token واحد"""
-        if not self.app:
-            logger.error("Firebase not initialized")
+        if not self.is_initialized:
+            logger.warning("⚠️ Firebase not initialized - notification not sent")
             return False
         
         try:
@@ -69,8 +96,8 @@ class FirebaseService:
     
     def send_multicast_notification(self, fcm_tokens, title, body, data=None):
         """إرسال إشعار لعدة FCM tokens"""
-        if not self.app:
-            logger.error("Firebase not initialized")
+        if not self.is_initialized:
+            logger.warning("⚠️ Firebase not initialized - multicast notification not sent")
             return False
         
         try:
@@ -93,8 +120,8 @@ class FirebaseService:
     
     def send_topic_notification(self, topic, title, body, data=None):
         """إرسال إشعار لموضوع معين"""
-        if not self.app:
-            logger.error("Firebase not initialized")
+        if not self.is_initialized:
+            logger.warning("⚠️ Firebase not initialized - topic notification not sent")
             return False
         
         try:
