@@ -254,17 +254,25 @@ FIREBASE_CONFIG = {
 # FIREBASE_CLIENT_X509_CERT_URL=your_cert_url
 
 # Brevo (Sendinblue) SMTP Configuration
-BREVO_API_KEY = config('BREVO_API_KEY')
+BREVO_API_KEY = config('BREVO_API_KEY', default='')
+BREVO_SMTP_USER = config('BREVO_SMTP_USER', default='')
+BREVO_FROM_EMAIL = config('BREVO_FROM_EMAIL', default='')
+BREVO_SERVER_EMAIL = config('BREVO_SERVER_EMAIL', default='')
 
-# Email Configuration using Brevo SMTP
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp-relay.brevo.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = config('BREVO_SMTP_USER')
-EMAIL_HOST_PASSWORD = BREVO_API_KEY
-DEFAULT_FROM_EMAIL = config('BREVO_FROM_EMAIL')
-SERVER_EMAIL = config('BREVO_SERVER_EMAIL')
+# Email Configuration using Brevo SMTP (only if credentials are provided)
+if BREVO_API_KEY and BREVO_SMTP_USER:
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_HOST = 'smtp-relay.brevo.com'
+    EMAIL_PORT = 587
+    EMAIL_USE_TLS = True
+    EMAIL_HOST_USER = BREVO_SMTP_USER
+    EMAIL_HOST_PASSWORD = BREVO_API_KEY
+    DEFAULT_FROM_EMAIL = BREVO_FROM_EMAIL
+    SERVER_EMAIL = BREVO_SERVER_EMAIL
+else:
+    # Fallback to console backend for development
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    print("WARNING: Brevo email credentials not found. Using console email backend.")
 
 # Brevo API Configuration (for advanced features like campaigns)
 BREVO_CONFIG = {
