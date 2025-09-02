@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+from decouple import config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -251,3 +252,31 @@ FIREBASE_CONFIG = {
 # FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@petmatch-1e75d.iam.gserviceaccount.com
 # FIREBASE_CLIENT_ID=your_client_id
 # FIREBASE_CLIENT_X509_CERT_URL=your_cert_url
+
+# Brevo (Sendinblue) SMTP Configuration
+BREVO_API_KEY = config('BREVO_API_KEY')
+
+# Email Configuration using Brevo SMTP
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp-relay.brevo.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = config('BREVO_SMTP_USER')
+EMAIL_HOST_PASSWORD = BREVO_API_KEY
+DEFAULT_FROM_EMAIL = config('BREVO_FROM_EMAIL')
+SERVER_EMAIL = config('BREVO_SERVER_EMAIL')
+
+# Brevo API Configuration (for advanced features like campaigns)
+BREVO_CONFIG = {
+    'api_key': BREVO_API_KEY,
+    'base_url': 'https://api.brevo.com/v3',
+}
+
+# Email settings for development/production
+if DEBUG:
+    # In development, you might want to use console backend for testing
+    # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    pass
+else:
+    # Production email settings
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
