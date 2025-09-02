@@ -14,6 +14,7 @@ class User(AbstractUser):
     address = models.TextField(blank=True, null=True)
     profile_picture = models.ImageField(upload_to='profiles/', blank=True, null=True)
     is_verified = models.BooleanField(default=False)
+    fcm_token = models.TextField(blank=True, null=True, help_text="FCM token للإشعارات")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

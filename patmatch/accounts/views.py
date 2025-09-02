@@ -327,3 +327,31 @@ def send_firebase_sms(phone_number, otp_code):
 def send_sms(phone_number, message):
     """دالة مهجورة - استخدم send_firebase_sms"""
     return send_firebase_sms(phone_number, message.split(': ')[-1])
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def update_notification_token(request):
+    """تحديث FCM token للمستخدم"""
+    fcm_token = request.data.get('fcm_token')
+    
+    if not fcm_token:
+        return Response(
+            {'error': 'FCM token مطلوب'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        user = request.user
+        user.fcm_token = fcm_token
+        user.save()
+        
+        return Response({
+            'success': True,
+            'message': 'تم تحديث FCM token بنجاح'
+        })
+    except Exception as e:
+        return Response(
+            {'error': f'خطأ في تحديث FCM token: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

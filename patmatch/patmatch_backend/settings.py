@@ -232,3 +232,22 @@ else:
 CSRF_COOKIE_SECURE = True  # Only send cookie over HTTPS
 CSRF_COOKIE_SAMESITE = 'Lax'  # CSRF cookie SameSite attribute
 CSRF_USE_SESSIONS = False  # Store CSRF token in cookie, not session
+
+# Firebase Configuration
+FIREBASE_CONFIG = {
+    'apiKey': "AIzaSyBZqT72-0nfA4gibpKihOTnj4PP-X37f9s",
+    'authDomain': "petmatch-1e75d.firebaseapp.com",
+    'projectId': "petmatch-1e75d",
+    'storageBucket': "petmatch-1e75d.firebasestorage.app",
+    'messagingSenderId': "171353883247",
+    'appId': "1:171353883247:web:3475e9de4c60c3d586439a",
+    'measurementId': "G-D2M2P5S7M6"
+}
+
+# Firebase Admin SDK Environment Variables (for production)
+# Set these in your environment or .env file:
+# FIREBASE_PRIVATE_KEY_ID=your_private_key_id
+# FIREBASE_PRIVATE_KEY=your_private_key
+# FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@petmatch-1e75d.iam.gserviceaccount.com
+# FIREBASE_CLIENT_ID=your_client_id
+# FIREBASE_CLIENT_X509_CERT_URL=your_cert_url

@@ -28,5 +28,8 @@ python-decouple==3.8
 gunicorn==21.2.0
 whitenoise==6.5.0
 
+# Firebase & Notifications
+firebase-admin==6.4.0
+
 # Additional Utilities
 defusedxml==0.7.1 

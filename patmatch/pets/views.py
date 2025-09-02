@@ -19,6 +19,8 @@ from .notifications import (
     notify_breeding_request_rejected, notify_breeding_request_completed,
     notify_favorite_added
 )
+# إضافة imports للإشعارات الجديدة
+from accounts.firebase_service import firebase_service
 import logging
 import time
 from django.db import models
