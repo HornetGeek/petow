@@ -443,6 +443,17 @@ class Notification(models.Model):
                 'message_preview': message_content[:50]
             }
         )
+        from django.core.mail import send_mail
+        from django.conf import settings
+        
+        if recipient_user.email:
+            send_mail(
+                subject=f'رسالة جديدة من {sender_user.get_full_name()}',
+                message=f'لديك رسالة جديدة في محادثة التزاوج.\n\nالرسالة: {message_content[:100]}...',
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[recipient_user.email],
+                fail_silently=True
+            )
         return notification
 
 class ChatRoom(models.Model):
