@@ -18,7 +18,7 @@ class BrevoEmailBackend(BaseEmailBackend):
         super().__init__(fail_silently=fail_silently, **kwargs)
         self.api_key = getattr(settings, 'BREVO_API_KEY', '')
         self.from_email = getattr(settings, 'BREVO_FROM_EMAIL', '')
-        self.from_name = getattr(settings, 'BREVO_FROM_NAME', 'PetMatch')
+        self.from_name = getattr(settings, 'BREVO_FROM_NAME', 'Petow')
         self.api_url = 'https://api.brevo.com/v3/smtp/email'
         
         if not self.api_key:
