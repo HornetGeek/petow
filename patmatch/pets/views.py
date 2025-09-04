@@ -17,7 +17,8 @@ from .serializers import (
 from .notifications import (
     notify_breeding_request_received, notify_breeding_request_approved,
     notify_breeding_request_rejected, notify_breeding_request_completed,
-    notify_favorite_added
+    notify_favorite_added, notify_adoption_request_received,
+    notify_adoption_request_approved
 )
 # إضافة imports للإشعارات الجديدة
 from accounts.firebase_service import firebase_service
@@ -688,7 +689,7 @@ def create_chat_room(request):
         if not creation_serializer.is_valid():
             print(f"DEBUG: Serializer errors: {creation_serializer.errors}")
             return Response(
-                {'error': creation_serializer.errors}, 
+                creation_serializer.errors, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1058,6 +1059,17 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
         if self.request.method == 'POST':
             return AdoptionRequestCreateSerializer
         return AdoptionRequestListSerializer
+    
+    def create(self, request, *args, **kwargs):
+        """إنشاء طلب تبني جديد مع إرسال إشعار"""
+        response = super().create(request, *args, **kwargs)
+        
+        # إرسال إشعار لصاحب الحيوان
+        if response.status_code == 201:
+            adoption_request = AdoptionRequest.objects.get(id=response.data['id'])
+            notify_adoption_request_received(adoption_request)
+        
+        return response
 
 
 class AdoptionRequestDetailView(generics.RetrieveAPIView):
@@ -1121,6 +1133,9 @@ def respond_to_adoption_request(request, request_id):
         if adoption_request.can_be_approved:
             adoption_request.approve()
             message = 'تم قبول طلب التبني'
+            
+            # إرسال إشعار لطالب التبني
+            notify_adoption_request_approved(adoption_request)
             
             # إنشاء غرفة محادثة عند قبول طلب التبني
             try:

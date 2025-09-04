@@ -3,6 +3,12 @@ Utilities for creating and managing notifications
 """
 from .models import Notification, Pet, BreedingRequest
 from accounts.models import User
+from .email_notifications import (
+    send_breeding_request_email, 
+    send_breeding_request_approved_email,
+    send_adoption_request_email,
+    send_adoption_request_approved_email
+)
 
 def create_notification(
     user,
@@ -61,7 +67,8 @@ def notify_breeding_request_received(breeding_request):
     else:
         message += " (مكان المقابلة سيتم تحديده لاحقاً)"
     
-    return create_notification(
+    # إنشاء الإشعار
+    notification = create_notification(
         user=receiver,
         notification_type='breeding_request_received',
         title=title,
@@ -70,6 +77,11 @@ def notify_breeding_request_received(breeding_request):
         related_breeding_request=breeding_request,
         extra_data=extra_data
     )
+    
+    # إرسال إيميل
+    send_breeding_request_email(breeding_request)
+    
+    return notification
 
 def notify_breeding_request_approved(breeding_request):
     """إشعار بقبول طلب المقابلة"""
@@ -94,7 +106,8 @@ def notify_breeding_request_approved(breeding_request):
             'meeting_date': breeding_request.meeting_date.isoformat()
         }
     
-    return create_notification(
+    # إنشاء الإشعار
+    notification = create_notification(
         user=requester,
         notification_type='breeding_request_approved',
         title=title,
@@ -103,6 +116,11 @@ def notify_breeding_request_approved(breeding_request):
         related_breeding_request=breeding_request,
         extra_data=extra_data
     )
+    
+    # إرسال إيميل
+    send_breeding_request_approved_email(breeding_request)
+    
+    return notification
 
 def notify_breeding_request_rejected(breeding_request):
     """إشعار برفض طلب المقابلة"""
@@ -195,4 +213,62 @@ def send_system_message(user, title, message, extra_data=None):
         title=title,
         message=message,
         extra_data=extra_data or {}
-    ) 
+    )
+
+def notify_adoption_request_received(adoption_request):
+    """إشعار باستلام طلب تبني جديد"""
+    from .email_notifications import send_adoption_request_email
+    
+    pet_owner = adoption_request.pet.owner
+    pet = adoption_request.pet
+    adopter = adoption_request.adopter
+    
+    title = f"طلب تبني جديد لحيوانك {pet.name}"
+    message = f"يريد {adoption_request.adopter_name} تبني حيوانك {pet.name}"
+    
+    # إنشاء الإشعار
+    notification = create_notification(
+        user=pet_owner,
+        notification_type='adoption_request_received',
+        title=title,
+        message=message,
+        related_pet=pet,
+        extra_data={
+            'adopter_name': adoption_request.adopter_name,
+            'adopter_phone': adoption_request.adopter_phone,
+            'adopter_email': adoption_request.adopter_email,
+        }
+    )
+    
+    # إرسال إيميل
+    send_adoption_request_email(adoption_request)
+    
+    return notification
+
+def notify_adoption_request_approved(adoption_request):
+    """إشعار بقبول طلب التبني"""
+    from .email_notifications import send_adoption_request_approved_email
+    
+    adopter = adoption_request.adopter
+    pet = adoption_request.pet
+    
+    title = f"تم قبول طلب تبني {pet.name}!"
+    message = f"مبروك! تم قبول طلب التبني الخاص بك لحيوان {pet.name}"
+    
+    # إنشاء الإشعار
+    notification = create_notification(
+        user=adopter,
+        notification_type='adoption_request_approved',
+        title=title,
+        message=message,
+        related_pet=pet,
+        extra_data={
+            'pet_owner_name': pet.owner.get_full_name(),
+            'pet_owner_phone': pet.owner.phone,
+        }
+    )
+    
+    # إرسال إيميل
+    send_adoption_request_approved_email(adoption_request)
+    
+    return notification 

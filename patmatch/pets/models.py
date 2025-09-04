@@ -425,7 +425,7 @@ class Notification(models.Model):
     
     @classmethod
     def create_chat_message_notification(cls, recipient_user, sender_user, chat_room, message_content):
-        """إنشاء إشعار رسالة جديدة"""
+        """إنشاء إشعار رسالة جديدة (بدون إيميل فوري)"""
         # لا نرسل إشعار للمرسل نفسه
         if recipient_user.id == sender_user.id:
             return None
@@ -443,17 +443,7 @@ class Notification(models.Model):
                 'message_preview': message_content[:50]
             }
         )
-        from django.core.mail import send_mail
-        from django.conf import settings
-        
-        if recipient_user.email:
-            send_mail(
-                subject=f'رسالة جديدة من {sender_user.get_full_name()}',
-                message=f'لديك رسالة جديدة في محادثة التزاوج.\n\nالرسالة: {message_content[:100]}...',
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[recipient_user.email],
-                fail_silently=True
-            )
+        # تم إزالة الإيميل الفوري - سيتم إرسال تذكرة يومية بدلاً من ذلك
         return notification
 
 class ChatRoom(models.Model):
