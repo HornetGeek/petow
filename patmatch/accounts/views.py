@@ -6,7 +6,9 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
 from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer
-from .models import User, PhoneOTP
+from .models import User, PhoneOTP, PasswordResetOTP
+from django.core.mail import send_mail
+from django.conf import settings
 import requests
 import logging
 
@@ -353,5 +355,210 @@ def update_notification_token(request):
     except Exception as e:
         return Response(
             {'error': f'خطأ في تحديث FCM token: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def send_password_reset_otp(request):
+    """إرسال كود OTP لإعادة تعيين كلمة المرور عبر الإيميل"""
+    email = request.data.get('email')
+    
+    if not email:
+        return Response(
+            {'error': 'البريد الإلكتروني مطلوب'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # البحث عن المستخدم
+        user = User.objects.get(email=email)
+        
+        # إنشاء كود OTP
+        password_reset_otp = PasswordResetOTP.generate_otp(user)
+        
+        # إرسال الإيميل
+        subject = 'كود إعادة تعيين كلمة المرور - Petow'
+        message = f"""
+        مرحباً {user.first_name},
+        
+        تم طلب إعادة تعيين كلمة المرور لحسابك في Petow.
+        
+        كود التحقق الخاص بك هو: {password_reset_otp.otp_code}
+        
+        هذا الكود صالح لمدة 15 دقيقة فقط.
+        
+        إذا لم تطلب إعادة تعيين كلمة المرور، يرجى تجاهل هذه الرسالة.
+        
+        فريق Petow
+        """
+        
+        try:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+            
+            logger.info(f"Password reset OTP sent to {email}: {password_reset_otp.otp_code}")
+            
+            return Response({
+                'success': True,
+                'message': 'تم إرسال كود التحقق إلى بريدك الإلكتروني'
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to send password reset email to {email}: {str(e)}")
+            # للتطوير: اطبع الكود في الكونسول
+            print(f"🔑 Password Reset OTP for {email}: {password_reset_otp.otp_code}")
+            
+            return Response({
+                'success': True,
+                'message': 'تم إنشاء كود التحقق (تحقق من Django Console للحصول على الكود)',
+                'debug_otp': password_reset_otp.otp_code  # للتطوير فقط
+            })
+            
+    except User.DoesNotExist:
+        # لا نكشف أن الإيميل غير موجود لأسباب أمنية
+        return Response({
+            'success': True,
+            'message': 'إذا كان البريد الإلكتروني موجود، ستصلك رسالة بكود التحقق'
+        })
+    
+    except Exception as e:
+        logger.error(f"Error in send_password_reset_otp: {str(e)}")
+        return Response(
+            {'error': 'حدث خطأ في إرسال كود التحقق'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_password_reset_otp(request):
+    """التحقق من كود OTP لإعادة تعيين كلمة المرور"""
+    email = request.data.get('email')
+    otp_code = request.data.get('otp_code')
+    
+    if not email or not otp_code:
+        return Response(
+            {'error': 'البريد الإلكتروني وكود التحقق مطلوبان'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        user = User.objects.get(email=email)
+        
+        # البحث عن كود OTP صالح
+        password_reset_otp = PasswordResetOTP.objects.filter(
+            user=user,
+            otp_code=otp_code,
+            is_used=False
+        ).first()
+        
+        if not password_reset_otp:
+            return Response(
+                {'error': 'كود التحقق غير صحيح'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if password_reset_otp.is_expired():
+            return Response(
+                {'error': 'كود التحقق منتهي الصلاحية'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # تمييز الكود كمستخدم (لكن لا نحذفه حتى يتم تغيير كلمة المرور)
+        password_reset_otp.is_used = True
+        password_reset_otp.save()
+        
+        return Response({
+            'success': True,
+            'message': 'تم التحقق من الكود بنجاح',
+            'reset_token': password_reset_otp.id  # نرسل معرف الـ OTP كـ token
+        })
+        
+    except User.DoesNotExist:
+        return Response(
+            {'error': 'البريد الإلكتروني غير موجود'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in verify_password_reset_otp: {str(e)}")
+        return Response(
+            {'error': 'حدث خطأ في التحقق من الكود'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def reset_password_confirm(request):
+    """تأكيد إعادة تعيين كلمة المرور بكلمة مرور جديدة"""
+    reset_token = request.data.get('reset_token')
+    new_password = request.data.get('new_password')
+    confirm_password = request.data.get('confirm_password')
+    
+    if not reset_token or not new_password or not confirm_password:
+        return Response(
+            {'error': 'جميع الحقول مطلوبة'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    if new_password != confirm_password:
+        return Response(
+            {'error': 'كلمتا المرور غير متطابقتان'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    if len(new_password) < 8:
+        return Response(
+            {'error': 'كلمة المرور يجب أن تكون 8 أحرف على الأقل'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # البحث عن الـ OTP token
+        password_reset_otp = PasswordResetOTP.objects.get(
+            id=reset_token,
+            is_used=True  # يجب أن يكون مستخدم (تم التحقق منه)
+        )
+        
+        # التأكد أن الكود لم ينته
+        if password_reset_otp.is_expired():
+            return Response(
+                {'error': 'انتهت صلاحية جلسة إعادة تعيين كلمة المرور'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # تغيير كلمة المرور
+        user = password_reset_otp.user
+        user.set_password(new_password)
+        user.save()
+        
+        # حذف جميع أكواد إعادة التعيين للمستخدم
+        PasswordResetOTP.objects.filter(user=user).delete()
+        
+        logger.info(f"Password reset successful for user {user.email}")
+        
+        return Response({
+            'success': True,
+            'message': 'تم تغيير كلمة المرور بنجاح'
+        })
+        
+    except PasswordResetOTP.DoesNotExist:
+        return Response(
+            {'error': 'رمز إعادة التعيين غير صالح'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in reset_password_confirm: {str(e)}")
+        return Response(
+            {'error': 'حدث خطأ في تغيير كلمة المرور'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
