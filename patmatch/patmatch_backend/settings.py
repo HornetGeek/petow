@@ -189,6 +189,8 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'cache-control',
+    'pragma',
 ]
 
 # Additional CORS settings
@@ -204,7 +206,11 @@ CORS_ALLOW_METHODS = [
 CORS_EXPOSE_HEADERS = [
     'content-length',
     'content-range',
+    'x-total-count',
 ]
+
+# Add preflight max age
+CORS_PREFLIGHT_MAX_AGE = 86400
 
 # Django Sites
 SITE_ID = 1
