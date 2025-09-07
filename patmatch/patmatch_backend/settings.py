@@ -236,9 +236,14 @@ else:
     print(f"DEBUG: Using default CSRF_TRUSTED_ORIGINS: {CSRF_TRUSTED_ORIGINS}")
 
 # Additional CSRF settings
-CSRF_COOKIE_SECURE = True  # Only send cookie over HTTPS
+CSRF_COOKIE_SECURE = False  # Allow HTTP for local development
 CSRF_COOKIE_SAMESITE = 'Lax'  # CSRF cookie SameSite attribute
 CSRF_USE_SESSIONS = False  # Store CSRF token in cookie, not session
+
+# Disable CSRF for API endpoints
+CSRF_EXEMPT_URLS = [
+    r'^api/.*$',  # Exempt all API endpoints
+]
 
 # Firebase Configuration with environment variables
 FIREBASE_CONFIG = {
