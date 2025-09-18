@@ -16,13 +16,24 @@ logger = logging.getLogger(__name__)
 
 # Create your views here.
 
-class UserProfileView(generics.RetrieveUpdateAPIView):
+class UserProfileView(generics.RetrieveUpdateDestroyAPIView):
     """عرض وتحديث الملف الشخصي"""
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated]
     
     def get_object(self):
         return self.request.user
+
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+        
+        # Delete auth token if exists to invalidate sessions
+        Token.objects.filter(user=user).delete()
+        user.delete()
+        return Response(
+            {'message': 'تم حذف الحساب بنجاح'},
+            status=status.HTTP_200_OK
+        )
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
