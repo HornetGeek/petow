@@ -14,9 +14,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone', 'is_phone_verified', 'address', 'profile_picture', 'is_verified',
-            'pets_count', 'date_joined'
+            'pets_count', 'date_joined', 'fcm_token'
         ]
-        read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined']
+        read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined', 'fcm_token']
     
     def get_pets_count(self, obj):
         return obj.pets.count()
@@ -27,7 +27,10 @@ class UserSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'profile_picture', 'phone', 'is_phone_verified']
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'full_name',
+            'profile_picture', 'phone', 'is_phone_verified', 'fcm_token'
+        ]
 
 class CustomRegisterSerializer(serializers.ModelSerializer):
     """مُسلسل مخصص للتسجيل مع جعل رقم الهاتف مطلوب"""
