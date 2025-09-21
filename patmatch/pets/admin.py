@@ -13,17 +13,17 @@ class PetImageInline(admin.TabularInline):
 @admin.register(Pet)
 class PetAdmin(admin.ModelAdmin):
     list_display = ['name', 'breed', 'pet_type', 'gender', 'age_display', 'status', 'location', 'has_health_certificates', 'owner']
-    list_filter = ['pet_type', 'gender', 'status', 'is_fertile', 'breed']
+    list_filter = ['pet_type', 'gender', 'status', 'breed']
     search_fields = ['name', 'breed__name', 'location', 'owner__email']
     readonly_fields = ['age_display', 'price_display', 'has_health_certificates']
     inlines = [PetImageInline]
     
     fieldsets = (
         ('معلومات أساسية', {
-            'fields': ('owner', 'name', 'pet_type', 'breed', 'age_months', 'gender', 'color', 'weight')
+            'fields': ('owner', 'name', 'pet_type', 'breed', 'age_months', 'gender', 'weight')
         }),
         ('التزاوج', {
-            'fields': ('is_fertile', 'breeding_history', 'last_breeding_date', 'number_of_offspring', 'temperament')
+            'fields': ('breeding_history', 'last_breeding_date', 'number_of_offspring')
         }),
         ('السلوك', {
             'fields': ('is_trained', 'good_with_kids', 'good_with_pets')
@@ -38,8 +38,8 @@ class PetAdmin(admin.ModelAdmin):
         ('الموقع والحالة', {
             'fields': ('location', 'status', 'is_free')
         }),
-        ('الصحة', {
-            'fields': ('description', 'health_status')
+        ('معلومات إضافية', {
+            'fields': ('description', 'hosting_preference')
         }),
     )
 
@@ -49,6 +49,21 @@ class BreedingRequestAdmin(admin.ModelAdmin):
     list_filter = ['status', 'created_at']
     search_fields = ['target_pet__name', 'requester_pet__name', 'requester__email', 'receiver__email']
     readonly_fields = ['created_at', 'updated_at']
+    
+    fieldsets = (
+        ('معلومات أساسية', {
+            'fields': ('target_pet', 'requester_pet', 'requester', 'receiver', 'status')
+        }),
+        ('تفاصيل المقابلة', {
+            'fields': ('meeting_date', 'contact_phone', 'veterinary_clinic', 'message')
+        }),
+        ('الرد والملاحظات', {
+            'fields': ('response_message',)
+        }),
+        ('التواريخ', {
+            'fields': ('created_at', 'updated_at', 'completed_at')
+        }),
+    )
 
 @admin.register(VeterinaryClinic)
 class VeterinaryClinicAdmin(admin.ModelAdmin):
@@ -106,7 +121,7 @@ class AdoptionRequestAdmin(admin.ModelAdmin):
             'fields': ('adopter', 'pet', 'status')
         }),
         ('معلومات طالب التبني', {
-            'fields': ('adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age', 'adopter_occupation', 'adopter_address', 'adopter_id_number')
+            'fields': ('adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age', 'adopter_occupation', 'adopter_address', 'adopter_latitude', 'adopter_longitude')
         }),
         ('معلومات السكن', {
             'fields': ('housing_type', 'family_members')

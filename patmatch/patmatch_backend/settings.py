@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+from decouple import config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -188,6 +189,8 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'cache-control',
+    'pragma',
 ]
 
 # Additional CORS settings
@@ -203,10 +206,92 @@ CORS_ALLOW_METHODS = [
 CORS_EXPOSE_HEADERS = [
     'content-length',
     'content-range',
+    'x-total-count',
 ]
+
+# Add preflight max age
+CORS_PREFLIGHT_MAX_AGE = 86400
 
 # Django Sites
 SITE_ID = 1
 
 # Custom User Model
 AUTH_USER_MODEL = 'accounts.User'
+
+# CSRF Settings
+CSRF_TRUSTED_ORIGINS = [
+    "https://petow.app",
+    "https://www.petow.app",
+    "https://api.petow.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# Get CSRF trusted origins from environment variable if set
+if os.environ.get('CSRF_TRUSTED_ORIGINS'):
+    csrf_origins = os.environ.get('CSRF_TRUSTED_ORIGINS').split(',')
+    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins]
+    print(f"DEBUG: CSRF_TRUSTED_ORIGINS set from environment: {CSRF_TRUSTED_ORIGINS}")
+else:
+    print(f"DEBUG: Using default CSRF_TRUSTED_ORIGINS: {CSRF_TRUSTED_ORIGINS}")
+
+# Additional CSRF settings
+CSRF_COOKIE_SECURE = False  # Allow HTTP for local development
+CSRF_COOKIE_SAMESITE = 'Lax'  # CSRF cookie SameSite attribute
+CSRF_USE_SESSIONS = False  # Store CSRF token in cookie, not session
+
+# Disable CSRF for API endpoints
+CSRF_EXEMPT_URLS = [
+    r'^api/.*$',  # Exempt all API endpoints
+]
+
+# Firebase Configuration with environment variables
+FIREBASE_CONFIG = {
+    'apiKey': "AIzaSyBZqT72-0nfA4gibpKihOTnj4PP-X37f9s",
+    'authDomain': "petmatch-1e75d.firebaseapp.com",
+    'projectId': "petmatch-1e75d",
+    'storageBucket': "petmatch-1e75d.firebasestorage.app",
+    'messagingSenderId': "171353883247",
+    'appId': "1:171353883247:web:3475e9de4c60c3d586439a",
+    'measurementId': "G-D2M2P5S7M6"
+}
+
+# Firebase Admin SDK Environment Variables
+FIREBASE_PRIVATE_KEY_ID = config('FIREBASE_PRIVATE_KEY_ID', default='')
+FIREBASE_PRIVATE_KEY = config('FIREBASE_PRIVATE_KEY', default='')
+FIREBASE_CLIENT_EMAIL = config('FIREBASE_CLIENT_EMAIL', default='')
+FIREBASE_CLIENT_ID = config('FIREBASE_CLIENT_ID', default='')
+FIREBASE_CLIENT_X509_CERT_URL = config('FIREBASE_CLIENT_X509_CERT_URL', default='')
+
+# Brevo (Sendinblue) Configuration
+BREVO_API_KEY = config('BREVO_API_KEY', default='')
+BREVO_SMTP_USER = config('BREVO_SMTP_USER', default='')
+BREVO_FROM_EMAIL = config('BREVO_FROM_EMAIL', default='')
+BREVO_FROM_NAME = config('BREVO_FROM_NAME', default='PetMatch')
+BREVO_SERVER_EMAIL = config('BREVO_SERVER_EMAIL', default='')
+
+# Email Configuration using Brevo API (more reliable than SMTP)
+if BREVO_API_KEY and BREVO_FROM_EMAIL:
+    EMAIL_BACKEND = 'accounts.brevo_email_backend.BrevoEmailBackend'
+    DEFAULT_FROM_EMAIL = BREVO_FROM_EMAIL
+    SERVER_EMAIL = BREVO_SERVER_EMAIL
+    print("✅ Using Brevo API email backend")
+else:
+    # Fallback to console backend for development
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    print("WARNING: Brevo email credentials not found. Using console email backend.")
+
+# Brevo API Configuration (for advanced features like campaigns)
+BREVO_CONFIG = {
+    'api_key': BREVO_API_KEY,
+    'base_url': 'https://api.brevo.com/v3',
+}
+
+# Email settings for development/production
+if DEBUG:
+    # In development, you might want to use console backend for testing
+    # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    pass
+else:
+    # Production email settings
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

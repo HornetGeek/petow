@@ -1,9 +1,10 @@
 from rest_framework import generics, status, filters
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
+from django.db import transaction
 from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, 
@@ -16,8 +17,11 @@ from .serializers import (
 from .notifications import (
     notify_breeding_request_received, notify_breeding_request_approved,
     notify_breeding_request_rejected, notify_breeding_request_completed,
-    notify_favorite_added
+    notify_favorite_added, notify_adoption_request_received,
+    notify_adoption_request_approved
 )
+# إضافة imports للإشعارات الجديدة
+from accounts.firebase_service import firebase_service
 import logging
 import time
 from django.db import models
@@ -75,7 +79,7 @@ class PetListCreateView(generics.ListCreateAPIView):
             print(f"❌ Django: Error type: {type(e)}")
             raise
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['pet_type', 'gender', 'status', 'is_fertile', 'breed']
+    filterset_fields = ['pet_type', 'gender', 'status', 'breed']
     search_fields = ['name', 'breed__name', 'location', 'description']
     ordering_fields = ['created_at', 'age_months', 'breeding_fee']
     ordering = ['-created_at']
@@ -115,6 +119,27 @@ class PetListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(id__in=favorite_pets)
         
         return queryset
+    
+    def get_serializer_context(self):
+        """تمرير context إضافي للسيريلايزر"""
+        context = super().get_serializer_context()
+        
+        # إضافة إحداثيات المستخدم من query parameters
+        user_lat = self.request.query_params.get('user_lat')
+        user_lng = self.request.query_params.get('user_lng')
+        
+        # محاولة الحصول من معاملات أخرى إذا لم تكن موجودة
+        if not user_lat:
+            user_lat = self.request.query_params.get('lat') or self.request.query_params.get('user_latitude') or self.request.query_params.get('latitude') or self.request.query_params.get('current_lat')
+        
+        if not user_lng:
+            user_lng = self.request.query_params.get('lng') or self.request.query_params.get('user_longitude') or self.request.query_params.get('longitude') or self.request.query_params.get('current_lng')
+        
+        if user_lat and user_lng:
+            context['user_lat'] = user_lat
+            context['user_lng'] = user_lng
+        
+        return context
 
 class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
     """تفاصيل الحيوان"""
@@ -664,7 +689,7 @@ def create_chat_room(request):
         if not creation_serializer.is_valid():
             print(f"DEBUG: Serializer errors: {creation_serializer.errors}")
             return Response(
-                {'error': creation_serializer.errors}, 
+                creation_serializer.errors, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1034,6 +1059,17 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
         if self.request.method == 'POST':
             return AdoptionRequestCreateSerializer
         return AdoptionRequestListSerializer
+    
+    def create(self, request, *args, **kwargs):
+        """إنشاء طلب تبني جديد مع إرسال إشعار"""
+        response = super().create(request, *args, **kwargs)
+        
+        # إرسال إشعار لصاحب الحيوان
+        if response.status_code == 201:
+            adoption_request = AdoptionRequest.objects.get(id=response.data['id'])
+            notify_adoption_request_received(adoption_request)
+        
+        return response
 
 
 class AdoptionRequestDetailView(generics.RetrieveAPIView):
@@ -1097,6 +1133,9 @@ def respond_to_adoption_request(request, request_id):
         if adoption_request.can_be_approved:
             adoption_request.approve()
             message = 'تم قبول طلب التبني'
+            
+            # إرسال إشعار لطالب التبني
+            notify_adoption_request_approved(adoption_request)
             
             # إنشاء غرفة محادثة عند قبول طلب التبني
             try:
@@ -1236,3 +1275,100 @@ def adoption_stats(request):
         'my_pending_requests': my_pending_requests,
         'received_requests': received_requests
     })
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAdminUser])
+def delete_cats(request):
+    """حذف جميع القطط (للمشرفين فقط)"""
+    try:
+        # البحث عن جميع القطط
+        cats = Pet.objects.filter(pet_type='cats')
+        cat_count = cats.count()
+        
+        if cat_count == 0:
+            return Response({
+                'message': 'لا توجد قطط في قاعدة البيانات',
+                'deleted_count': 0
+            }, status=status.HTTP_200_OK)
+        
+        # حذف القطط
+        with transaction.atomic():
+            deleted_count = cats.delete()[0]
+        
+        return Response({
+            'message': f'تم حذف {deleted_count} قط بنجاح',
+            'deleted_count': deleted_count
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'حدث خطأ أثناء حذف القطط: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAdminUser])
+def delete_cats_by_breed(request, breed_name):
+    """حذف القطط حسب السلالة (للمشرفين فقط)"""
+    try:
+        # البحث عن السلالة
+        breed = Breed.objects.filter(name__icontains=breed_name, pet_type='cats').first()
+        
+        if not breed:
+            return Response({
+                'error': f'لم يتم العثور على سلالة القطط: {breed_name}'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # البحث عن القطط من هذه السلالة
+        cats = Pet.objects.filter(breed=breed, pet_type='cats')
+        cat_count = cats.count()
+        
+        if cat_count == 0:
+            return Response({
+                'message': f'لا توجد قطط من سلالة {breed.name}',
+                'deleted_count': 0
+            }, status=status.HTTP_200_OK)
+        
+        # حذف القطط
+        with transaction.atomic():
+            deleted_count = cats.delete()[0]
+        
+        return Response({
+            'message': f'تم حذف {deleted_count} قط من سلالة {breed.name} بنجاح',
+            'deleted_count': deleted_count
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'حدث خطأ أثناء حذف القطط: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def cats_summary(request):
+    """ملخص القطط في قاعدة البيانات (للمشرفين فقط)"""
+    try:
+        cats = Pet.objects.filter(pet_type='cats').select_related('breed', 'owner')
+        cat_count = cats.count()
+        
+        cats_data = []
+        for cat in cats:
+            cats_data.append({
+                'id': cat.id,
+                'name': cat.name,
+                'breed': cat.breed.name if cat.breed else 'بدون سلالة',
+                'owner': cat.owner.username if cat.owner else 'غير محدد',
+                'created_at': cat.created_at
+            })
+        
+        return Response({
+            'total_cats': cat_count,
+            'cats': cats_data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'حدث خطأ أثناء جلب ملخص القطط: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

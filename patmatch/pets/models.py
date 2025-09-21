@@ -8,8 +8,6 @@ class Breed(models.Model):
     PET_TYPE_CHOICES = [
         ('cats', 'قطط'),
         ('dogs', 'كلاب'),
-        ('birds', 'طيور'),
-        ('fish', 'أسماك'),
     ]
     
     name = models.CharField(max_length=100)
@@ -50,8 +48,6 @@ class Pet(models.Model):
     PET_TYPE_CHOICES = [
         ('cats', 'قطط'),
         ('dogs', 'كلاب'),
-        ('birds', 'طيور'),
-        ('other', 'أخرى'),
     ]
     
     owner = models.ForeignKey(
@@ -64,22 +60,31 @@ class Pet(models.Model):
     breed = models.ForeignKey(Breed, on_delete=models.CASCADE)
     age_months = models.PositiveIntegerField(help_text="العمر بالشهور")
     gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
-    color = models.CharField(max_length=50)
-    weight = models.DecimalField(max_digits=5, decimal_places=2, help_text="الوزن بالكيلو")
     description = models.TextField()
-    health_status = models.TextField(help_text="الحالة الصحية والتطعيمات")
     
     # معلومات التزاوج
-    is_fertile = models.BooleanField(default=True, help_text="قادر على التزاوج")
     breeding_history = models.TextField(blank=True, null=True, help_text="تاريخ التزاوج السابق")
     last_breeding_date = models.DateField(blank=True, null=True, help_text="تاريخ آخر تزاوج")
     number_of_offspring = models.PositiveIntegerField(default=0, help_text="عدد النتاج السابق")
     
     # خصائص سلوكية
-    temperament = models.CharField(max_length=100, help_text="المزاج والطباع")
     is_trained = models.BooleanField(default=False, help_text="مدرب أم لا")
     good_with_kids = models.BooleanField(default=True, help_text="مناسب للأطفال")
     good_with_pets = models.BooleanField(default=True, help_text="مناسب مع الحيوانات الأخرى")
+    
+    # تفضيلات الأليف
+    HOSTING_PREFERENCE_CHOICES = [
+        ('my_place', 'عندي (في منزلي/حديقتي)'),
+        ('other_place', 'عند صاحب الحيوان الآخر'),
+        ('both', 'كلاهما مناسب'),
+        ('flexible', 'مرن'),
+    ]
+    hosting_preference = models.CharField(
+        max_length=20, 
+        choices=HOSTING_PREFERENCE_CHOICES, 
+        default='flexible',
+        help_text="تفضيل الأليف"
+    )
     
     # صور الحيوان
     main_image = models.ImageField(upload_to='pets/main/')
@@ -114,50 +119,32 @@ class Pet(models.Model):
     )
     
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='available')
-    location = models.CharField(max_length=200, help_text="الموقع")
+    location = models.CharField(max_length=200, help_text="الموقع (المدينة/الحي)")
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
     
-    # إحداثيات الموقع
-    latitude = models.DecimalField(
-        max_digits=10, 
-        decimal_places=8, 
-        blank=True, 
-        null=True, 
-        help_text="خط العرض"
-    )
-    longitude = models.DecimalField(
-        max_digits=11, 
-        decimal_places=8, 
-        blank=True, 
-        null=True, 
-        help_text="خط الطول"
-    )
+    # معلومات التبني
+    is_free = models.BooleanField(default=True, help_text="هل التبني مجاني؟")
     
-    # معلومات التكلفة
-    # التزاوج متاح للجميع مجاناً
-    is_free = models.BooleanField(default=True, help_text="متاح للتزاوج")
-    
+    # معلومات التزاوج
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     def __str__(self):
-        return f"{self.name} - {self.breed.name}"
-    
-    @property
-    def age_years(self):
-        """حساب العمر بالسنوات"""
-        return self.age_months // 12
+        return f"{self.name} ({self.get_pet_type_display()})"
     
     @property
     def age_display(self):
-        """عرض العمر بشكل مفهوم"""
-        years = self.age_years
-        months = self.age_months % 12
-        
-        if years > 0:
-            if months > 0:
+        """عرض العمر بتنسيق مقروء"""
+        if self.age_months < 12:
+            return f"{self.age_months} شهر"
+        else:
+            years = self.age_months // 12
+            months = self.age_months % 12
+            if months == 0:
+                return f"{years} سنة"
+            else:
                 return f"{years} سنة و {months} شهر"
-            return f"{years} سنة"
-        return f"{months} شهر"
     
     @property
     def pet_type_display(self):
@@ -179,8 +166,13 @@ class Pet(models.Model):
     
     @property
     def price_display(self):
-        """عرض حالة التزاوج"""
-        return "متاح للتزاوج" if self.is_free else "غير متاح"
+        """عرض السعر بتنسيق مقروء"""
+        if self.is_free:
+            return "مجاني"
+        elif self.adoption_fee:
+            return f"{self.adoption_fee} ريال"
+        else:
+            return "غير محدد"
     
     @property
     def has_health_certificates(self):
@@ -299,7 +291,7 @@ class BreedingRequest(models.Model):
     # تفاصيل المقابلة
     message = models.TextField(blank=True, null=True, help_text="رسالة من الطالب")
     meeting_date = models.DateField(help_text="تاريخ المقابلة المقترح")
-    veterinary_clinic = models.ForeignKey(VeterinaryClinic, on_delete=models.CASCADE, help_text="العيادة البيطرية للمقابلة")
+    veterinary_clinic = models.ForeignKey(VeterinaryClinic, on_delete=models.CASCADE, blank=True, null=True, help_text="العيادة البيطرية للمقابلة (اختياري)")
     contact_phone = models.CharField(max_length=20, help_text="رقم الهاتف للتواصل")
     
     # الاتفاق المالي
@@ -433,7 +425,7 @@ class Notification(models.Model):
     
     @classmethod
     def create_chat_message_notification(cls, recipient_user, sender_user, chat_room, message_content):
-        """إنشاء إشعار رسالة جديدة"""
+        """إنشاء إشعار رسالة جديدة (بدون إيميل فوري)"""
         # لا نرسل إشعار للمرسل نفسه
         if recipient_user.id == sender_user.id:
             return None
@@ -451,6 +443,7 @@ class Notification(models.Model):
                 'message_preview': message_content[:50]
             }
         )
+        # تم إزالة الإيميل الفوري - سيتم إرسال تذكرة يومية بدلاً من ذلك
         return notification
 
 class ChatRoom(models.Model):
@@ -723,9 +716,23 @@ class AdoptionRequest(models.Model):
     adopter_age = models.PositiveIntegerField(verbose_name="العمر")
     adopter_occupation = models.CharField(max_length=100, verbose_name="المهنة")
     adopter_address = models.TextField(verbose_name="العنوان التفصيلي")
-    adopter_id_number = models.CharField(max_length=20, verbose_name="رقم الهوية")
+    # تم إزالة حقل رقم الهوية
     
-
+    # إحداثيات الموقع
+    adopter_latitude = models.DecimalField(
+        max_digits=10, 
+        decimal_places=8, 
+        blank=True, 
+        null=True, 
+        verbose_name="خط العرض"
+    )
+    adopter_longitude = models.DecimalField(
+        max_digits=11, 
+        decimal_places=8, 
+        blank=True, 
+        null=True, 
+        verbose_name="خط الطول"
+    )
     
     # معلومات السكن المبسطة
     housing_type = models.CharField(max_length=50, default='apartment', verbose_name="نوع السكن")

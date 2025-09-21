@@ -14,9 +14,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone', 'is_phone_verified', 'address', 'profile_picture', 'is_verified',
-            'pets_count', 'date_joined'
+            'pets_count', 'date_joined', 'fcm_token'
         ]
-        read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined']
+        read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined', 'fcm_token']
     
     def get_pets_count(self, obj):
         return obj.pets.count()
@@ -27,7 +27,10 @@ class UserSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'full_name', 'profile_picture', 'phone', 'is_phone_verified']
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'full_name',
+            'profile_picture', 'phone', 'is_phone_verified', 'fcm_token'
+        ]
 
 class CustomRegisterSerializer(serializers.ModelSerializer):
     """مُسلسل مخصص للتسجيل مع جعل رقم الهاتف مطلوب"""
@@ -55,13 +58,16 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
         # إزالة المسافات والرموز الإضافية
         clean_phone = re.sub(r'[\s\-\(\)]', '', value)
         
-        # تحقق من الأرقام السعودية والمصرية
+        # تحقق من الأرقام السعودية والمصرية والإماراتية
         saudi_pattern = r'^(\+966|966|0)?[5-9]\d{8}$'
         egyptian_pattern = r'^(\+20|20|0)?1[0-5]\d{8}$'
+        uae_pattern = r'^(\+971|971|0)?[5-9]\d{8}$'
         
-        if not (re.match(saudi_pattern, clean_phone) or re.match(egyptian_pattern, clean_phone)):
+        if not (re.match(saudi_pattern, clean_phone) or 
+                re.match(egyptian_pattern, clean_phone) or 
+                re.match(uae_pattern, clean_phone)):
             raise serializers.ValidationError(
-                "رقم الهاتف غير صحيح. يرجى إدخال رقم سعودي أو مصري صحيح"
+                "رقم الهاتف غير صحيح. يرجى إدخال رقم سعودي أو مصري أو إماراتي صحيح"
             )
         
         return value

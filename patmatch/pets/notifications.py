@@ -3,6 +3,12 @@ Utilities for creating and managing notifications
 """
 from .models import Notification, Pet, BreedingRequest
 from accounts.models import User
+from .email_notifications import (
+    send_breeding_request_email, 
+    send_breeding_request_approved_email,
+    send_adoption_request_email,
+    send_adoption_request_approved_email
+)
 
 def create_notification(
     user,
@@ -40,49 +46,81 @@ def create_notification(
 
 def notify_breeding_request_received(breeding_request):
     """إشعار باستلام طلب مقابلة جديد"""
+    receiver = breeding_request.receiver
     target_pet = breeding_request.target_pet
     requester_pet = breeding_request.requester_pet
-    receiver = breeding_request.receiver
     
-    title = f"طلب مقابلة جديد لـ {target_pet.name}"
-    message = f"تم استلام طلب مقابلة من {breeding_request.requester.get_full_name()} لحيوانك {target_pet.name} مع حيوانهم {requester_pet.name}"
+    title = f"طلب مقابلة جديد من {breeding_request.requester.get_full_name()}"
+    message = f"يريد {breeding_request.requester.get_full_name()} ترتيب مقابلة بين {requester_pet.name} و {target_pet.name}"
     
-    return create_notification(
+    # إضافة معلومات العيادة البيطرية إذا كانت متوفرة
+    extra_data = {
+        'requester_name': breeding_request.requester.get_full_name(),
+        'requester_pet_name': requester_pet.name,
+        'meeting_date': breeding_request.meeting_date.isoformat(),
+    }
+    
+    # إضافة معلومات العيادة البيطرية فقط إذا كانت متوفرة
+    if breeding_request.veterinary_clinic:
+        extra_data['clinic_name'] = breeding_request.veterinary_clinic.name
+        message += f" في {breeding_request.veterinary_clinic.name}"
+    else:
+        message += " (مكان المقابلة سيتم تحديده لاحقاً)"
+    
+    # إنشاء الإشعار
+    notification = create_notification(
         user=receiver,
         notification_type='breeding_request_received',
         title=title,
         message=message,
         related_pet=target_pet,
         related_breeding_request=breeding_request,
-        extra_data={
-            'requester_name': breeding_request.requester.get_full_name(),
-            'requester_pet_name': requester_pet.name,
-            'meeting_date': breeding_request.meeting_date.isoformat(),
-            'clinic_name': breeding_request.veterinary_clinic.name
-        }
+        extra_data=extra_data
     )
+    
+    # إرسال إيميل
+    send_breeding_request_email(breeding_request)
+    
+    return notification
 
 def notify_breeding_request_approved(breeding_request):
     """إشعار بقبول طلب المقابلة"""
     requester = breeding_request.requester
     target_pet = breeding_request.target_pet
     
-    title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
-    message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في {breeding_request.veterinary_clinic.name}"
+    # تخصيص الرسالة بناءً على وجود العيادة البيطرية
+    if breeding_request.veterinary_clinic:
+        title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
+        message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في {breeding_request.veterinary_clinic.name}"
+        
+        extra_data = {
+            'clinic_name': breeding_request.veterinary_clinic.name,
+            'clinic_phone': breeding_request.veterinary_clinic.phone,
+            'meeting_date': breeding_request.meeting_date.isoformat()
+        }
+    else:
+        title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
+        message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في المكان المناسب لكما."
+        
+        extra_data = {
+            'meeting_date': breeding_request.meeting_date.isoformat()
+        }
     
-    return create_notification(
+    # إنشاء الإشعار
+    notification = create_notification(
         user=requester,
         notification_type='breeding_request_approved',
         title=title,
         message=message,
         related_pet=target_pet,
         related_breeding_request=breeding_request,
-        extra_data={
-            'clinic_name': breeding_request.veterinary_clinic.name,
-            'clinic_phone': breeding_request.veterinary_clinic.phone,
-            'meeting_date': breeding_request.meeting_date.isoformat()
-        }
+        extra_data=extra_data
     )
+    
+    # إرسال إيميل
+    send_breeding_request_approved_email(breeding_request)
+    
+    return notification
 
 def notify_breeding_request_rejected(breeding_request):
     """إشعار برفض طلب المقابلة"""
@@ -175,4 +213,62 @@ def send_system_message(user, title, message, extra_data=None):
         title=title,
         message=message,
         extra_data=extra_data or {}
-    ) 
+    )
+
+def notify_adoption_request_received(adoption_request):
+    """إشعار باستلام طلب تبني جديد"""
+    from .email_notifications import send_adoption_request_email
+    
+    pet_owner = adoption_request.pet.owner
+    pet = adoption_request.pet
+    adopter = adoption_request.adopter
+    
+    title = f"طلب تبني جديد لحيوانك {pet.name}"
+    message = f"يريد {adoption_request.adopter_name} تبني حيوانك {pet.name}"
+    
+    # إنشاء الإشعار
+    notification = create_notification(
+        user=pet_owner,
+        notification_type='adoption_request_received',
+        title=title,
+        message=message,
+        related_pet=pet,
+        extra_data={
+            'adopter_name': adoption_request.adopter_name,
+            'adopter_phone': adoption_request.adopter_phone,
+            'adopter_email': adoption_request.adopter_email,
+        }
+    )
+    
+    # إرسال إيميل
+    send_adoption_request_email(adoption_request)
+    
+    return notification
+
+def notify_adoption_request_approved(adoption_request):
+    """إشعار بقبول طلب التبني"""
+    from .email_notifications import send_adoption_request_approved_email
+    
+    adopter = adoption_request.adopter
+    pet = adoption_request.pet
+    
+    title = f"تم قبول طلب تبني {pet.name}!"
+    message = f"مبروك! تم قبول طلب التبني الخاص بك لحيوان {pet.name}"
+    
+    # إنشاء الإشعار
+    notification = create_notification(
+        user=adopter,
+        notification_type='adoption_request_approved',
+        title=title,
+        message=message,
+        related_pet=pet,
+        extra_data={
+            'pet_owner_name': pet.owner.get_full_name(),
+            'pet_owner_phone': pet.owner.phone,
+        }
+    )
+    
+    # إرسال إيميل
+    send_adoption_request_approved_email(adoption_request)
+    
+    return notification 
