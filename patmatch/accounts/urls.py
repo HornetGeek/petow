@@ -16,4 +16,4 @@ urlpatterns = [
     path('send-password-reset-otp/', views.send_password_reset_otp, name='send_password_reset_otp'),
     path('verify-password-reset-otp/', views.verify_password_reset_otp, name='verify_password_reset_otp'),
     path('reset-password-confirm/', views.reset_password_confirm, name='reset_password_confirm'),
-] 
+]     path('send-push-notification/', views.send_push_notification, name='send_push_notification'),

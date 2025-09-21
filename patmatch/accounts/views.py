@@ -573,3 +573,47 @@ def reset_password_confirm(request):
             {'error': 'حدث خطأ في تغيير كلمة المرور'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_push_notification(request):
+    """Send push notification to authenticated user"""
+    title = request.data.get('title', 'PetMatch Notification')
+    body = request.data.get('body', 'You have a new notification')
+    data = request.data.get('data', {})
+    
+    user = request.user
+    
+    if not user.fcm_token:
+        return Response(
+            {'error': 'User does not have FCM token registered'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # Import Firebase service
+        from .firebase_service import firebase_service
+        
+        success = firebase_service.send_notification(
+            fcm_token=user.fcm_token,
+            title=title,
+            body=body,
+            data=data
+        )
+        
+        if success:
+            return Response({
+                'success': True,
+                'message': 'Push notification sent successfully'
+            })
+        else:
+            return Response(
+                {'error': 'Failed to send push notification'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+    except Exception as e:
+        return Response(
+            {'error': f'Error sending notification: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
