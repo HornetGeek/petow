@@ -11,6 +11,7 @@ from django.core.mail import send_mail
 from django.conf import settings
 import requests
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -617,3 +618,55 @@ def send_push_notification(request):
             {'error': f'Error sending notification: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def admin_send_push_to_email(request):
+    """Send a push notification to a user by email (admin-only via API key).
+    Headers:
+      - X-API-KEY: <key>  OR  Authorization: Api-Key <key>
+    Body JSON:
+      { "email": "user@example.com", "title": "...", "body": "...", "data": { ... } }
+    """
+    try:
+        provided_key = request.headers.get('X-API-KEY') or ''
+        if not provided_key:
+            auth_header = request.headers.get('Authorization', '')
+            if auth_header.lower().startswith('api-key '):
+                provided_key = auth_header.split(' ', 1)[1].strip()
+        configured_key = getattr(settings, 'ADMIN_API_KEY', None) or os.environ.get('ADMIN_API_KEY')
+        if not configured_key or provided_key != configured_key:
+            return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        email = request.data.get('email', '').strip().lower()
+        title = request.data.get('title') or 'PetMatch Notification'
+        body = request.data.get('body') or 'You have a new notification'
+        data = request.data.get('data') or {}
+
+        if not email:
+            return Response({'error': 'email is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email=email).first()
+        if not user:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        if not user.fcm_token:
+            return Response({'error': 'User has no FCM token'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .firebase_service import firebase_service
+        if not firebase_service.is_initialized:
+            return Response({'error': 'Firebase not initialized'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        ok = firebase_service.send_notification(
+            fcm_token=user.fcm_token,
+            title=title,
+            body=body,
+            data=data,
+        )
+        if ok:
+            return Response({'success': True}, status=status.HTTP_200_OK)
+        return Response({'error': 'Failed to send push'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    except Exception as e:
+        logger.error(f"admin_send_push_to_email error: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
