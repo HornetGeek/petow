@@ -18,7 +18,7 @@ from .notifications import (
     notify_breeding_request_received, notify_breeding_request_approved,
     notify_breeding_request_rejected, notify_breeding_request_completed,
     notify_favorite_added, notify_adoption_request_received,
-    notify_adoption_request_approved
+    notify_adoption_request_approved, notify_new_pet_added
 )
 # إضافة imports للإشعارات الجديدة
 from accounts.firebase_service import firebase_service
@@ -73,7 +73,14 @@ class PetListCreateView(generics.ListCreateAPIView):
         print(f"🆕 Django: Request user backend: {getattr(request.user, 'backend', 'NO_BACKEND')}")
         
         try:
-            return super().create(request, *args, **kwargs)
+            response = super().create(request, *args, **kwargs)
+            if response.status_code == status.HTTP_201_CREATED and response.data.get('id'):
+                try:
+                    pet = Pet.objects.get(id=response.data['id'])
+                    notify_new_pet_added(pet)
+                except Pet.DoesNotExist:
+                    logger.warning("Newly created pet not found for notification (id=%s)", response.data.get('id'))
+            return response
         except Exception as e:
             print(f"❌ Django: Create error: {str(e)}")
             print(f"❌ Django: Error type: {type(e)}")

@@ -1,0 +1,73 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.so
+
+# === Virtual Environments ===
+venv/
+.venv/
+env/
+ENV/
+
+# === Django ===
+local_settings.py
+settings_local.py
+settings.dev.py
+settings.local.py
+
+# SQLite (if used locally)
+db.sqlite3
+db.sqlite3-journal
+
+# === Media & Static (generated/uploaded) ===
+media/
+static/
+staticfiles/
+
+# === Logs & temp ===
+*.log
+logs/
+logs/*.log
+patmatch/logs/
+*.tmp
+.tmp/
+.tmp*/
+/tmp/
+
+# Test & coverage caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker caches
+.mypy_cache/
+.pyrightcache/
+
+# Build & packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Editors/OS junk
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# Env files / secrets
+.env
+.env.*
+*.env
+*.local
+firebase-key.json
+
+# NOTE: Do NOT ignore migrations
+# migrations/ 

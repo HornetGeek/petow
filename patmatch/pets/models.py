@@ -351,6 +351,7 @@ class Notification(models.Model):
         ('pet_status_changed', 'تم تغيير حالة حيوانك'),
         ('system_message', 'رسالة من النظام'),
         ('chat_message_received', 'تم استلام رسالة جديدة'),
+        ('pet_nearby', 'حيوان جديد بالقرب منك'),
     ]
     
     user = models.ForeignKey(
@@ -425,7 +426,7 @@ class Notification(models.Model):
     
     @classmethod
     def create_chat_message_notification(cls, recipient_user, sender_user, chat_room, message_content):
-        """إنشاء إشعار رسالة جديدة (بدون إيميل فوري)"""
+        """إنشاء إشعار رسالة جديدة مع إرسال إشعار دفع."""
         # لا نرسل إشعار للمرسل نفسه
         if recipient_user.id == sender_user.id:
             return None
@@ -443,7 +444,17 @@ class Notification(models.Model):
                 'message_preview': message_content[:50]
             }
         )
-        # تم إزالة الإيميل الفوري - سيتم إرسال تذكرة يومية بدلاً من ذلك
+
+        from .notifications import _send_push_notification  # local import to avoid circular dependency
+
+        push_payload = {
+            'type': 'chat_message_received',
+            'chat_id': chat_room.firebase_chat_id,
+            'sender_id': str(sender_user.id),
+            'sender_name': sender_user.get_full_name(),
+        }
+        _send_push_notification(recipient_user, notification.title, notification.message, push_payload)
+
         return notification
 
 class ChatRoom(models.Model):
