@@ -13,6 +13,8 @@ import requests
 import logging
 import os
 
+from .email_notifications import send_welcome_email
+
 logger = logging.getLogger(__name__)
 
 # Create your views here.
@@ -125,6 +127,11 @@ def register(request):
         first_name=first_name,
         last_name=last_name
     )
+    
+    try:
+        send_welcome_email(user)
+    except Exception as exc:
+        logger.error("Failed to send welcome email to %s: %s", user.email, exc)
     
     token, created = Token.objects.get_or_create(user=user)
     return Response({

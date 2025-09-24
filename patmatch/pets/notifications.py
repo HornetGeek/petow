@@ -1,14 +1,46 @@
 """
 Utilities for creating and managing notifications
 """
+import logging
+from math import radians, sin, cos, sqrt, atan2
+
+
 from .models import Notification, Pet, BreedingRequest
 from accounts.models import User
+from accounts.firebase_service import firebase_service
 from .email_notifications import (
     send_breeding_request_email, 
     send_breeding_request_approved_email,
     send_adoption_request_email,
     send_adoption_request_approved_email
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _send_push_notification(user, title, message, data=None):
+    """Helper to send a push notification if the user has a valid FCM token."""
+    if not user or not user.fcm_token:
+        return False
+
+    if not firebase_service.is_initialized:
+        logger.debug("Firebase not initialised; skipping push notification for %s", user.id)
+        return False
+
+    payload = data or {}
+    try:
+        success = firebase_service.send_notification(
+            fcm_token=user.fcm_token,
+            title=title,
+            body=message,
+            data=payload
+        )
+        if not success:
+            logger.warning("Failed to deliver push notification to user %s", user.id)
+        return success
+    except Exception as exc:
+        logger.error("Error sending push notification to user %s: %s", user.id, exc)
+        return False
 
 def create_notification(
     user,
@@ -77,10 +109,18 @@ def notify_breeding_request_received(breeding_request):
         related_breeding_request=breeding_request,
         extra_data=extra_data
     )
-    
+
     # إرسال إيميل
     send_breeding_request_email(breeding_request)
-    
+
+    # إرسال إشعار دفع
+    push_payload = {
+        'type': 'breeding_request_received',
+        'breeding_request_id': str(breeding_request.id),
+        'pet_id': str(target_pet.id),
+    }
+    _send_push_notification(receiver, title, message, push_payload)
+
     return notification
 
 def notify_breeding_request_approved(breeding_request):
@@ -116,10 +156,17 @@ def notify_breeding_request_approved(breeding_request):
         related_breeding_request=breeding_request,
         extra_data=extra_data
     )
-    
+
     # إرسال إيميل
     send_breeding_request_approved_email(breeding_request)
-    
+
+    push_payload = {
+        'type': 'breeding_request_approved',
+        'breeding_request_id': str(breeding_request.id),
+        'pet_id': str(target_pet.id),
+    }
+    _send_push_notification(requester, title, message, push_payload)
+
     return notification
 
 def notify_breeding_request_rejected(breeding_request):
@@ -130,7 +177,7 @@ def notify_breeding_request_rejected(breeding_request):
     title = f"تم رفض طلب مقابلتك مع {target_pet.name}"
     message = f"نأسف، تم رفض طلب المقابلة الخاص بك. يمكنك البحث عن حيوانات أخرى للتزاوج."
     
-    return create_notification(
+    notification = create_notification(
         user=requester,
         notification_type='breeding_request_rejected',
         title=title,
@@ -142,6 +189,15 @@ def notify_breeding_request_rejected(breeding_request):
         }
     )
 
+    push_payload = {
+        'type': 'breeding_request_rejected',
+        'breeding_request_id': str(breeding_request.id),
+        'pet_id': str(target_pet.id),
+    }
+    _send_push_notification(requester, title, message, push_payload)
+
+    return notification
+
 def notify_breeding_request_completed(breeding_request):
     """إشعار بإكمال المقابلة"""
     # إشعار لكلا الطرفين
@@ -150,7 +206,7 @@ def notify_breeding_request_completed(breeding_request):
     for user in [breeding_request.requester, breeding_request.receiver]:
         title = "تم إكمال المقابلة بنجاح"
         message = f"تم إكمال مقابلة التزاوج بنجاح! نتمنى لكم التوفيق."
-        
+
         notification = create_notification(
             user=user,
             notification_type='breeding_request_completed',
@@ -162,7 +218,13 @@ def notify_breeding_request_completed(breeding_request):
             }
         )
         notifications.append(notification)
-    
+
+        push_payload = {
+            'type': 'breeding_request_completed',
+            'breeding_request_id': str(breeding_request.id),
+        }
+        _send_push_notification(user, title, message, push_payload)
+
     return notifications
 
 def notify_favorite_added(pet, user_who_favorited):
@@ -189,11 +251,11 @@ def notify_favorite_added(pet, user_who_favorited):
 def notify_pet_status_changed(pet, old_status, new_status):
     """إشعار بتغيير حالة الحيوان"""
     pet_owner = pet.owner
-    
+
     title = f"تم تغيير حالة {pet.name}"
     message = f"تم تغيير حالة حيوانك {pet.name} من {old_status} إلى {new_status}"
-    
-    return create_notification(
+
+    notification = create_notification(
         user=pet_owner,
         notification_type='pet_status_changed',
         title=title,
@@ -204,6 +266,103 @@ def notify_pet_status_changed(pet, old_status, new_status):
             'new_status': new_status
         }
     )
+
+    push_payload = {
+        'type': 'pet_status_changed',
+        'pet_id': str(pet.id),
+        'old_status': old_status,
+        'new_status': new_status,
+    }
+    _send_push_notification(pet_owner, title, message, push_payload)
+
+    return notification
+
+
+
+def _normalise_location(location):
+    if not location:
+        return ''
+    primary = str(location).split(',')[0]
+    return primary.strip().lower()
+
+
+def _haversine_km(lat1, lng1, lat2, lng2):
+    try:
+        lat1, lng1, lat2, lng2 = map(float, (lat1, lng1, lat2, lng2))
+    except (TypeError, ValueError):
+        return None
+
+    rlat1, rlng1, rlat2, rlng2 = map(radians, (lat1, lng1, lat2, lng2))
+    dlat = rlat2 - rlat1
+    dlng = rlng2 - rlng1
+    a = sin(dlat / 2) ** 2 + cos(rlat1) * cos(rlat2) * sin(dlng / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    earth_radius_km = 6371
+    return earth_radius_km * c
+
+
+def notify_new_pet_added(pet, radius_km=30):
+    """إرسال إشعار عند إضافة حيوان جديد للمستخدمين القريبين أو في نفس المدينة."""
+    recipients = set()
+
+    normalised_location = _normalise_location(pet.location)
+    candidate_pets = Pet.objects.filter(status='available').exclude(owner=pet.owner)
+
+    if normalised_location:
+        for row in candidate_pets.exclude(location__isnull=True).values('owner_id', 'location'):
+            if _normalise_location(row['location']) == normalised_location:
+                recipients.add(row['owner_id'])
+
+    if pet.latitude is not None and pet.longitude is not None:
+        geo_candidates = candidate_pets.exclude(latitude__isnull=True).exclude(longitude__isnull=True)
+        for row in geo_candidates.values('owner_id', 'latitude', 'longitude'):
+            distance = _haversine_km(pet.latitude, pet.longitude, row['latitude'], row['longitude'])
+            if distance is not None and distance <= radius_km:
+                recipients.add(row['owner_id'])
+
+    if not recipients:
+        return []
+
+    users = User.objects.filter(
+        id__in=recipients,
+        fcm_token__isnull=False
+    ).exclude(fcm_token='').distinct()
+
+    if not users:
+        return []
+
+    notifications = []
+    title = "حيوان جديد بالقرب منك"
+    location_text = pet.location or 'مدينتك'
+    message = f"{pet.name} متاح الآن للتزاوج في {location_text}. تعرف على التفاصيل وابدأ المحادثة!"
+    extra = {
+        'pet_id': pet.id,
+        'pet_name': pet.name,
+        'pet_type': pet.pet_type,
+        'location': location_text,
+    }
+
+    for user in users:
+        notification = create_notification(
+            user=user,
+            notification_type='pet_nearby',
+            title=title,
+            message=message,
+            related_pet=pet,
+            extra_data=extra
+        )
+        notifications.append(notification)
+
+        push_payload = {
+            'type': 'pet_nearby',
+            'pet_id': str(pet.id),
+            'pet_name': pet.name,
+            'location': location_text,
+        }
+        _send_push_notification(user, title, message, push_payload)
+
+    logger.info("Sent nearby pet notifications for pet %s to %d users", pet.id, len(notifications))
+    return notifications
 
 def send_system_message(user, title, message, extra_data=None):
     """إرسال رسالة نظام"""
