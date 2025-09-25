@@ -293,5 +293,10 @@ if DEBUG:
     # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
     pass
 else:
-    # Production email settings
-    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    # In production keep Brevo API backend when credentials are available
+    if BREVO_API_KEY and BREVO_FROM_EMAIL:
+        # Already configured above via BrevoEmailBackend
+        pass
+    else:
+        # Fall back to SMTP only if no Brevo credentials are configured
+        EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
