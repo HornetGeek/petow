@@ -11,7 +11,7 @@ def send_welcome_email(user):
         logger.warning("Cannot send welcome email, user %s has no email", user.id)
         return
 
-    subject = "🎉 مرحباً بك في Peto!"
+    subject = "🎉 مرحباً بك في Petow!"
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'SERVER_EMAIL', None)
     if not from_email:
         logger.warning("No DEFAULT_FROM_EMAIL configured; skipping welcome email for %s", user.email)
@@ -21,11 +21,14 @@ def send_welcome_email(user):
     whatsapp_number = "201272011482"
     whatsapp_link = f"https://wa.me/{whatsapp_number}"
 
+    app_add_pet_link = "petow://add-pet"
+
     text_body = (
         f"مرحباً {first_name},\n\n"
-        "نحن سعداء بانضمامك إلى مجتمع Peto. أضف حيوانك الأليف الآن لتبدأ في اكتشاف أصدقاء جدد له!\n\n"
+        "نحن سعداء بانضمامك إلى مجتمع Petow. أضف حيوانك الأليف الآن لتبدأ في اكتشاف أصدقاء جدد له!\n\n"
+        f"اضغط هنا لفتح التطبيق وإضافة حيوانك مباشرة: {app_add_pet_link}\n\n"
         "إذا احتجت أي مساعدة أو لديك اقتراح، تواصل معنا عبر واتساب: +" + whatsapp_number + "\n\n"
-        "مع تحيات فريق Peto"
+        "مع تحيات فريق Petow"
     )
 
     html_body = f"""
@@ -38,7 +41,7 @@ def send_welcome_email(user):
                 <tr>
                   <td style="background:linear-gradient(135deg,#667eea,#764ba2);padding:30px 24px;color:#ffffff;">
                     <h1 style="margin:0;font-size:26px;">مرحبا {first_name}! 👋</h1>
-                    <p style="margin:10px 0 0;font-size:16px;opacity:0.9;">سعداء بانضمامك إلى عائلة Peto.</p>
+                    <p style="margin:10px 0 0;font-size:16px;opacity:0.9;">سعداء بانضمامك إلى عائلة Petow.</p>
                   </td>
                 </tr>
                 <tr>
@@ -50,7 +53,7 @@ def send_welcome_email(user):
                     <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 28px;">
                       <tr>
                         <td style="background:#667eea;border-radius:999px;">
-                          <a href="https://petow.app" style="display:inline-block;padding:14px 28px;color:#ffffff;text-decoration:none;font-weight:bold;">🚀 أضف حيوانك الآن</a>
+                          <a href="{app_add_pet_link}" style="display:inline-block;padding:14px 28px;color:#ffffff;text-decoration:none;font-weight:bold;">🚀 أضف حيوانك الآن</a>
                         </td>
                       </tr>
                     </table>
@@ -65,7 +68,7 @@ def send_welcome_email(user):
                     </div>
                     <p style="font-size:14px;color:#475569;line-height:1.6;margin:0;">
                       شكراً لثقتك بنا، ونتطلع لرؤية حيوانك ضمن قصص النجاح القادمة!<br/>
-                      فريق <strong>Peto</strong>
+                      فريق <strong>Petow</strong>
                     </p>
                   </td>
                 </tr>
@@ -92,7 +95,7 @@ def send_password_reset_email(user, otp_code):
         logger.warning("Cannot send password reset email, user %s has no email", user.id)
         return
 
-    subject = 'كود إعادة تعيين كلمة المرور - Peto'
+    subject = 'كود إعادة تعيين كلمة المرور - Petow'
     from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'SERVER_EMAIL', None)
     if not from_email:
         logger.warning("No DEFAULT_FROM_EMAIL configured; skipping password reset email for %s", user.email)
@@ -102,10 +105,10 @@ def send_password_reset_email(user, otp_code):
 
     text_body = (
         f"مرحباً {first_name},\n\n"
-        "تم طلب إعادة تعيين كلمة المرور لحسابك في Peto.\n\n"
+        "تم طلب إعادة تعيين كلمة المرور لحسابك في Petow.\n\n"
         f"كود التحقق الخاص بك هو: {otp_code}\n\n"
         "هذا الكود صالح لمدة 15 دقيقة فقط. إذا لم تطلب إعادة تعيين كلمة المرور، يرجى تجاهل هذه الرسالة.\n\n"
-        "فريق Peto"
+        "فريق Petow"
     )
 
     html_body = f"""
@@ -124,7 +127,7 @@ def send_password_reset_email(user, otp_code):
                 <tr>
                   <td style="padding:28px 26px;">
                     <p style="font-size:15px;line-height:1.8;margin:0 0 18px;">
-                      وصلك هذا البريد لأنك طلبت إعادة تعيين كلمة المرور لحسابك في <strong>Peto</strong>.
+                      وصلك هذا البريد لأنك طلبت إعادة تعيين كلمة المرور لحسابك في <strong>Petow</strong>.
                     </p>
                     <p style="margin:0 0 24px;font-size:32px;font-weight:bold;text-align:center;letter-spacing:6px;color:#1e293b;">
                       {otp_code}
@@ -133,7 +136,7 @@ def send_password_reset_email(user, otp_code):
                       الكود صالح لمدة <strong>15 دقيقة</strong>. إذا لم تكن أنت من طلب إعادة التعيين فيمكنك تجاهل هذه الرسالة.
                     </p>
                     <p style="font-size:14px;color:#475569;line-height:1.6;margin:0;">
-                      مع تحيات فريق <strong>Peto</strong>
+                      مع تحيات فريق <strong>Petow</strong>
                     </p>
                   </td>
                 </tr>
