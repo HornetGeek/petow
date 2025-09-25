@@ -604,6 +604,19 @@ def send_push_notification(request):
         )
 
 
+def _validate_admin_api_key(request):
+    """Return True if request includes the correct admin API key."""
+    provided_key = request.headers.get('X-API-KEY') or ''
+    if not provided_key:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.lower().startswith('api-key '):
+            provided_key = auth_header.split(' ', 1)[1].strip()
+    configured_key = getattr(settings, 'ADMIN_API_KEY', None) or os.environ.get('ADMIN_API_KEY')
+    if not configured_key or provided_key != configured_key:
+        return False
+    return True
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def admin_send_push_to_email(request):
@@ -614,13 +627,7 @@ def admin_send_push_to_email(request):
       { "email": "user@example.com", "title": "...", "body": "...", "data": { ... } }
     """
     try:
-        provided_key = request.headers.get('X-API-KEY') or ''
-        if not provided_key:
-            auth_header = request.headers.get('Authorization', '')
-            if auth_header.lower().startswith('api-key '):
-                provided_key = auth_header.split(' ', 1)[1].strip()
-        configured_key = getattr(settings, 'ADMIN_API_KEY', None) or os.environ.get('ADMIN_API_KEY')
-        if not configured_key or provided_key != configured_key:
+        if not _validate_admin_api_key(request):
             return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
 
         email = request.data.get('email', '').strip().lower()
@@ -653,4 +660,39 @@ def admin_send_push_to_email(request):
 
     except Exception as e:
         logger.error(f"admin_send_push_to_email error: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def admin_send_push_to_token(request):
+    """Send a push notification directly to an FCM token (admin-only via API key)."""
+    try:
+        if not _validate_admin_api_key(request):
+            return Response({'error': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        fcm_token = (request.data.get('fcm_token') or '').strip()
+        title = request.data.get('title') or 'PetMatch Notification'
+        body = request.data.get('body') or 'You have a new notification'
+        data = request.data.get('data') or {}
+
+        if not fcm_token:
+            return Response({'error': 'fcm_token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .firebase_service import firebase_service
+        if not firebase_service.is_initialized:
+            return Response({'error': 'Firebase not initialized'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        ok = firebase_service.send_notification(
+            fcm_token=fcm_token,
+            title=title,
+            body=body,
+            data=data,
+        )
+        if ok:
+            return Response({'success': True}, status=status.HTTP_200_OK)
+        return Response({'error': 'Failed to send push'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    except Exception as e:
+        logger.error(f"admin_send_push_to_token error: {e}")
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
