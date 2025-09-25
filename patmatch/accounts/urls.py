@@ -19,4 +19,5 @@ urlpatterns = [
     path('send-push-notification/', views.send_push_notification, name='send_push_notification'),
     # Admin push endpoint (API key protected)
     path('admin/send-push-to-email/', views.admin_send_push_to_email, name='admin_send_push_to_email'),
+    path('admin/send-push-to-token/', views.admin_send_push_to_token, name='admin_send_push_to_token'),
 ]
