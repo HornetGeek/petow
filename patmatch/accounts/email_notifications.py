@@ -84,3 +84,71 @@ def send_welcome_email(user):
         logger.info("Welcome email sent to %s", user.email)
     except Exception as exc:
         logger.error("Failed to send welcome email to %s: %s", user.email, exc)
+
+
+def send_password_reset_email(user, otp_code):
+    """Send password-reset OTP with rich HTML template"""
+    if not user.email:
+        logger.warning("Cannot send password reset email, user %s has no email", user.id)
+        return
+
+    subject = 'كود إعادة تعيين كلمة المرور - Peto'
+    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'SERVER_EMAIL', None)
+    if not from_email:
+        logger.warning("No DEFAULT_FROM_EMAIL configured; skipping password reset email for %s", user.email)
+        return
+
+    first_name = user.first_name or user.get_full_name() or 'صديقنا'
+
+    text_body = (
+        f"مرحباً {first_name},\n\n"
+        "تم طلب إعادة تعيين كلمة المرور لحسابك في Peto.\n\n"
+        f"كود التحقق الخاص بك هو: {otp_code}\n\n"
+        "هذا الكود صالح لمدة 15 دقيقة فقط. إذا لم تطلب إعادة تعيين كلمة المرور، يرجى تجاهل هذه الرسالة.\n\n"
+        "فريق Peto"
+    )
+
+    html_body = f"""
+    <html>
+      <body style="background-color:#f6f9fc;font-family:'Tajawal',Arial,sans-serif;color:#1f2937;margin:0;padding:0;">
+        <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+          <tr>
+            <td align="center" style="padding:32px 12px;">
+              <table width="560" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 12px 28px rgba(15,23,42,0.08);">
+                <tr>
+                  <td style="background:linear-gradient(135deg,#f97316,#fb7185);padding:26px 22px;color:#ffffff;">
+                    <h1 style="margin:0;font-size:24px;">إعادة تعيين كلمة المرور</h1>
+                    <p style="margin:8px 0 0;font-size:15px;opacity:0.9;">مرحبا {first_name} 👋</p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:28px 26px;">
+                    <p style="font-size:15px;line-height:1.8;margin:0 0 18px;">
+                      وصلك هذا البريد لأنك طلبت إعادة تعيين كلمة المرور لحسابك في <strong>Peto</strong>.
+                    </p>
+                    <p style="margin:0 0 24px;font-size:32px;font-weight:bold;text-align:center;letter-spacing:6px;color:#1e293b;">
+                      {otp_code}
+                    </p>
+                    <p style="font-size:14px;line-height:1.7;margin:0 0 18px;">
+                      الكود صالح لمدة <strong>15 دقيقة</strong>. إذا لم تكن أنت من طلب إعادة التعيين فيمكنك تجاهل هذه الرسالة.
+                    </p>
+                    <p style="font-size:14px;color:#475569;line-height:1.6;margin:0;">
+                      مع تحيات فريق <strong>Peto</strong>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+
+    email = EmailMultiAlternatives(subject, text_body, from_email, [user.email])
+    email.attach_alternative(html_body, "text/html")
+    try:
+        email.send(fail_silently=False)
+        logger.info("Password reset email sent to %s", user.email)
+    except Exception as exc:
+        logger.error("Failed to send password reset email to %s: %s", user.email, exc)

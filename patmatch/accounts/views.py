@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
 from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer
 from .models import User, PhoneOTP, PasswordResetOTP
+from .email_notifications import send_welcome_email, send_password_reset_email
 from django.core.mail import send_mail
 from django.conf import settings
 import requests
@@ -397,47 +398,23 @@ def send_password_reset_otp(request):
         # إنشاء كود OTP
         password_reset_otp = PasswordResetOTP.generate_otp(user)
         
-        # إرسال الإيميل
-        subject = 'كود إعادة تعيين كلمة المرور - Petow'
-        message = f"""
-        مرحباً {user.first_name},
-        
-        تم طلب إعادة تعيين كلمة المرور لحسابك في Petow.
-        
-        كود التحقق الخاص بك هو: {password_reset_otp.otp_code}
-        
-        هذا الكود صالح لمدة 15 دقيقة فقط.
-        
-        إذا لم تطلب إعادة تعيين كلمة المرور، يرجى تجاهل هذه الرسالة.
-        
-        فريق Petow
-        """
-        
         try:
-            send_mail(
-                subject=subject,
-                message=message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
-            )
-            
+            send_password_reset_email(user, password_reset_otp.otp_code)
             logger.info(f"Password reset OTP sent to {email}: {password_reset_otp.otp_code}")
-            
+
             return Response({
                 'success': True,
                 'message': 'تم إرسال كود التحقق إلى بريدك الإلكتروني'
             })
-            
+
         except Exception as e:
             logger.error(f"Failed to send password reset email to {email}: {str(e)}")
-            # للتطوير: اطبع الكود في الكونسول
             print(f"🔑 Password Reset OTP for {email}: {password_reset_otp.otp_code}")
-            
+
             return Response({
                 'success': True,
                 'message': 'تم إنشاء كود التحقق (تحقق من Django Console للحصول على الكود)',
-                'debug_otp': password_reset_otp.otp_code  # للتطوير فقط
+                'debug_otp': password_reset_otp.otp_code
             })
             
     except User.DoesNotExist:
