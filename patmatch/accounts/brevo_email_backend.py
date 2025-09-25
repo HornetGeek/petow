@@ -37,6 +37,24 @@ class BrevoEmailBackend(BaseEmailBackend):
         
         for message in email_messages:
             try:
+                html_content = None
+                text_content = None
+
+                if getattr(message, 'alternatives', None):
+                    for alt_body, alt_mime in message.alternatives:
+                        if alt_mime == 'text/html':
+                            html_content = alt_body
+                            break
+
+                if message.body:
+                    if getattr(message, 'content_subtype', '') == 'html' and not html_content:
+                        html_content = message.body
+                    else:
+                        text_content = message.body
+
+                if html_content is None and text_content:
+                    html_content = f"<pre>{text_content}</pre>"
+
                 # Prepare email data for Brevo API
                 email_data = {
                     "sender": {
@@ -45,8 +63,8 @@ class BrevoEmailBackend(BaseEmailBackend):
                     },
                     "to": [{"email": recipient} for recipient in message.to],
                     "subject": message.subject,
-                    "htmlContent": message.body if message.content_subtype == 'html' else f"<p>{message.body}</p>",
-                    "textContent": message.body if message.content_subtype == 'plain' else None
+                    "htmlContent": html_content,
+                    "textContent": text_content
                 }
                 
                 # Add reply-to if specified
