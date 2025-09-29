@@ -13,10 +13,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
-            'phone', 'is_phone_verified', 'address', 'profile_picture', 'is_verified',
-            'pets_count', 'date_joined', 'fcm_token'
+            'phone', 'is_phone_verified', 'address', 'latitude', 'longitude', 'profile_picture', 'is_verified',
+            'user_type', 'pets_count', 'date_joined', 'fcm_token'
         ]
-        read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined', 'fcm_token']
+        read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined', 'fcm_token', 'user_type']
     
     def get_pets_count(self, obj):
         return obj.pets.count()
@@ -29,7 +29,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
-            'profile_picture', 'phone', 'is_phone_verified', 'fcm_token'
+            'profile_picture', 'phone', 'is_phone_verified', 'fcm_token', 'user_type'
         ]
 
 class CustomRegisterSerializer(serializers.ModelSerializer):

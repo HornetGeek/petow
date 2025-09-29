@@ -6,15 +6,23 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 
 class User(AbstractUser):
-    """نموذج المستخدم المخصص للمالكين"""
+    """نموذج المستخدم المخصص للمالكين والعيادات"""
     
+    USER_TYPE_CHOICES = [
+        ('pet_owner', 'مالك حيوان أليف'),
+        ('clinic_staff', 'طاقم عيادة'),
+    ]
+
     email = models.EmailField(unique=True)
     phone = models.CharField(max_length=20, help_text="رقم الهاتف مطلوب")
     is_phone_verified = models.BooleanField(default=False)
     address = models.TextField(blank=True, null=True)
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
     profile_picture = models.ImageField(upload_to='profiles/', blank=True, null=True)
     is_verified = models.BooleanField(default=False)
     fcm_token = models.TextField(blank=True, null=True, help_text="FCM token للإشعارات")
+    user_type = models.CharField(max_length=30, choices=USER_TYPE_CHOICES, default='pet_owner')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -22,11 +30,11 @@ class User(AbstractUser):
     REQUIRED_FIELDS = ['phone', 'first_name', 'last_name']
 
     def __str__(self):
-        return f"User-{self.id}"
+        return f"User-{self.id} ({self.get_user_type_display()})"
 
     class Meta:
-        verbose_name = "مالك حيوان أليف"
-        verbose_name_plural = "مالكي الحيوانات الأليفة"
+        verbose_name = "مستخدم"
+        verbose_name_plural = "المستخدمون"
 
 
 class PhoneOTP(models.Model):
