@@ -1,4 +1,6 @@
 from rest_framework import serializers
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+import re
 from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
 import requests
 
@@ -45,6 +47,8 @@ class PetImageSerializer(serializers.ModelSerializer):
         fields = ['id', 'image', 'caption']
 
 class PetSerializer(serializers.ModelSerializer):
+    latitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    longitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
     owner_email = serializers.CharField(source='owner.email', read_only=True)
     breed_name = serializers.CharField(source='breed.name', read_only=True)
@@ -61,6 +65,29 @@ class PetSerializer(serializers.ModelSerializer):
     disease_free_certificate = serializers.FileField(required=False)
     additional_certificate = serializers.FileField(required=False)
     
+    @staticmethod
+    def _looks_like_coords(value: str) -> bool:
+        if not value:
+            return False
+        return bool(re.match(r'^\s*-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?\s*$', str(value)))
+
+    def _normalize_coordinate(self, value, field_name, min_value, max_value):
+        if value in (None, '', 'null'):
+            return None
+        try:
+            dec = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError):
+            raise serializers.ValidationError({field_name: 'إحداثيات الموقع غير صحيحة'})
+
+        quantized = dec.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP)
+        min_dec = Decimal(str(min_value))
+        max_dec = Decimal(str(max_value))
+        if quantized < min_dec or quantized > max_dec:
+            message = 'خط العرض يجب أن يكون بين -90 و 90' if field_name == 'latitude' else 'خط الطول يجب أن يكون بين -180 و 180'
+            raise serializers.ValidationError({field_name: message})
+
+        return quantized
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         # Fix image URLs - if it's an external URL, use the raw value instead of Django's processed URL
@@ -100,49 +127,49 @@ class PetSerializer(serializers.ModelSerializer):
         lng = validated_data.get('longitude', None)
         loc = (validated_data.get('location') or '').strip()
 
-        def _looks_like_coords(s: str) -> bool:
-            return bool(__import__('re').match(r'^\s*-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?\s*$', s))
-
         if lat is not None and lng is not None:
             lat_f = float(lat)
             lng_f = float(lng)
-            if not loc or _looks_like_coords(loc):
+            if not loc or self._looks_like_coords(loc):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
 
         return super().create(validated_data)
     
     def validate(self, data):
-        # Check if this is a create operation and main_image is required
+        data = super().validate(data)
+
         if not self.instance and 'main_image' not in data:
             raise serializers.ValidationError({'main_image': 'الصورة الرئيسية مطلوبة عند إضافة حيوان جديد'})
-        
-        # التحقق من وجود الإحداثيات عند إضافة حيوان جديد
+
+        lat_in_data = 'latitude' in data
+        lng_in_data = 'longitude' in data
+
+        if lat_in_data:
+            normalized_lat = self._normalize_coordinate(data.get('latitude'), 'latitude', -90, 90)
+            if normalized_lat is None:
+                raise serializers.ValidationError({'latitude': 'إحداثيات الموقع مطلوبة (خط العرض)'})
+            data['latitude'] = normalized_lat
+
+        if lng_in_data:
+            normalized_lng = self._normalize_coordinate(data.get('longitude'), 'longitude', -180, 180)
+            if normalized_lng is None:
+                raise serializers.ValidationError({'longitude': 'إحداثيات الموقع مطلوبة (خط الطول)'})
+            data['longitude'] = normalized_lng
+
         if not self.instance:
-            if 'latitude' not in data or 'longitude' not in data:
-                raise serializers.ValidationError({
-                    'latitude': 'إحداثيات الموقع مطلوبة (خط العرض)',
-                    'longitude': 'إحداثيات الموقع مطلوبة (خط الطول)'
-                })
-            
-            # التحقق من صحة الإحداثيات
-            try:
-                lat = float(data.get('latitude', 0))
-                lng = float(data.get('longitude', 0))
-                
-                if not (-90 <= lat <= 90):
-                    raise serializers.ValidationError({'latitude': 'خط العرض يجب أن يكون بين -90 و 90'})
-                
-                if not (-180 <= lng <= 180):
-                    raise serializers.ValidationError({'longitude': 'خط الطول يجب أن يكون بين -180 و 180'})
-                    
-            except (ValueError, TypeError):
-                raise serializers.ValidationError({
-                    'latitude': 'إحداثيات الموقع غير صحيحة',
-                    'longitude': 'إحداثيات الموقع غير صحيحة'
-                })
-        
+            if not lat_in_data:
+                raise serializers.ValidationError({'latitude': 'إحداثيات الموقع مطلوبة (خط العرض)'})
+            if not lng_in_data:
+                raise serializers.ValidationError({'longitude': 'إحداثيات الموقع مطلوبة (خط الطول)'})
+        else:
+            if lat_in_data != lng_in_data:
+                if lat_in_data:
+                    raise serializers.ValidationError({'longitude': 'يجب إرسال خط الطول مع خط العرض عند التحديث'})
+                else:
+                    raise serializers.ValidationError({'latitude': 'يجب إرسال خط العرض مع خط الطول عند التحديث'})
+
         return data
-    
+
     def update(self, instance, validated_data):
         # Handle image and certificate fields - if not provided in request, don't update them
         request = self.context.get('request')
@@ -166,7 +193,7 @@ class PetSerializer(serializers.ModelSerializer):
         if lat is not None and lng is not None:
             lat_f = float(lat)
             lng_f = float(lng)
-            if not loc or _looks_like_coords(loc):
+            if not loc or self._looks_like_coords(loc):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
 
         return super().update(instance, validated_data)
