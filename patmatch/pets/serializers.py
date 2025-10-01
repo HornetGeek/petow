@@ -1,5 +1,33 @@
 from rest_framework import serializers
 from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
+import requests
+
+def reverse_geocode_address(lat: float, lng: float) -> str:
+    try:
+        res = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "format": "jsonv2",
+                "lat": str(lat),
+                "lon": str(lng),
+                "addressdetails": "1",
+                "accept-language": "ar,en",
+            },
+            headers={
+                "User-Agent": "PetMatchBackend/1.0 (contact@yourdomain.com)",
+                "Accept": "application/json",
+            },
+            timeout=6,
+        )
+        res.raise_for_status()
+        data = res.json() or {}
+        full = data.get("display_name") or ""
+        if full:
+            parts = full.split(", ")
+            return ", ".join(parts[:3]) if len(parts) > 3 else full
+        return f"{lat:.4f}, {lng:.4f}"
+    except Exception:
+        return f"{lat:.4f}, {lng:.4f}"
 
 class BreedSerializer(serializers.ModelSerializer):
     class Meta:
@@ -66,6 +94,21 @@ class PetSerializer(serializers.ModelSerializer):
     
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
+
+        # If no user-friendly address given, compute from lat/lng
+        lat = validated_data.get('latitude', None)
+        lng = validated_data.get('longitude', None)
+        loc = (validated_data.get('location') or '').strip()
+
+        def _looks_like_coords(s: str) -> bool:
+            return bool(__import__('re').match(r'^\s*-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?\s*$', s))
+
+        if lat is not None and lng is not None:
+            lat_f = float(lat)
+            lng_f = float(lng)
+            if not loc or _looks_like_coords(loc):
+                validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
+
         return super().create(validated_data)
     
     def validate(self, data):
@@ -115,6 +158,17 @@ class PetSerializer(serializers.ModelSerializer):
                     # Remove the field from validated_data if no new file was uploaded
                     validated_data.pop(field, None)
         
+        # Compute address if needed (coords present/changed and location is empty or looks like coords)
+        lat = validated_data.get('latitude', None)
+        lng = validated_data.get('longitude', None)
+        loc = (validated_data.get('location') or '').strip()
+
+        if lat is not None and lng is not None:
+            lat_f = float(lat)
+            lng_f = float(lng)
+            if not loc or _looks_like_coords(loc):
+                validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
+
         return super().update(instance, validated_data)
 
 class PetListSerializer(serializers.ModelSerializer):

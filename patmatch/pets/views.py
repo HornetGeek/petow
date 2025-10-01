@@ -25,8 +25,36 @@ from accounts.firebase_service import firebase_service
 import logging
 import time
 from django.db import models
+import requests
 
 logger = logging.getLogger(__name__)
+
+def reverse_geocode_address(lat: float, lng: float) -> str:
+    try:
+        res = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "format": "jsonv2",
+                "lat": str(lat),
+                "lon": str(lng),
+                "addressdetails": "1",
+                "accept-language": "ar,en",
+            },
+            headers={
+                "User-Agent": "PetMatchBackend/1.0 (contact@yourdomain.com)",
+                "Accept": "application/json",
+            },
+            timeout=6,
+        )
+        res.raise_for_status()
+        data = res.json() or {}
+        full = data.get("display_name") or ""
+        if full:
+            parts = full.split(", ")
+            return ", ".join(parts[:3]) if len(parts) > 3 else full
+        return f"{lat:.4f}, {lng:.4f}"
+    except Exception:
+        return f"{lat:.4f}, {lng:.4f}"
 
 class BreedListView(generics.ListAPIView):
     """قائمة السلالات"""
