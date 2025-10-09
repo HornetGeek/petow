@@ -138,7 +138,7 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Allow larger payloads so multi-image uploads don't fail (413 Payload Too Large)
-MAX_UPLOAD_SIZE_MB = 20
+MAX_UPLOAD_SIZE_MB = 200
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
@@ -159,6 +159,10 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20
 }
+
+# Mobile app invite links
+MOBILE_APP_INVITE_LINK_BASE = os.environ.get('MOBILE_APP_INVITE_LINK_BASE', 'https://app.petmatch.com/invite')
+MOBILE_APP_DOWNLOAD_URL = os.environ.get('MOBILE_APP_DOWNLOAD_URL', 'https://app.petmatch.com/download')
 
 # CORS settings
 CORS_ALLOWED_ORIGINS = [

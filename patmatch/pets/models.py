@@ -290,7 +290,7 @@ class BreedingRequest(models.Model):
     
     # تفاصيل المقابلة
     message = models.TextField(blank=True, null=True, help_text="رسالة من الطالب")
-    meeting_date = models.DateField(help_text="تاريخ المقابلة المقترح")
+    meeting_date = models.DateField(blank=True, null=True, help_text="تاريخ المقابلة المقترح (اختياري)")
     veterinary_clinic = models.ForeignKey(VeterinaryClinic, on_delete=models.CASCADE, blank=True, null=True, help_text="العيادة البيطرية للمقابلة (اختياري)")
     contact_phone = models.CharField(max_length=20, help_text="رقم الهاتف للتواصل")
     
@@ -352,6 +352,7 @@ class Notification(models.Model):
         ('system_message', 'رسالة من النظام'),
         ('chat_message_received', 'تم استلام رسالة جديدة'),
         ('pet_nearby', 'حيوان جديد بالقرب منك'),
+        ('clinic_invite', 'دعوة ربط عيادة'),
     ]
     
     user = models.ForeignKey(
