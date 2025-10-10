@@ -402,22 +402,56 @@ class ChatRoomSerializer(serializers.ModelSerializer):
             if other_user:
                 return {
                     'id': other_user.id,
-                    'name': f"{other_user.first_name} {other_user.last_name}",
+                    'name': f"{other_user.first_name} {other_user.last_name}".strip(),
                     'email': other_user.email,
                     'phone': other_user.phone,
                 }
+
+        if obj.clinic_patient and obj.clinic_patient.clinic:
+            clinic = obj.clinic_patient.clinic
+            return {
+                'id': getattr(clinic, 'id', 0) or 0,
+                'name': clinic.name,
+                'email': getattr(clinic, 'email', None),
+                'phone': getattr(clinic, 'phone', None),
+            }
         return None
     
     def get_pet_details(self, obj):
-        """تفاصيل الحيوان المرتبط بالطلب"""
-        pet = obj.breeding_request.target_pet
-        return {
-            'id': pet.id,
-            'name': pet.name,
-            'breed_name': pet.breed.name,
-            'pet_type_display': pet.pet_type_display,
-            'main_image': pet.main_image.url if pet.main_image else None,
-        }
+        """تفاصيل الحيوان أو المريض المرتبط بالمحادثة"""
+        try:
+            if obj.breeding_request and obj.breeding_request.target_pet:
+                pet = obj.breeding_request.target_pet
+                return {
+                    'id': pet.id,
+                    'name': pet.name,
+                    'breed_name': pet.breed.name,
+                    'pet_type_display': pet.pet_type_display,
+                    'main_image': pet.main_image.url if pet.main_image else None,
+                }
+            if obj.adoption_request and obj.adoption_request.pet:
+                pet = obj.adoption_request.pet
+                return {
+                    'id': pet.id,
+                    'name': pet.name,
+                    'breed_name': pet.breed.name,
+                    'pet_type_display': pet.pet_type_display,
+                    'main_image': pet.main_image.url if pet.main_image else None,
+                }
+            if obj.clinic_patient:
+                patient = obj.clinic_patient
+                owner = getattr(patient, 'owner', None)
+                return {
+                    'id': patient.id,
+                    'name': patient.name,
+                    'breed_name': patient.breed,
+                    'pet_type_display': patient.species,
+                    'main_image': None,
+                    'owner_name': getattr(owner, 'full_name', None) if owner else None,
+                }
+        except Exception:
+            pass
+        return None
 
 
 class ChatRoomListSerializer(serializers.ModelSerializer):
@@ -437,40 +471,44 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
         """اسم المشارك الآخر"""
         try:
             request = self.context.get('request')
-            if request and request.user.is_authenticated:
-                # Get participants safely
-                participants = []
-                try:
-                    if obj.breeding_request and obj.breeding_request.requester:
-                        participants.append(obj.breeding_request.requester)
-                    if obj.breeding_request and obj.breeding_request.target_pet and obj.breeding_request.target_pet.owner:
-                        participants.append(obj.breeding_request.target_pet.owner)
-                except:
-                    pass
-                
-                # Find the other participant
+            participants = obj.get_participants()
+            if request and request.user.is_authenticated and participants:
                 for participant in participants:
                     if participant.id != request.user.id:
-                        return f"{participant.first_name} {participant.last_name}"
+                        full_name = f"{participant.first_name} {participant.last_name}".strip()
+                        return full_name or participant.email or 'مشارك'
+            elif participants:
+                participant = participants[0]
+                full_name = f"{participant.first_name} {participant.last_name}".strip()
+                return full_name or participant.email or 'مشارك'
+
+            if obj.clinic_patient and obj.clinic_patient.clinic:
+                return obj.clinic_patient.clinic.name
         except Exception:
             pass
         return "مستخدم آخر"
     
     def get_pet_name(self, obj):
-        """اسم الحيوان"""
+        """اسم الحيوان او المريض"""
         try:
             if obj.breeding_request and obj.breeding_request.target_pet:
                 return obj.breeding_request.target_pet.name
-        except:
+            if obj.adoption_request and obj.adoption_request.pet:
+                return obj.adoption_request.pet.name
+            if obj.clinic_patient:
+                return obj.clinic_patient.name or 'مريض العيادة'
+        except Exception:
             pass
         return "حيوان غير محدد"
     
     def get_pet_image(self, obj):
-        """صورة الحيوان"""
+        """صورة الحيوان أو المريض"""
         try:
             if obj.breeding_request and obj.breeding_request.target_pet and obj.breeding_request.target_pet.main_image:
                 return obj.breeding_request.target_pet.main_image.url
-        except:
+            if obj.adoption_request and obj.adoption_request.pet and obj.adoption_request.pet.main_image:
+                return obj.adoption_request.pet.main_image.url
+        except Exception:
             pass
         return None
 
@@ -505,30 +543,33 @@ class ChatStatusSerializer(serializers.ModelSerializer):
     def get_participants_count(self, obj):
         """عدد المشاركين"""
         try:
-            participants = []
-            if obj.breeding_request and obj.breeding_request.requester:
-                participants.append(obj.breeding_request.requester)
-            if obj.breeding_request and obj.breeding_request.target_pet and obj.breeding_request.target_pet.owner:
-                participants.append(obj.breeding_request.target_pet.owner)
-            return len(participants)
-        except:
+            return len(obj.get_participants())
+        except Exception:
             return 0
     
     def get_breeding_request_status(self, obj):
-        """حالة طلب التزاوج"""
+        """حالة المحادثة"""
         try:
             if obj.breeding_request:
                 return obj.breeding_request.status
-        except:
+            if obj.adoption_request:
+                return obj.adoption_request.status
+            if obj.clinic_patient:
+                return "clinic_chat"
+        except Exception:
             pass
         return "غير محدد"
     
     def get_pet_name(self, obj):
-        """اسم الحيوان"""
+        """اسم الحيوان أو المريض"""
         try:
             if obj.breeding_request and obj.breeding_request.target_pet:
                 return obj.breeding_request.target_pet.name
-        except:
+            if obj.adoption_request and obj.adoption_request.pet:
+                return obj.adoption_request.pet.name
+            if obj.clinic_patient:
+                return obj.clinic_patient.name
+        except Exception:
             pass
         return "حيوان غير محدد"
     
@@ -537,20 +578,17 @@ class ChatStatusSerializer(serializers.ModelSerializer):
         try:
             request = self.context.get('request')
             if request and request.user.is_authenticated:
-                # Get participants safely
-                participants = []
-                try:
-                    if obj.breeding_request and obj.breeding_request.requester:
-                        participants.append(obj.breeding_request.requester)
-                    if obj.breeding_request and obj.breeding_request.target_pet and obj.breeding_request.target_pet.owner:
-                        participants.append(obj.breeding_request.target_pet.owner)
-                except:
-                    pass
-                
-                # Find the other participant
-                for participant in participants:
-                    if participant.id != request.user.id:
-                        return f"{participant.first_name} {participant.last_name}"
+                other_user = obj.get_other_participant(request.user)
+                if other_user:
+                    full_name = f"{other_user.first_name} {other_user.last_name}".strip()
+                    return full_name or other_user.email or 'مشارك'
+            participants = obj.get_participants()
+            if participants:
+                participant = participants[0]
+                full_name = f"{participant.first_name} {participant.last_name}".strip()
+                return full_name or participant.email or 'مشارك'
+            if obj.clinic_patient and obj.clinic_patient.clinic:
+                return obj.clinic_patient.clinic.name
         except Exception:
             pass
         return "مستخدم آخر"

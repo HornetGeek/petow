@@ -134,14 +134,31 @@ class ClinicPromotionSerializer(serializers.ModelSerializer):
 
 
 class ClinicMessageSerializer(serializers.ModelSerializer):
+    clinic_patient = serializers.PrimaryKeyRelatedField(
+        queryset=ClinicPatientRecord.objects.all(),
+        required=False,
+        allow_null=True
+    )
+    firebase_chat_id = serializers.SerializerMethodField()
+    chat_room_id = serializers.SerializerMethodField()
+
     class Meta:
         model = ClinicMessage
         fields = [
-            'id', 'clinic', 'sender_name', 'sender_email', 'sender_phone',
+            'id', 'clinic', 'clinic_patient', 'sender_name', 'sender_email', 'sender_phone',
             'subject', 'message', 'status', 'priority', 'is_internal',
+            'firebase_chat_id', 'chat_room_id',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'clinic', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'clinic', 'firebase_chat_id', 'chat_room_id', 'created_at', 'updated_at']
+
+    def get_firebase_chat_id(self, obj):
+        chat_room = getattr(obj, 'chat_room', None)
+        return chat_room.firebase_chat_id if chat_room else None
+
+    def get_chat_room_id(self, obj):
+        chat_room = getattr(obj, 'chat_room', None)
+        return chat_room.id if chat_room else None
 
 
 class ClinicPatientRecordSerializer(serializers.ModelSerializer):

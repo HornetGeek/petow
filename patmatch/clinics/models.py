@@ -226,6 +226,14 @@ class ClinicMessage(models.Model):
     ]
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='messages')
+    clinic_patient = models.ForeignKey(
+        ClinicPatientRecord,
+        on_delete=models.SET_NULL,
+        related_name='messages',
+        null=True,
+        blank=True,
+        help_text='المريض المرتبط بالمحادثة (إن وُجد)'
+    )
     sender_name = models.CharField(max_length=150)
     sender_email = models.EmailField(blank=True, null=True)
     sender_phone = models.CharField(max_length=30, blank=True, null=True)
