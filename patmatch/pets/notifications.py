@@ -81,24 +81,30 @@ def notify_breeding_request_received(breeding_request):
     receiver = breeding_request.receiver
     target_pet = breeding_request.target_pet
     requester_pet = breeding_request.requester_pet
-    
+
     title = f"طلب مقابلة جديد من {breeding_request.requester.get_full_name()}"
     message = f"يريد {breeding_request.requester.get_full_name()} ترتيب مقابلة بين {requester_pet.name} و {target_pet.name}"
-    
-    # إضافة معلومات العيادة البيطرية إذا كانت متوفرة
+    meeting_date_value = (
+        breeding_request.meeting_date.isoformat()
+        if breeding_request.meeting_date
+        else None
+    )
+
+    # إعداد البيانات الإضافية للإشعار
     extra_data = {
         'requester_name': breeding_request.requester.get_full_name(),
         'requester_pet_name': requester_pet.name,
-        'meeting_date': breeding_request.meeting_date.isoformat(),
     }
-    
+    if meeting_date_value:
+        extra_data['meeting_date'] = meeting_date_value
+
     # إضافة معلومات العيادة البيطرية فقط إذا كانت متوفرة
     if breeding_request.veterinary_clinic:
         extra_data['clinic_name'] = breeding_request.veterinary_clinic.name
         message += f" في {breeding_request.veterinary_clinic.name}"
     else:
         message += " (مكان المقابلة سيتم تحديده لاحقاً)"
-    
+
     # إنشاء الإشعار
     notification = create_notification(
         user=receiver,
@@ -123,29 +129,35 @@ def notify_breeding_request_received(breeding_request):
 
     return notification
 
+
 def notify_breeding_request_approved(breeding_request):
     """إشعار بقبول طلب المقابلة"""
     requester = breeding_request.requester
     target_pet = breeding_request.target_pet
-    
+    meeting_date_value = (
+        breeding_request.meeting_date.isoformat()
+        if breeding_request.meeting_date
+        else None
+    )
+
     # تخصيص الرسالة بناءً على وجود العيادة البيطرية
     if breeding_request.veterinary_clinic:
         title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
         message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في {breeding_request.veterinary_clinic.name}"
-        
+
         extra_data = {
             'clinic_name': breeding_request.veterinary_clinic.name,
             'clinic_phone': breeding_request.veterinary_clinic.phone,
-            'meeting_date': breeding_request.meeting_date.isoformat()
         }
     else:
         title = f"تم قبول طلب مقابلتك مع {target_pet.name}"
         message = f"تم قبول طلب المقابلة الخاص بك! يمكنك الآن ترتيب المقابلة في المكان المناسب لكما."
-        
-        extra_data = {
-            'meeting_date': breeding_request.meeting_date.isoformat()
-        }
-    
+
+        extra_data = {}
+
+    if meeting_date_value:
+        extra_data['meeting_date'] = meeting_date_value
+
     # إنشاء الإشعار
     notification = create_notification(
         user=requester,
@@ -168,6 +180,7 @@ def notify_breeding_request_approved(breeding_request):
     _send_push_notification(requester, title, message, push_payload)
 
     return notification
+
 
 def notify_breeding_request_rejected(breeding_request):
     """إشعار برفض طلب المقابلة"""
