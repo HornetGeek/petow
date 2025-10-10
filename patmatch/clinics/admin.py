@@ -8,6 +8,7 @@ from .models import (
     ClinicMessage,
     ClinicClientRecord,
     ClinicPatientRecord,
+    ClinicInvite,
     VeterinaryAppointment,
     VeterinaryCertificate,
 )
@@ -57,9 +58,11 @@ class ClinicClientRecordAdmin(admin.ModelAdmin):
 
 @admin.register(ClinicPatientRecord)
 class ClinicPatientRecordAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clinic', 'owner', 'species', 'status', 'created_at')
+    list_display = ('name', 'clinic', 'owner', 'species', 'status', 'linked_user', 'linked_pet', 'created_at')
     search_fields = ('name', 'owner__full_name', 'species', 'breed', 'clinic__name')
     list_filter = ('clinic', 'status', 'species')
+    autocomplete_fields = ['linked_user', 'linked_pet']
+    readonly_fields = ('created_at', 'updated_at')
 
 
 @admin.register(VeterinaryAppointment)
@@ -71,6 +74,27 @@ class VeterinaryAppointmentAdmin(admin.ModelAdmin):
     list_filter = ('clinic', 'appointment_type', 'status', 'payment_status')
     search_fields = ('pet__name', 'owner__email', 'clinic__name')
     autocomplete_fields = ['pet', 'owner', 'clinic']
+
+
+@admin.register(ClinicInvite)
+class ClinicInviteAdmin(admin.ModelAdmin):
+    list_display = ('patient', 'clinic', 'status', 'recipient', 'claimed_at', 'accepted_at', 'created_at')
+    search_fields = ('patient__name', 'clinic__name', 'token', 'recipient__email')
+    list_filter = ('clinic', 'status', 'claimed_at', 'accepted_at')
+    autocomplete_fields = ['recipient']
+    readonly_fields = ('token', 'created_at', 'updated_at', 'claimed_at', 'accepted_at', 'declined_at')
+    
+    fieldsets = (
+        ('Invitation Info', {
+            'fields': ('clinic', 'patient', 'owner_record', 'token', 'status')
+        }),
+        ('Recipient', {
+            'fields': ('recipient', 'claimed_at', 'accepted_at', 'declined_at')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
 
 
 @admin.register(VeterinaryCertificate)
