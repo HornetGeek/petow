@@ -176,9 +176,9 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'species', 'breed', 'date_of_birth', 'age', 'gender', 'status',
             'notes', 'owner_name', 'owner_phone', 'owner_email', 'owner_password',
-            'last_visit', 'next_appointment', 'created_at', 'updated_at'
+            'last_visit', 'next_appointment', 'linked_user', 'linked_pet', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'linked_user', 'linked_pet', 'created_at', 'updated_at']
 
     def _get_or_create_owner(self, clinic: Clinic, validated_data):
         full_name = validated_data.pop('owner_name').strip()

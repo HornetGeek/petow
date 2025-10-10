@@ -196,6 +196,14 @@ class ClinicPatientRecord(models.Model):
         null=True,
         help_text='المستخدم المرتبط بالحيوان في التطبيق'
     )
+    linked_pet = models.ForeignKey(
+        'pets.Pet',
+        on_delete=models.SET_NULL,
+        related_name='clinic_patient_records',
+        blank=True,
+        null=True,
+        help_text='الحيوان المرتبط في التطبيق الرئيسي'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
