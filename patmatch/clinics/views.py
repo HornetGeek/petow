@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -551,6 +552,15 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
             patients_qs = patients_qs.none()
 
         patients = list(patients_qs.select_related('linked_user', 'owner'))
+
+        if not patients and sender_email:
+            fallback_match = re.match(r'^patient_(\d+)@clinic\.local$', sender_email, re.IGNORECASE)
+            if fallback_match:
+                try:
+                    patient_id = int(fallback_match.group(1))
+                    patients = list(ClinicPatientRecord.objects.filter(clinic=clinic, id=patient_id).select_related('linked_user', 'owner'))
+                except (TypeError, ValueError):
+                    patients = []
 
         targeted_users = {}
         for patient in patients:
