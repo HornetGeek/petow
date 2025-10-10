@@ -1,6 +1,6 @@
 """Utility helpers for managing clinic invitations."""
 import secrets
-from typing import Iterable, Optional
+from typing import Iterable, Optional, List
 
 from django.conf import settings
 from django.db import transaction
@@ -111,8 +111,11 @@ def _trigger_immediate_invite_notifications(
     raw_phone: Optional[str],
     normalized_phone: Optional[str],
 ) -> None:
-    """If an existing app user already matches this invite's contact details, claim immediately."""
-    contact_filters = []
+    """
+    If an existing app user already matches this invite's contact details,
+    attach the invite to that user and send the push notification immediately.
+    """
+    contact_filters: List[Q] = []
 
     if email:
         contact_filters.append(Q(email__iexact=email))
@@ -128,12 +131,32 @@ def _trigger_immediate_invite_notifications(
     for extra_filter in contact_filters:
         combined_filter |= extra_filter
 
-    matched_users = User.objects.filter(combined_filter).distinct()
+    matched_users = list(User.objects.filter(combined_filter).distinct())
     if not matched_users:
         return
 
     for user in matched_users:
+        update_fields: list[str] = []
+        if invite.recipient_id and invite.recipient_id != user.id:
+            continue
+
+        if invite.recipient_id != user.id:
+            invite.recipient = user
+            update_fields.append('recipient')
+
+        if not invite.claimed_at:
+            invite.claimed_at = timezone.now()
+            update_fields.append('claimed_at')
+
+        if update_fields:
+            update_fields.append('updated_at')
+            invite.save(update_fields=update_fields)
+
+        _ensure_invite_notification(invite)
+
         claim_invites_for_user(user)
+        break
+
 
 
 
