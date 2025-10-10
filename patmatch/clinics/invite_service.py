@@ -94,7 +94,55 @@ def create_invite_for_patient(patient: ClinicPatientRecord, *, resend: bool = Fa
             email=email,
         )
 
+    _trigger_immediate_invite_notifications(
+        invite,
+        email=email,
+        raw_phone=owner.phone,
+        normalized_phone=phone,
+    )
+
     return invite
+
+
+def _trigger_immediate_invite_notifications(
+    invite: ClinicInvite,
+    *,
+    email: Optional[str],
+    raw_phone: Optional[str],
+    normalized_phone: Optional[str],
+) -> None:
+    """
+    If an existing app user already matches this invite's contact details,
+    claim the invite immediately so they receive the push/in-app notification.
+    """
+    contact_filters = []
+
+    if email:
+        contact_filters.append(Q(email__iexact=email))
+
+    phone_values = {value for value in (raw_phone, normalized_phone) if value}
+    if phone_values:
+        phone_query = Q()
+        for value in phone_values:
+            phone_query |= Q(phone=value)
+            normalised_value = _normalize_phone(value)
+            if normalised_value and normalised_value != value:
+                phone_query |= Q(phone=normalised_value)
+        contact_filters.append(phone_query)
+
+    if not contact_filters:
+        return
+
+    combined_filter = contact_filters.pop()
+    for extra_filter in contact_filters:
+        combined_filter |= extra_filter
+
+    matched_users = User.objects.filter(combined_filter).distinct()
+    if not matched_users:
+        return
+
+    for user in matched_users:
+        claim_invites_for_user(user)
 
 
 def _matched_invites_for_user(user: User) -> Iterable[ClinicInvite]:
