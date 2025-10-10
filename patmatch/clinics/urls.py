@@ -16,6 +16,7 @@ from .views import (
     ClinicRecipientGroupsView,
     ClinicNotificationTemplatesView,
     ClinicBroadcastView,
+    ClinicBroadcastStatsView,
     ClinicInviteListView,
     ClinicInviteRespondView,
 )
@@ -37,6 +38,7 @@ urlpatterns = [
     path('veterinarians/', VeterinariansView.as_view(), name='clinic-veterinarians'),
     path('recipient-groups/', ClinicRecipientGroupsView.as_view(), name='clinic-recipient-groups'),
     path('notification-templates/', ClinicNotificationTemplatesView.as_view(), name='clinic-notification-templates'),
+    path('broadcast-stats/', ClinicBroadcastStatsView.as_view(), name='clinic-broadcast-stats'),
     path('messages/broadcast/', ClinicBroadcastView.as_view(), name='clinic-broadcast'),
     path('invites/', ClinicInviteListView.as_view(), name='clinic-invites'),
     path('invites/<str:token>/<str:action>/', ClinicInviteRespondView.as_view(), name='clinic-invite-respond'),

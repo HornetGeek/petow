@@ -111,23 +111,14 @@ def _trigger_immediate_invite_notifications(
     raw_phone: Optional[str],
     normalized_phone: Optional[str],
 ) -> None:
-    """
-    If an existing app user already matches this invite's contact details,
-    claim the invite immediately so they receive the push/in-app notification.
-    """
+    """If an existing app user already matches this invite's contact details, claim immediately."""
     contact_filters = []
 
     if email:
         contact_filters.append(Q(email__iexact=email))
 
-    phone_values = {value for value in (raw_phone, normalized_phone) if value}
-    if phone_values:
-        phone_query = Q()
-        for value in phone_values:
-            phone_query |= Q(phone=value)
-            normalised_value = _normalize_phone(value)
-            if normalised_value and normalised_value != value:
-                phone_query |= Q(phone=normalised_value)
+    phone_query = _build_phone_lookup_query(raw_phone, normalized_phone)
+    if phone_query is not None:
         contact_filters.append(phone_query)
 
     if not contact_filters:
@@ -145,14 +136,69 @@ def _trigger_immediate_invite_notifications(
         claim_invites_for_user(user)
 
 
+
+def _build_phone_lookup_query(
+    raw_phone: Optional[str],
+    normalized_phone: Optional[str],
+) -> Optional[Q]:
+    """Build an OR query that matches likely representations of a phone number."""
+    variants: set[str] = set()
+    digits_variants: set[str] = set()
+
+    for candidate in (raw_phone, normalized_phone):
+        if not candidate:
+            continue
+        candidate = str(candidate).strip()
+        if not candidate:
+            continue
+        variants.add(candidate)
+
+        digits = ''.join(ch for ch in candidate if ch.isdigit())
+        if digits:
+            variants.add(digits)
+            digits_variants.add(digits)
+
+            stripped = digits.lstrip('0')
+            if stripped and stripped != digits:
+                digits_variants.add(stripped)
+
+            if len(digits) > 7:
+                for length in (10, 9, 8):
+                    if len(digits) >= length:
+                        tail = digits[-length:]
+                        if tail:
+                            digits_variants.add(tail)
+
+    if not variants and not digits_variants:
+        return None
+
+    phone_query: Optional[Q] = None
+
+    def _or_clause(current: Optional[Q], clause: Q) -> Q:
+        return clause if current is None else current | clause
+
+    for value in variants:
+        phone_query = _or_clause(phone_query, Q(phone=value))
+
+    for digits in digits_variants:
+        if len(digits) >= 7:
+            phone_query = _or_clause(phone_query, Q(phone__icontains=digits))
+            phone_query = _or_clause(phone_query, Q(phone__endswith=digits))
+
+    return phone_query
+
+
 def _matched_invites_for_user(user: User) -> Iterable[ClinicInvite]:
     queries = []
     email = _normalize_email(user.email)
     phone = _normalize_phone(user.phone)
     if email:
-        queries.append(Q(email=email))
-    if phone:
-        queries.append(Q(phone=phone))
+        queries.append(Q(email__iexact=email))
+
+    phone_query = _build_phone_lookup_query(user.phone, phone)
+    if phone_query is not None:
+        queries.append(phone_query)
+
     if not queries:
         return ClinicInvite.objects.none()
 

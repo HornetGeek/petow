@@ -352,6 +352,7 @@ class Notification(models.Model):
         ('system_message', 'رسالة من النظام'),
         ('chat_message_received', 'تم استلام رسالة جديدة'),
         ('pet_nearby', 'حيوان جديد بالقرب منك'),
+        ('clinic_broadcast', 'إشعار من العيادة'),
         ('clinic_invite', 'دعوة ربط عيادة'),
     ]
     
