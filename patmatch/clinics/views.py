@@ -13,11 +13,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
 
 from accounts.serializers import UserSerializer
 from accounts.models import User
-from accounts.firebase_service import firebase_service
 from .models import (
     Clinic,
     ClinicService,
@@ -30,6 +28,7 @@ from .models import (
     ClinicInvite,
 )
 from pets.models import Notification
+from pets.notifications import create_notification, _send_push_notification
 from .permissions import IsClinicStaff
 from .serializers import (
     ClinicSerializer,
@@ -769,126 +768,147 @@ class ClinicNotificationTemplatesView(APIView):
 
 
 class ClinicBroadcastView(ClinicContextMixin, APIView):
-    """Send a broadcast to recipient groups via selected channels."""
+    """Send a push broadcast to selected clinic patients."""
     permission_classes = [IsAuthenticated, IsClinicStaff]
 
     def post(self, request):
         clinic = self.get_clinic()
         title = (request.data.get('title') or '').strip()
         message = (request.data.get('message') or '').strip()
-        recipients = request.data.get('recipients') or []  # e.g., ['all','active']
-        channels = request.data.get('channels') or ['in-app']  # ['email','sms','push','in-app']
-        priority = (request.data.get('priority') or 'medium').lower()
+        raw_recipients = request.data.get('recipients') or []
         schedule_type = (request.data.get('schedule_type') or 'now').lower()
-        scheduled_time = request.data.get('scheduled_time')
 
         if not title or not message:
             return Response({'error': 'title and message are required'}, status=status.HTTP_400_BAD_REQUEST)
-        if not isinstance(recipients, list) or not recipients:
+
+        if not isinstance(raw_recipients, list) or not raw_recipients:
             return Response({'error': 'recipients must be a non-empty list'}, status=status.HTTP_400_BAD_REQUEST)
-        if not isinstance(channels, list) or not channels:
-            return Response({'error': 'channels must be a non-empty list'}, status=status.HTTP_400_BAD_REQUEST)
 
         if schedule_type != 'now':
             return Response({'error': 'Scheduling is not supported yet'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Build recipient users set
-        today = timezone.localdate()
-        owner_ids = set(
-            VeterinaryAppointment.objects.filter(clinic=clinic).values_list('owner_id', flat=True).distinct()
-        )
-        selected_ids: set[int] = set()
-        for group in recipients:
-            gid = str(group).lower()
-            if gid == 'all':
-                selected_ids |= owner_ids
-            elif gid == 'active':
-                active_owner_ids = set(
-                    ClinicPatientRecord.objects.filter(clinic=clinic, status='active').values_list('owner__id', flat=True)
-                )
-                upcoming_owner_ids = set(
-                    VeterinaryAppointment.objects.filter(
-                        clinic=clinic, scheduled_date__gte=today, status__in=['scheduled', 'rescheduled']
-                    ).values_list('owner_id', flat=True)
-                )
-                selected_ids |= (owner_ids & (active_owner_ids | upcoming_owner_ids))
-            elif gid == 'overdue':
-                overdue_ids = set(
-                    VeterinaryAppointment.objects.filter(
-                        clinic=clinic, scheduled_date__lt=today, status='scheduled'
-                    ).values_list('owner_id', flat=True)
-                )
-                selected_ids |= (owner_ids & overdue_ids)
-            elif gid == 'new':
-                thirty_days_ago = timezone.now() - timedelta(days=30)
-                new_ids = set(User.objects.filter(id__in=owner_ids, date_joined__gte=thirty_days_ago).values_list('id', flat=True))
-                selected_ids |= new_ids
-            elif gid == 'vip':
-                vip_ids = set(
-                    VeterinaryAppointment.objects.filter(clinic=clinic)
-                    .values('owner').annotate(count=Count('id')).filter(count__gte=5)
-                    .values_list('owner', flat=True)
-                )
-                selected_ids |= vip_ids
-            else:
-                # ignore unknown groups silently
-                pass
+        patient_ids_raw = []
+        for entry in raw_recipients:
+            if entry is None:
+                continue
+            value = str(entry).strip()
+            if not value:
+                continue
+            if value.lower().startswith('patient:'):
+                value = value.split(':', 1)[1].strip()
+            patient_ids_raw.append(value)
 
-        users = list(User.objects.filter(id__in=selected_ids).distinct())
-        if not users:
-            return Response({'error': 'No recipients found for selected groups'}, status=status.HTTP_400_BAD_REQUEST)
+        if not patient_ids_raw:
+            return Response({'error': 'No valid patient recipients provided'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Dispatch via requested channels
-        email_sent = push_sent = inapp_created = sms_sent = 0
+        all_int = True
+        int_ids = []
+        for value in patient_ids_raw:
+            try:
+                int_ids.append(int(value))
+            except (TypeError, ValueError):
+                all_int = False
+                break
 
-        # Prepare email from address
-        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', None) or getattr(settings, 'SERVER_EMAIL', None)
+        patient_qs = ClinicPatientRecord.objects.filter(clinic=clinic)
+        if all_int:
+            patient_qs = patient_qs.filter(id__in=int_ids)
+        else:
+            patient_qs = patient_qs.filter(id__in=patient_ids_raw)
 
-        for u in users:
-            if 'email' in channels and from_email and u.email:
-                try:
-                    email = EmailMultiAlternatives(title, message, from_email, [u.email])
-                    email.send(fail_silently=True)
-                    email_sent += 1
-                except Exception:
-                    pass
+        patients = list(patient_qs.select_related('linked_user', 'owner'))
+        if not patients:
+            return Response({'error': 'No matching patients found for this clinic'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if 'push' in channels and getattr(u, 'fcm_token', None):
-                try:
-                    ok = firebase_service.send_notification(u.fcm_token, title, message, data={
-                        'type': 'clinic_broadcast',
-                        'clinic_id': str(clinic.id),
-                        'priority': priority,
-                    })
-                    if ok:
-                        push_sent += 1
-                except Exception:
-                    pass
+        push_sent = 0
+        targeted = 0
+        skipped = []
+        results = []
 
-            if 'in-app' in channels:
-                try:
-                    Notification.objects.create(
-                        user=u,
-                        type='system_message',
-                        title=title,
-                        message=message,
-                        extra_data={'source': 'clinic_broadcast', 'clinic_id': clinic.id, 'priority': priority},
-                    )
-                    inapp_created += 1
-                except Exception:
-                    pass
+        for patient in patients:
+            user = patient.linked_user
+            if not user:
+                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
+                continue
 
-            if 'sms' in channels and getattr(u, 'phone', None):
-                # TODO: integrate real SMS provider; for now we just count as stub
-                sms_sent += 1
+            token = (user.fcm_token or '').strip()
+            if not token:
+                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
+                continue
+
+            targeted += 1
+            pet_name = patient.name or 'Pet'
+            payload = {
+                'type': 'clinic_broadcast',
+                'clinic_id': str(clinic.id),
+                'patient_id': str(patient.id),
+                'patient_name': pet_name,
+            }
+            extra_data = {
+                'clinic_id': str(clinic.id),
+                'clinic_name': clinic.name,
+                'patient_id': str(patient.id),
+                'patient_name': pet_name,
+                'delivered': False,
+            }
+
+            notification = create_notification(
+                user=user,
+                notification_type='clinic_broadcast',
+                title=title,
+                message=message,
+                extra_data=extra_data,
+            )
+
+            delivered = _send_push_notification(user, title, message, payload)
+            if delivered:
+                push_sent += 1
+                notification.extra_data['delivered'] = True
+                notification.save(update_fields=['extra_data'])
+
+            results.append({
+                'patient_id': str(patient.id),
+                'patient_name': pet_name,
+                'user_id': user.id,
+                'delivered': bool(delivered),
+                'notification_id': notification.id,
+            })
+
+        if targeted == 0:
+            return Response({
+                'error': 'No patients are linked to mobile users with push tokens',
+                'skipped': skipped,
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({
-            'recipients': len(users),
-            'email_sent': email_sent,
+            'recipients': targeted,
             'push_sent': push_sent,
-            'in_app_created': inapp_created,
-            'sms_stubbed': sms_sent,
+            'results': results,
+            'skipped': skipped,
         }, status=status.HTTP_200_OK)
+
+
+class ClinicBroadcastStatsView(ClinicContextMixin, APIView):
+    """Return aggregate statistics for clinic push broadcasts."""
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def get(self, request):
+        clinic = self.get_clinic()
+        base_qs = Notification.objects.filter(
+            type='clinic_broadcast',
+            extra_data__clinic_id=str(clinic.id),
+        )
+        total = base_qs.count()
+        delivered_total = base_qs.filter(extra_data__delivered=True).count()
+        latest = base_qs.order_by('-created_at').first()
+
+        payload = {
+            'push_sent_total': total,
+            'push_delivered_total': delivered_total,
+            'last_push_at': latest.created_at.isoformat() if latest else None,
+            'last_push_title': latest.title if latest else None,
+        }
+        return Response(payload)
 
 
 class ClinicInviteListView(APIView):
