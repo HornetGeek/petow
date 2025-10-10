@@ -317,9 +317,33 @@ class ClinicInvite(models.Model):
         self.accepted_at = timezone.now()
         if user:
             self.recipient = user
+            fields_to_update = []
+            
+            # Link user if not already linked
             if self.patient.linked_user != user:
                 self.patient.linked_user = user
-                self.patient.save(update_fields=['linked_user', 'updated_at'])
+                fields_to_update.append('linked_user')
+            
+            # Try to link pet if not already linked
+            if not self.patient.linked_pet:
+                # Try to find a matching pet owned by this user
+                from pets.models import Pet
+                
+                # Match by name and species
+                matching_pet = Pet.objects.filter(
+                    owner=user,
+                    name__iexact=self.patient.name,
+                    pet_type=self.patient.species
+                ).first()
+                
+                if matching_pet:
+                    self.patient.linked_pet = matching_pet
+                    fields_to_update.append('linked_pet')
+            
+            if fields_to_update:
+                fields_to_update.append('updated_at')
+                self.patient.save(update_fields=fields_to_update)
+                
         self.save(update_fields=['status', 'accepted_at', 'recipient', 'updated_at'])
 
     def mark_declined(self, user=None):
