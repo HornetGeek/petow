@@ -508,6 +508,119 @@ class ClinicMessageViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.save(clinic=self.get_clinic())
 
 
+class ClinicMessageSendPushView(ClinicContextMixin, APIView):
+    """Send a push notification in response to a specific clinic message."""
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def post(self, request, message_id):
+        clinic = self.get_clinic()
+        message_body = (request.data.get('message') or '').strip()
+
+        if not message_body:
+            return Response({'error': 'message is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            base_message = ClinicMessage.objects.get(id=message_id, clinic=clinic)
+        except ClinicMessage.DoesNotExist:
+            return Response({'error': 'message not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        sender_email = (base_message.sender_email or '').strip()
+        sender_phone = (base_message.sender_phone or '').strip()
+
+        owner_filter = Q()
+        if sender_email:
+            owner_filter |= Q(email__iexact=sender_email)
+        if sender_phone:
+            owner_filter |= Q(phone=sender_phone)
+
+        owners_qs = ClinicClientRecord.objects.filter(clinic=clinic)
+        if owner_filter:
+            owners_qs = owners_qs.filter(owner_filter)
+            owners = list(owners_qs)
+        else:
+            owners = []
+
+        patients_qs = ClinicPatientRecord.objects.filter(clinic=clinic)
+        if owners:
+            patients_qs = patients_qs.filter(owner__in=owners)
+        elif sender_email:
+            patients_qs = patients_qs.filter(owner__email__iexact=sender_email)
+        elif sender_phone:
+            patients_qs = patients_qs.filter(owner__phone=sender_phone)
+        else:
+            patients_qs = patients_qs.none()
+
+        patients = list(patients_qs.select_related('linked_user', 'owner'))
+
+        targeted_users = {}
+        for patient in patients:
+            user = patient.linked_user
+            if not user or not user.fcm_token:
+                continue
+
+            targeted_users.setdefault(user.id, {'user': user, 'patients': []})
+            targeted_users[user.id]['patients'].append(patient.name or 'Pet')
+
+        if not targeted_users:
+            return Response(
+                {'error': 'No linked mobile users with push tokens for this contact'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sender_name = request.user.get_full_name() or request.user.email or request.user.username or 'Clinic Team'
+        title = f'رسالة جديدة من {clinic.name}'
+
+        push_sent = 0
+        results = []
+
+        for entry in targeted_users.values():
+            user = entry['user']
+            notification = create_notification(
+                user=user,
+                notification_type='chat_message_received',
+                title=title,
+                message=message_body,
+                extra_data={
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                    'patient_names': entry['patients'],
+                },
+            )
+
+            payload = {
+                'type': 'clinic_chat_message',
+                'clinic_id': str(clinic.id),
+                'clinic_message_id': str(base_message.id),
+                'sender_name': sender_name,
+            }
+
+            delivered = _send_push_notification(user, title, message_body, payload)
+            if delivered:
+                push_sent += 1
+                notification.extra_data['delivered'] = True
+                notification.save(update_fields=['extra_data'])
+
+            results.append({
+                'user_id': user.id,
+                'delivered': bool(delivered),
+                'notification_id': notification.id,
+            })
+
+        base_message.status = 'in_progress'
+        base_message.save(update_fields=['status', 'updated_at'])
+
+        return Response(
+            {
+                'recipients': len(results),
+                'push_sent': push_sent,
+                'results': results,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class VeterinariansView(ClinicContextMixin, APIView):
     """API view for clinic veterinarians"""
     permission_classes = [IsAuthenticated, IsClinicStaff]
