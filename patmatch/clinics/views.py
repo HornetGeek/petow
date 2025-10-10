@@ -10,6 +10,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.authtoken.models import Token
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -28,7 +29,7 @@ from .models import (
     ClinicPatientRecord,
     ClinicInvite,
 )
-from pets.models import Notification
+from pets.models import Notification, ChatRoom
 from pets.notifications import create_notification, _send_push_notification
 from .permissions import IsClinicStaff
 from .serializers import (
@@ -50,6 +51,37 @@ from .invite_service import claim_invites_for_user, respond_to_invite
 APPOINTMENT_TYPE_LABELS = dict(VeterinaryAppointment.APPOINTMENT_TYPE_CHOICES)
 APPOINTMENT_STATUS_LABELS = dict(VeterinaryAppointment.STATUS_CHOICES)
 
+
+def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
+    """Ensure a ChatRoom exists for a clinic patient conversation."""
+    if not clinic_patient:
+        return None
+
+    chat_room = ChatRoom.objects.filter(clinic_patient=clinic_patient).first()
+
+    if not chat_room:
+        chat_room = ChatRoom.objects.create(
+            clinic_patient=clinic_patient,
+            clinic_staff=staff,
+            clinic_message=message
+        )
+        return chat_room
+
+    updates = []
+
+    if message and chat_room.clinic_message_id != getattr(message, 'id', None):
+        chat_room.clinic_message = message
+        updates.append('clinic_message')
+
+    if staff and not chat_room.clinic_staff:
+        chat_room.clinic_staff = staff
+        updates.append('clinic_staff')
+
+    if updates:
+        updates.append('updated_at')
+        chat_room.save(update_fields=updates)
+
+    return chat_room
 
 def get_clinic_for_user(user):
     """إرجاع العيادة المرتبطة بالمستخدم."""
@@ -462,10 +494,33 @@ class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        serializer.save(clinic=self.get_clinic())
+        clinic = self.get_clinic()
+        patient = serializer.validated_data.get('clinic_patient')
+
+        if patient and patient.clinic_id != clinic.id:
+            raise ValidationError({'clinic_patient': 'Patient does not belong to this clinic'})
+
+        message = serializer.save(clinic=clinic)
+        linked_patient = message.clinic_patient
+
+        if linked_patient and linked_patient.linked_user:
+            ensure_clinic_chat_room(linked_patient, message=message, staff=self.request.user)
+        elif linked_patient and not linked_patient.linked_user:
+            # لا يمكن إنشاء محادثة كاملة بدون مستخدم مرتبط بالمريض
+            pass
 
     def perform_update(self, serializer):
-        serializer.save(clinic=self.get_clinic())
+        clinic = self.get_clinic()
+        patient = serializer.validated_data.get('clinic_patient')
+
+        if patient and patient.clinic_id != clinic.id:
+            raise ValidationError({'clinic_patient': 'Patient does not belong to this clinic'})
+
+        message = serializer.save(clinic=clinic)
+        updated_patient = message.clinic_patient
+
+        if updated_patient and updated_patient.linked_user:
+            ensure_clinic_chat_room(updated_patient, message=message, staff=self.request.user)
 
 
 class ClinicPromotionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -525,55 +580,79 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
         except ClinicMessage.DoesNotExist:
             return Response({'error': 'message not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        patients = []
+        if base_message.clinic_patient:
+            patients.append(base_message.clinic_patient)
+
         sender_email = (base_message.sender_email or '').strip()
         sender_phone = (base_message.sender_phone or '').strip()
 
-        owner_filter = Q()
-        if sender_email:
-            owner_filter |= Q(email__iexact=sender_email)
-        if sender_phone:
-            owner_filter |= Q(phone=sender_phone)
+        if not patients:
+            owner_filter = Q()
+            if sender_email:
+                owner_filter |= Q(email__iexact=sender_email)
+            if sender_phone:
+                owner_filter |= Q(phone=sender_phone)
 
-        owners_qs = ClinicClientRecord.objects.filter(clinic=clinic)
-        if owner_filter:
-            owners_qs = owners_qs.filter(owner_filter)
-            owners = list(owners_qs)
-        else:
             owners = []
+            if owner_filter:
+                owners = list(ClinicClientRecord.objects.filter(clinic=clinic).filter(owner_filter))
 
-        patients_qs = ClinicPatientRecord.objects.filter(clinic=clinic)
-        if owners:
-            patients_qs = patients_qs.filter(owner__in=owners)
-        elif sender_email:
-            patients_qs = patients_qs.filter(owner__email__iexact=sender_email)
-        elif sender_phone:
-            patients_qs = patients_qs.filter(owner__phone=sender_phone)
-        else:
-            patients_qs = patients_qs.none()
+            patient_qs = ClinicPatientRecord.objects.filter(clinic=clinic)
+            if owners:
+                patient_qs = patient_qs.filter(owner__in=owners)
+            elif sender_email:
+                patient_qs = patient_qs.filter(owner__email__iexact=sender_email)
+            elif sender_phone:
+                patient_qs = patient_qs.filter(owner__phone=sender_phone)
+            else:
+                patient_qs = patient_qs.none()
 
-        patients = list(patients_qs.select_related('linked_user', 'owner'))
+            patients = list(patient_qs.select_related('linked_user', 'owner'))
 
-        if not patients and sender_email:
-            fallback_match = re.match(r'^patient_(\d+)@clinic\.local$', sender_email, re.IGNORECASE)
-            if fallback_match:
-                try:
-                    patient_id = int(fallback_match.group(1))
-                    patients = list(ClinicPatientRecord.objects.filter(clinic=clinic, id=patient_id).select_related('linked_user', 'owner'))
-                except (TypeError, ValueError):
-                    patients = []
+            if not patients and sender_email:
+                fallback_match = re.match(r'^patient_(\d+)@clinic\.local$', sender_email, re.IGNORECASE)
+                if fallback_match:
+                    try:
+                        patient_id = int(fallback_match.group(1))
+                        patients = list(
+                            ClinicPatientRecord.objects.filter(clinic=clinic, id=patient_id)
+                            .select_related('linked_user', 'owner')
+                        )
+                    except (TypeError, ValueError):
+                        patients = []
+
+        if not base_message.clinic_patient and patients:
+            primary_patient = patients[0]
+            base_message.clinic_patient = primary_patient
+            base_message.save(update_fields=['clinic_patient', 'updated_at'])
 
         targeted_users = {}
+        skipped = []
+
         for patient in patients:
-            user = patient.linked_user
-            if not user or not user.fcm_token:
+            user = getattr(patient, 'linked_user', None)
+            if not user:
+                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
+                continue
+            token = (user.fcm_token or '').strip()
+            if not token:
+                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
                 continue
 
-            targeted_users.setdefault(user.id, {'user': user, 'patients': []})
-            targeted_users[user.id]['patients'].append(patient.name or 'Pet')
+            chat_room = ensure_clinic_chat_room(patient, message=base_message, staff=request.user)
+            targeted_users[user.id] = {
+                'user': user,
+                'patient': patient,
+                'chat_room': chat_room,
+            }
 
         if not targeted_users:
             return Response(
-                {'error': 'No linked mobile users with push tokens for this contact'},
+                {
+                    'error': 'No linked mobile users with push tokens for this contact',
+                    'skipped': skipped,
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -585,18 +664,27 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
 
         for entry in targeted_users.values():
             user = entry['user']
+            patient = entry['patient']
+            chat_room = entry['chat_room']
+
+            extra_data = {
+                'clinic_id': str(clinic.id),
+                'clinic_name': clinic.name,
+                'clinic_message_id': str(base_message.id),
+                'sender_name': sender_name,
+                'patient_id': str(patient.id),
+                'patient_name': patient.name or 'Pet',
+            }
+            if chat_room:
+                extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
+                extra_data['chat_room_id'] = chat_room.id
+
             notification = create_notification(
                 user=user,
                 notification_type='chat_message_received',
                 title=title,
                 message=message_body,
-                extra_data={
-                    'clinic_id': str(clinic.id),
-                    'clinic_name': clinic.name,
-                    'clinic_message_id': str(base_message.id),
-                    'sender_name': sender_name,
-                    'patient_names': entry['patients'],
-                },
+                extra_data=extra_data,
             )
 
             payload = {
@@ -605,6 +693,9 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
                 'clinic_message_id': str(base_message.id),
                 'sender_name': sender_name,
             }
+            if chat_room:
+                payload['firebase_chat_id'] = chat_room.firebase_chat_id
+                payload['chat_room_id'] = str(chat_room.id)
 
             delivered = _send_push_notification(user, title, message_body, payload)
             if delivered:
@@ -612,10 +703,15 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
                 notification.extra_data['delivered'] = True
                 notification.save(update_fields=['extra_data'])
 
+            if chat_room:
+                chat_room.updated_at = timezone.now()
+                chat_room.save(update_fields=['updated_at'])
+
             results.append({
                 'user_id': user.id,
                 'delivered': bool(delivered),
                 'notification_id': notification.id,
+                'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
             })
 
         base_message.status = 'in_progress'
@@ -626,6 +722,7 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
                 'recipients': len(results),
                 'push_sent': push_sent,
                 'results': results,
+                'skipped': skipped,
             },
             status=status.HTTP_200_OK,
         )

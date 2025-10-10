@@ -573,12 +573,21 @@ def chat_rooms(request):
         # الحصول على جميع المحادثات النشطة للمستخدم
         user_chat_rooms = ChatRoom.objects.filter(
             Q(breeding_request__requester_id=request.user.id) |
-            Q(breeding_request__target_pet__owner_id=request.user.id),
+            Q(breeding_request__target_pet__owner_id=request.user.id) |
+            Q(adoption_request__adopter_id=request.user.id) |
+            Q(adoption_request__pet__owner_id=request.user.id) |
+            Q(clinic_patient__linked_user_id=request.user.id),
             is_active=True
         ).select_related(
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
-            'breeding_request__target_pet'
+            'breeding_request__target_pet',
+            'adoption_request__adopter',
+            'adoption_request__pet__owner',
+            'adoption_request__pet',
+            'clinic_patient__clinic',
+            'clinic_patient__owner',
+            'clinic_patient__linked_user'
         ).order_by('-updated_at')
         
         serializer = ChatRoomListSerializer(
@@ -608,7 +617,13 @@ def chat_room_detail(request, chat_id):
         chat_room = ChatRoom.objects.select_related(
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
-            'breeding_request__target_pet'
+            'breeding_request__target_pet',
+            'adoption_request__adopter',
+            'adoption_request__pet__owner',
+            'adoption_request__pet',
+            'clinic_patient__clinic',
+            'clinic_patient__owner',
+            'clinic_patient__linked_user'
         ).get(
             id=chat_id,
             is_active=True
@@ -645,7 +660,13 @@ def chat_room_by_firebase_id(request, firebase_chat_id):
         chat_room = ChatRoom.objects.select_related(
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
-            'breeding_request__target_pet'
+            'breeding_request__target_pet',
+            'adoption_request__adopter',
+            'adoption_request__pet__owner',
+            'adoption_request__pet',
+            'clinic_patient__clinic',
+            'clinic_patient__owner',
+            'clinic_patient__linked_user'
         ).get(
             firebase_chat_id=firebase_chat_id,
             is_active=True
@@ -855,14 +876,20 @@ def user_chat_status(request):
         # المحادثات النشطة
         active_chats = ChatRoom.objects.filter(
             Q(breeding_request__requester_id=user.id) |
-            Q(breeding_request__target_pet__owner_id=user.id),
+            Q(breeding_request__target_pet__owner_id=user.id) |
+            Q(adoption_request__adopter_id=user.id) |
+            Q(adoption_request__pet__owner_id=user.id) |
+            Q(clinic_patient__linked_user_id=user.id),
             is_active=True
         ).count()
         
         # المحادثات المؤرشفة
         archived_chats = ChatRoom.objects.filter(
             Q(breeding_request__requester_id=user.id) |
-            Q(breeding_request__target_pet__owner_id=user.id),
+            Q(breeding_request__target_pet__owner_id=user.id) |
+            Q(adoption_request__adopter_id=user.id) |
+            Q(adoption_request__pet__owner_id=user.id) |
+            Q(clinic_patient__linked_user_id=user.id),
             is_active=False
         ).count()
         

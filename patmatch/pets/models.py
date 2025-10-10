@@ -479,6 +479,31 @@ class ChatRoom(models.Model):
         help_text="طلب التبني المرتبط بالمحادثة"
     )
     
+    clinic_patient = models.ForeignKey(
+        'clinics.ClinicPatientRecord',
+        on_delete=models.CASCADE,
+        related_name='chat_rooms',
+        null=True,
+        blank=True,
+        help_text='مريض العيادة المرتبط بالمحادثة'
+    )
+    clinic_message = models.OneToOneField(
+        'clinics.ClinicMessage',
+        on_delete=models.SET_NULL,
+        related_name='chat_room',
+        null=True,
+        blank=True,
+        help_text='رسالة العيادة المرتبطة بالمحادثة'
+    )
+    clinic_staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_chat_rooms',
+        null=True,
+        blank=True,
+        help_text='عضو العيادة الذي أنشأ المحادثة'
+    )
+    
     # معرف Firebase للمحادثة
     firebase_chat_id = models.CharField(
         max_length=100,
@@ -496,21 +521,35 @@ class ChatRoom(models.Model):
     def get_participants(self):
         """الحصول على المشاركين في المحادثة"""
         participants = []
+        seen_ids = set()
+
+        def add_participant(candidate):
+            if candidate and getattr(candidate, 'id', None) and candidate.id not in seen_ids:
+                participants.append(candidate)
+                seen_ids.add(candidate.id)
+
         try:
             if self.breeding_request:
                 # محادثة تزاوج
-                if self.breeding_request.requester:
-                    participants.append(self.breeding_request.requester)
-                if self.breeding_request.target_pet and self.breeding_request.target_pet.owner:
-                    participants.append(self.breeding_request.target_pet.owner)
+                add_participant(getattr(self.breeding_request, 'requester', None))
+                target_owner = None
+                if getattr(self.breeding_request, 'target_pet', None):
+                    target_owner = getattr(self.breeding_request.target_pet, 'owner', None)
+                add_participant(target_owner)
             elif self.adoption_request:
                 # محادثة تبني
-                if self.adoption_request.adopter:
-                    participants.append(self.adoption_request.adopter)
-                if self.adoption_request.pet and self.adoption_request.pet.owner:
-                    participants.append(self.adoption_request.pet.owner)
-        except:
+                add_participant(getattr(self.adoption_request, 'adopter', None))
+                pet_owner = None
+                if getattr(self.adoption_request, 'pet', None):
+                    pet_owner = getattr(self.adoption_request.pet, 'owner', None)
+                add_participant(pet_owner)
+            elif self.clinic_patient:
+                # محادثة عيادة
+                add_participant(self.clinic_staff)
+                add_participant(getattr(self.clinic_patient, 'linked_user', None))
+        except Exception:
             pass
+
         return participants
 
     def get_other_participant(self, user):
@@ -530,35 +569,34 @@ class ChatRoom(models.Model):
         """بيانات المشاركين للـ Firebase"""
         try:
             participants = self.get_participants()
-            if len(participants) >= 2:
-                return {
-                    str(participants[0].id): {
-                        'id': participants[0].id,
-                        'name': f"{participants[0].first_name} {participants[0].last_name}",
-                        'email': participants[0].email,
-                        'phone': participants[0].phone,
-                    },
-                    str(participants[1].id): {
-                        'id': participants[1].id,
-                        'name': f"{participants[1].first_name} {participants[1].last_name}",
-                        'email': participants[1].email,
-                        'phone': participants[1].phone,
+            data = {}
+            for participant in participants:
+                if getattr(participant, 'id', None):
+                    data[str(participant.id)] = {
+                        'id': participant.id,
+                        'name': f"{participant.first_name} {participant.last_name}".strip(),
+                        'email': participant.email,
+                        'phone': participant.phone,
                     }
-                }
-        except:
-            pass
-        return {}
+            return data
+        except Exception:
+            return {}
 
     def clean(self):
         """التحقق من صحة البيانات"""
         from django.core.exceptions import ValidationError
         
-        # يجب أن يكون هناك إما breeding_request أو adoption_request
-        if not self.breeding_request and not self.adoption_request:
-            raise ValidationError("يجب أن يكون هناك إما طلب تزاوج أو طلب تبني")
-        
-        if self.breeding_request and self.adoption_request:
-            raise ValidationError("لا يمكن أن يكون هناك طلب تزاوج وطلب تبني معاً")
+        links = [
+            bool(self.breeding_request),
+            bool(self.adoption_request),
+            bool(self.clinic_patient),
+        ]
+
+        if not any(links):
+            raise ValidationError("يجب ربط غرفة المحادثة بطلب تزاوج أو تبني أو مريض عيادة")
+
+        if sum(links) > 1:
+            raise ValidationError("لا يمكن ربط غرفة المحادثة بأكثر من نوع واحد في آنٍ واحد")
     
     def save(self, *args, **kwargs):
         """إنشاء معرف Firebase تلقائياً"""
@@ -650,6 +688,51 @@ class ChatRoom(models.Model):
                         'is_active': self.is_active,
                     }
                 }
+            elif self.clinic_patient:
+                # محادثة عيادة
+                patient = self.clinic_patient
+                clinic = getattr(patient, 'clinic', None)
+                owner = getattr(patient, 'owner', None)
+                linked_user = getattr(patient, 'linked_user', None)
+
+                if not linked_user:
+                    return {}
+
+                owner_name = getattr(owner, 'full_name', None) if owner else None
+                owner_email = getattr(owner, 'email', None) if owner else None
+                owner_phone = getattr(owner, 'phone', None) if owner else None
+
+                return {
+                    'chat_id': self.firebase_chat_id,
+                    'type': 'clinic',
+                    'clinic': {
+                        'id': clinic.id if clinic else None,
+                        'name': clinic.name if clinic else None,
+                    },
+                    'pet': {
+                        'id': patient.id,
+                        'name': patient.name,
+                        'breed_name': patient.breed,
+                        'pet_type_display': patient.species,
+                        'main_image': None,
+                        'owner_name': owner_name,
+                    },
+                    'patient': {
+                        'id': patient.id,
+                        'name': patient.name,
+                        'species': patient.species,
+                        'breed': patient.breed,
+                        'owner_name': owner_name,
+                        'owner_email': owner_email,
+                        'owner_phone': owner_phone,
+                    },
+                    'participants': self.get_participants_data(),
+                    'metadata': {
+                        'created_at': self.created_at.isoformat(),
+                        'updated_at': self.updated_at.isoformat(),
+                        'is_active': self.is_active,
+                    }
+                }
         except Exception:
             return {}
         return {}
@@ -661,7 +744,8 @@ class ChatRoom(models.Model):
             models.Q(breeding_request__requester=user) |
             models.Q(breeding_request__target_pet__owner=user) |
             models.Q(adoption_request__adopter=user) |
-            models.Q(adoption_request__pet__owner=user),
+            models.Q(adoption_request__pet__owner=user) |
+            models.Q(clinic_patient__linked_user=user),
             is_active=True
         ).select_related(
             'breeding_request__requester',
@@ -669,7 +753,10 @@ class ChatRoom(models.Model):
             'breeding_request__target_pet',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
-            'adoption_request__pet'
+            'adoption_request__pet',
+            'clinic_patient__clinic',
+            'clinic_patient__owner',
+            'clinic_patient__linked_user'
         ).order_by('-updated_at')
 
     @classmethod
@@ -679,7 +766,8 @@ class ChatRoom(models.Model):
             models.Q(breeding_request__requester=user) |
             models.Q(breeding_request__target_pet__owner=user) |
             models.Q(adoption_request__adopter=user) |
-            models.Q(adoption_request__pet__owner=user),
+            models.Q(adoption_request__pet__owner=user) |
+            models.Q(clinic_patient__linked_user=user),
             is_active=False
         ).select_related(
             'breeding_request__requester',
@@ -687,7 +775,10 @@ class ChatRoom(models.Model):
             'breeding_request__target_pet',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
-            'adoption_request__pet'
+            'adoption_request__pet',
+            'clinic_patient__clinic',
+            'clinic_patient__owner',
+            'clinic_patient__linked_user'
         ).order_by('-updated_at')
 
     class Meta:
