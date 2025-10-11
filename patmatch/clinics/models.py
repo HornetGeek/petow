@@ -211,6 +211,14 @@ class ClinicPatientRecord(models.Model):
         verbose_name = "مريض عيادة"
         verbose_name_plural = "مرضى العيادة"
         ordering = ['name']
+        constraints = [
+            # Prevent multiple records in the same clinic linking to the same app pet
+            models.UniqueConstraint(
+                fields=['clinic', 'linked_pet'],
+                condition=models.Q(linked_pet__isnull=False),
+                name='uniq_clinic_linked_pet'
+            )
+        ]
 
     def __str__(self):
         return f"{self.name} - {self.owner.full_name}"
@@ -290,6 +298,14 @@ class ClinicInvite(models.Model):
         null=True,
         help_text='المستخدم الذي استلم الدعوة بعد التسجيل'
     )
+    intended_pet = models.ForeignKey(
+        'pets.Pet',
+        on_delete=models.SET_NULL,
+        related_name='intended_clinic_invites',
+        blank=True,
+        null=True,
+        help_text='الحيوان المقصود ربطه عند قبول الدعوة (اختياري)'
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
     sms_send_count = models.PositiveIntegerField(default=0)
     last_sms_sent_at = models.DateTimeField(blank=True, null=True)
@@ -328,12 +344,23 @@ class ClinicInvite(models.Model):
             if not self.patient.linked_pet:
                 from pets.models import Pet, Breed
                 
-                # Only link if exact match by name AND species exists
-                matching_pet = Pet.objects.filter(
-                    owner=user,
-                    name__iexact=self.patient.name,
-                    pet_type=self.patient.species
-                ).first()
+                # 1) If invite carries an intended pet, and it belongs to this user, use it
+                matching_pet = None
+                if getattr(self, 'intended_pet_id', None):
+                    try:
+                        intended = self.intended_pet
+                        if intended and intended.owner_id == user.id:
+                            matching_pet = intended
+                    except Exception:
+                        matching_pet = None
+                
+                # 2) Otherwise, try exact match by name AND species
+                if not matching_pet:
+                    matching_pet = Pet.objects.filter(
+                        owner=user,
+                        name__iexact=self.patient.name,
+                        pet_type=self.patient.species
+                    ).first()
                 
                 # If no matching pet found, CREATE a new one
                 if not matching_pet:

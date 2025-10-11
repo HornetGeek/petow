@@ -46,6 +46,20 @@ class PetImageSerializer(serializers.ModelSerializer):
         model = PetImage
         fields = ['id', 'image', 'caption']
 
+
+class PublicPetSerializer(serializers.ModelSerializer):
+    breed_name = serializers.CharField(source='breed.name', read_only=True)
+    age_display = serializers.CharField(read_only=True)
+    gender_display = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Pet
+        fields = [
+            'id', 'name', 'pet_type', 'breed_name', 'age_display', 'gender_display',
+            'status', 'main_image'
+        ]
+        read_only_fields = fields
+
 class PetSerializer(serializers.ModelSerializer):
     latitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     longitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
