@@ -78,7 +78,7 @@ class ClinicStaff(models.Model):
     class Meta:
         verbose_name = "عضو فريق العيادة"
         verbose_name_plural = "أعضاء فريق العيادة"
-        unique_together = [['user', 'clinic']]
+        unique_together = [['user', 'clinic', 'role']]
 
     def __str__(self):
         return f"{self.user.get_full_name() or self.user.email} - {self.clinic.name}"

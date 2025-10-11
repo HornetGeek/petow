@@ -650,11 +650,21 @@ class ClinicRegistrationSerializer(serializers.Serializer):
             longitude=validated_data.get('clinic_longitude'),
         )
 
+        # Create owner staff record
         ClinicStaff.objects.create(
             user=owner,
             clinic=clinic,
             role='owner',
             is_primary=True,
+            invitation_email=validated_data['owner_email'],
+        )
+
+        # Create default veterinarian record for the owner
+        ClinicStaff.objects.create(
+            user=owner,
+            clinic=clinic,
+            role='veterinarian',
+            is_primary=False,
             invitation_email=validated_data['owner_email'],
         )
 
