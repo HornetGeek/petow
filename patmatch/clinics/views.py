@@ -47,7 +47,7 @@ from .serializers import (
     ClinicInviteSerializer,
     VeterinarianSerializer,
 )
-from .invite_service import claim_invites_for_user, respond_to_invite
+from .invite_service import claim_invites_for_user, respond_to_invite, _build_phone_lookup_query, _normalize_email, _normalize_phone
 
 
 APPOINTMENT_TYPE_LABELS = dict(VeterinaryAppointment.APPOINTMENT_TYPE_CHOICES)
@@ -1190,18 +1190,47 @@ class OwnerLookupView(ClinicContextMixin, APIView):
 
     def post(self, request):
         clinic = self.get_clinic()
-        phone = (request.data.get('phone') or '').strip()
-        email = (request.data.get('email') or '').strip().lower()
+        phone_raw = (request.data.get('phone') or '').strip()
+        email_raw = (request.data.get('email') or '').strip()
 
-        if not phone or not email:
-            return Response({'error': 'phone and email are required'}, status=status.HTTP_400_BAD_REQUEST)
+        email = _normalize_email(email_raw)
+        normalized_phone = _normalize_phone(phone_raw)
 
-        user = User.objects.filter(email__iexact=email, phone=phone).first()
-        if not user:
+        # Require at least one contact detail
+        if not email and not phone_raw:
+            return Response({'error': 'phone or email is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build a flexible OR filter (email exact OR phone variants)
+        contact_filters = []
+        if email:
+            contact_filters.append(Q(email__iexact=email))
+        phone_q = _build_phone_lookup_query(phone_raw, normalized_phone)
+        if phone_q is not None:
+            contact_filters.append(phone_q)
+
+        if not contact_filters:
             return Response({'found': False}, status=status.HTTP_200_OK)
 
+        combined_filter = contact_filters.pop()
+        for extra in contact_filters:
+            combined_filter |= extra
+
+        candidates = list(User.objects.filter(combined_filter).distinct()[:5])
+        if not candidates:
+            return Response({'found': False}, status=status.HTTP_200_OK)
+
+        # Prefer exact email match when provided; otherwise take the first candidate
+        user = None
+        if email:
+            user = next((u for u in candidates if (u.email or '').strip().lower() == email), None)
+        if not user:
+            user = candidates[0]
+
         # Ensure there is (or create) a clinic owner record for contact continuity
-        owner_record = clinic.client_records.filter(models.Q(email__iexact=email) | models.Q(phone=phone)).first()
+        owner_record = clinic.client_records.filter(
+            (Q(email__iexact=email) if email else Q()) |
+            (Q(phone=phone_raw) if phone_raw else Q())
+        ).first()
         if not owner_record:
             owner_record = ClinicClientRecord.objects.create(
                 clinic=clinic,
