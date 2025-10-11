@@ -438,7 +438,7 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         clinic = self.get_clinic()
-        queryset = ClinicPatientRecord.objects.filter(clinic=clinic).select_related('owner')
+        queryset = ClinicPatientRecord.objects.filter(clinic=clinic).select_related('owner', 'linked_user', 'linked_pet')
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
