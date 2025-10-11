@@ -275,7 +275,7 @@ class PetListSerializer(serializers.ModelSerializer):
         model = Pet
         fields = [
             'id', 'name', 'pet_type', 'pet_type_display', 'breed_name', 
-            'age_display', 'gender', 'gender_display', 'main_image', 
+            'age_display', 'gender', 'gender_display', 'description', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 
             'has_health_certificates', 'hosting_preference', 'created_at'
