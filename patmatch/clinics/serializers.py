@@ -290,6 +290,15 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         }
         pet_type = species_map.get(patient_data.get('species', '').lower(), 'dogs')
         
+        # If an exact pet already exists for this owner (same name and type), link it instead of creating a duplicate
+        existing_pet = Pet.objects.filter(
+            owner=user,
+            name__iexact=patient_data.get('name', ''),
+            pet_type=pet_type,
+        ).first()
+        if existing_pet:
+            return existing_pet
+        
         # Try to find a default breed for this pet type
         breed = Breed.objects.filter(pet_type=pet_type).first()
         if not breed:
