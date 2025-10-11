@@ -180,11 +180,47 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'linked_user', 'linked_pet', 'created_at', 'updated_at']
 
+    def _get_or_create_user(self, owner_name, owner_phone, owner_email, owner_password):
+        """Get or create a User account for the pet owner."""
+        from accounts.models import User
+        
+        # Try to find existing user
+        user = None
+        if owner_email:
+            user = User.objects.filter(email__iexact=owner_email).first()
+        if not user and owner_phone:
+            user = User.objects.filter(phone=owner_phone).first()
+        
+        if not user and owner_email:
+            # Create new user account
+            from django.contrib.auth.hashers import make_password
+            import random
+            import string
+            
+            # Generate password if not provided
+            password = owner_password if owner_password else ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+            
+            # Parse name
+            name_parts = owner_name.strip().split(' ', 1)
+            first_name = name_parts[0] if len(name_parts) > 0 else owner_name
+            last_name = name_parts[1] if len(name_parts) > 1 else ''
+            
+            user = User.objects.create(
+                email=owner_email,
+                phone=owner_phone or '',
+                first_name=first_name,
+                last_name=last_name,
+                password=make_password(password),
+                is_phone_verified=False,
+            )
+        
+        return user
+
     def _get_or_create_owner(self, clinic: Clinic, validated_data):
         full_name = validated_data.pop('owner_name').strip()
         phone = (validated_data.pop('owner_phone', None) or '') or None
         email = (validated_data.pop('owner_email', None) or '').strip() or None
-        validated_data.pop('owner_password', None)
+        password = validated_data.pop('owner_password', None)
 
         owner_qs = ClinicClientRecord.objects.filter(clinic=clinic)
         owner = None
@@ -212,7 +248,13 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
                 email=email,
                 phone=phone,
             )
-        return owner
+        
+        # Get or create User account if email is provided
+        user = None
+        if email:
+            user = self._get_or_create_user(full_name, phone, email, password)
+        
+        return owner, user
 
     def to_internal_value(self, data):
         if hasattr(data, 'copy'):
@@ -233,9 +275,107 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
                 data[snake] = data[camel]
         return super().to_internal_value(data)
 
+    def _create_pet_in_main_app(self, patient_data, user):
+        """Create a Pet in the main pets table for this clinic patient."""
+        from pets.models import Pet, Breed
+        
+        # Map species name to pet_type
+        species_map = {
+            'dog': 'dogs',
+            'dogs': 'dogs',
+            'cat': 'cats',
+            'cats': 'cats',
+            'bird': 'birds',
+            'birds': 'birds',
+        }
+        pet_type = species_map.get(patient_data.get('species', '').lower(), 'dogs')
+        
+        # Try to find a default breed for this pet type
+        breed = Breed.objects.filter(pet_type=pet_type).first()
+        if not breed:
+            # Create a generic breed if none exists
+            breed = Breed.objects.create(
+                name=f"{pet_type.title()} - Generic",
+                pet_type=pet_type,
+                description="Generic breed created by clinic"
+            )
+        
+        # Calculate age in months
+        age_months = 12  # Default 1 year
+        if patient_data.get('date_of_birth'):
+            from datetime import date
+            today = date.today()
+            dob = patient_data['date_of_birth']
+            age_months = max(1, (today.year - dob.year) * 12 + (today.month - dob.month))
+        
+        # Determine gender
+        gender = 'M'  # Default male
+        if patient_data.get('gender'):
+            gender_str = str(patient_data['gender']).upper()
+            if gender_str in ['F', 'FEMALE', 'أنثى']:
+                gender = 'F'
+        
+        # Create the pet
+        pet = Pet.objects.create(
+            owner=user,
+            name=patient_data['name'],
+            pet_type=pet_type,
+            breed=breed,
+            age_months=age_months,
+            gender=gender,
+            description=f"Added by {self.context['clinic'].name}",
+            status='unavailable',  # Clinic-added pets are unavailable for breeding by default
+            location=self.context['clinic'].address or 'غير محدد',
+            latitude=self.context['clinic'].latitude,
+            longitude=self.context['clinic'].longitude,
+            is_free=True,
+        )
+        
+        return pet
+
+    def _get_or_create_owner(self, clinic: Clinic, validated_data):
+        full_name = validated_data.pop('owner_name').strip()
+        phone = (validated_data.pop('owner_phone', None) or '') or None
+        email = (validated_data.pop('owner_email', None) or '').strip() or None
+        password = validated_data.pop('owner_password', None)
+
+        owner_qs = ClinicClientRecord.objects.filter(clinic=clinic)
+        owner = None
+        if email:
+            owner = owner_qs.filter(email__iexact=email).first()
+        if not owner and phone:
+            owner = owner_qs.filter(phone=phone).first()
+
+        if owner:
+            updates = {}
+            if full_name and owner.full_name != full_name:
+                updates['full_name'] = full_name
+            if email and owner.email != email:
+                updates['email'] = email
+            if phone and owner.phone != phone:
+                updates['phone'] = phone
+            if updates:
+                for field, value in updates.items():
+                    setattr(owner, field, value)
+                owner.save(update_fields=list(updates.keys()) + ['updated_at'])
+        else:
+            owner = ClinicClientRecord.objects.create(
+                clinic=clinic,
+                full_name=full_name or 'غير معروف',
+                email=email,
+                phone=phone,
+            )
+        
+        # Get or create User account if email is provided
+        user = None
+        if email:
+            user = self._get_or_create_user(full_name, phone, email, password)
+        
+        return owner, user
+
     def create(self, validated_data):
         clinic = self.context['clinic']
-        owner = self._get_or_create_owner(clinic, validated_data)
+        owner, user = self._get_or_create_owner(clinic, validated_data)
         age_value = validated_data.pop('age', None)
         dob = validated_data.get('date_of_birth')
 
@@ -246,20 +386,48 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         else:
             validated_data['age_text'] = None
 
+        # Create the clinic patient record
         patient = ClinicPatientRecord.objects.create(
             clinic=clinic,
             owner=owner,
+            linked_user=user,  # Link the user immediately
             **validated_data,
         )
+        
+        # Auto-create Pet in main app if user exists
+        if user:
+            try:
+                pet = self._create_pet_in_main_app({
+                    'name': patient.name,
+                    'species': patient.species,
+                    'date_of_birth': patient.date_of_birth,
+                    'gender': patient.gender,
+                }, user)
+                
+                # Link the pet to the patient record
+                patient.linked_pet = pet
+                patient.save(update_fields=['linked_pet', 'updated_at'])
+            except Exception as e:
+                # Log error but don't fail the patient creation
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to create pet for clinic patient {patient.id}: {e}")
+        
         return patient
 
     def update(self, instance, validated_data):
         clinic = self.context['clinic']
         owner_updated = False
+        user_updated = False
         if 'owner_name' in validated_data or 'owner_phone' in validated_data or 'owner_email' in validated_data:
-            owner = self._get_or_create_owner(clinic, validated_data)
+            owner, user = self._get_or_create_owner(clinic, validated_data)
             instance.owner = owner
             owner_updated = True
+            
+            # Update linked_user if we got a user
+            if user and instance.linked_user != user:
+                instance.linked_user = user
+                user_updated = True
 
         age_value_present = 'age' in validated_data
         age_value = validated_data.pop('age', None)
@@ -301,6 +469,8 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'ownerPhone': instance.owner.phone or '',
             'ownerEmail': instance.owner.email or '',
             'status': instance.status,
+            'linked_user': instance.linked_user_id,
+            'linked_pet': instance.linked_pet_id,
             'lastVisit': instance.last_visit.isoformat() if instance.last_visit else None,
             'nextAppointment': instance.next_appointment.isoformat() if instance.next_appointment else None,
             'notes': instance.notes or '',
