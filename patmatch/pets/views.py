@@ -125,9 +125,9 @@ class PetListCreateView(generics.ListCreateAPIView):
         return PetListSerializer
     
     def get_queryset(self):
-        # استبعاد حيوانات التبني من القائمة العامة
+        # استبعاد حيوانات التبني والحيوانات غير المتاحة من القائمة العامة
         queryset = Pet.objects.select_related('breed', 'owner').exclude(
-            status__in=['available_for_adoption', 'adoption_pending', 'adopted']
+            status__in=['available_for_adoption', 'adoption_pending', 'adopted', 'unavailable']
         )
         
         # فلترة حسب المنطقة
