@@ -1352,7 +1352,19 @@ class PrepareInviteView(ClinicContextMixin, APIView):
             species = (local_pet.get('species') or '').strip() or 'dogs'
             breed = (local_pet.get('breed') or '').strip() or ''
             gender = (local_pet.get('gender') or '').strip() or 'unknown'
-            date_of_birth = local_pet.get('date_of_birth')
+            date_of_birth_raw = local_pet.get('date_of_birth')
+            
+            # Parse date_of_birth if provided as string
+            date_of_birth = None
+            if date_of_birth_raw:
+                if isinstance(date_of_birth_raw, str):
+                    from datetime import datetime
+                    try:
+                        date_of_birth = datetime.strptime(date_of_birth_raw, '%Y-%m-%d').date()
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    date_of_birth = date_of_birth_raw
 
             if not name:
                 return Response({'error': 'local_pet.name is required when no pet_id provided'}, status=status.HTTP_400_BAD_REQUEST)
