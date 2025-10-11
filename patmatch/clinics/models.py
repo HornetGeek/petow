@@ -324,12 +324,11 @@ class ClinicInvite(models.Model):
                 self.patient.linked_user = user
                 fields_to_update.append('linked_user')
             
-            # Try to link pet if not already linked
+            # Create or link pet when invitation is accepted
             if not self.patient.linked_pet:
-                # Try to find a matching pet owned by this user
-                from pets.models import Pet
+                from pets.models import Pet, Breed
                 
-                # Try 1: Exact match by name and species
+                # Try 1: Find existing pet with exact match
                 matching_pet = Pet.objects.filter(
                     owner=user,
                     name__iexact=self.patient.name,
@@ -349,9 +348,61 @@ class ClinicInvite(models.Model):
                     if user_pets.count() == 1:
                         matching_pet = user_pets.first()
                 
-                if matching_pet:
-                    self.patient.linked_pet = matching_pet
-                    fields_to_update.append('linked_pet')
+                # If no matching pet found, CREATE a new one
+                if not matching_pet:
+                    # Map species to pet_type
+                    species_map = {
+                        'dog': 'dogs',
+                        'dogs': 'dogs',
+                        'cat': 'cats',
+                        'cats': 'cats',
+                        'bird': 'birds',
+                        'birds': 'birds',
+                    }
+                    pet_type = species_map.get(self.patient.species.lower(), 'dogs')
+                    
+                    # Get or create breed
+                    breed = Breed.objects.filter(pet_type=pet_type).first()
+                    if not breed:
+                        breed = Breed.objects.create(
+                            name=f"{pet_type.title()} - Generic",
+                            pet_type=pet_type,
+                            description="Generic breed"
+                        )
+                    
+                    # Calculate age
+                    age_months = 12
+                    if self.patient.date_of_birth:
+                        from datetime import date
+                        today = date.today()
+                        dob = self.patient.date_of_birth
+                        age_months = max(1, (today.year - dob.year) * 12 + (today.month - dob.month))
+                    
+                    # Parse gender
+                    gender = 'M'
+                    if self.patient.gender:
+                        if str(self.patient.gender).upper() in ['F', 'FEMALE', 'أنثى']:
+                            gender = 'F'
+                    
+                    # Create the pet
+                    matching_pet = Pet.objects.create(
+                        owner=user,
+                        name=self.patient.name,
+                        pet_type=pet_type,
+                        breed=breed,
+                        age_months=age_months,
+                        gender=gender,
+                        description=f"Added by {self.clinic.name} clinic",
+                        status='unavailable',  # Not available for breeding by default
+                        location=self.clinic.address or 'غير محدد',
+                        latitude=self.clinic.latitude,
+                        longitude=self.clinic.longitude,
+                        is_free=True,
+                    )
+                
+                # Link the pet
+                self.patient.linked_pet = matching_pet
+                fields_to_update.append('linked_pet')
             
             if fields_to_update:
                 fields_to_update.append('updated_at')

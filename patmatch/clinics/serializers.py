@@ -396,31 +396,13 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             validated_data['age_text'] = None
 
         # Create the clinic patient record
+        # Note: Pet will be created when user accepts the invitation
         patient = ClinicPatientRecord.objects.create(
             clinic=clinic,
             owner=owner,
-            linked_user=user,  # Link the user immediately
+            linked_user=user,  # Link the user immediately if email provided
             **validated_data,
         )
-        
-        # Auto-create Pet in main app if user exists
-        if user:
-            try:
-                pet = self._create_pet_in_main_app({
-                    'name': patient.name,
-                    'species': patient.species,
-                    'date_of_birth': patient.date_of_birth,
-                    'gender': patient.gender,
-                }, user)
-                
-                # Link the pet to the patient record
-                patient.linked_pet = pet
-                patient.save(update_fields=['linked_pet', 'updated_at'])
-            except Exception as e:
-                # Log error but don't fail the patient creation
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"Failed to create pet for clinic patient {patient.id}: {e}")
         
         return patient
 
