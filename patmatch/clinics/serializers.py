@@ -448,16 +448,40 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         return instance
 
     def to_representation(self, instance):
+        # Compute age with fallbacks: stored age_text -> derived from DOB -> linked pet age_display
+        age_value = instance.age_text or _calculate_age_text(instance.date_of_birth) or ''
+        if not age_value and getattr(instance, 'linked_pet_id', None):
+            pet = getattr(instance, 'linked_pet', None)
+            if pet is not None:
+                age_value = getattr(pet, 'age_display', '') or age_value
+
+        # Owner phone fallback: clinic owner record -> linked_user phone
+        owner_phone = (getattr(instance.owner, 'phone', '') or '')
+        if not owner_phone and getattr(instance, 'linked_user', None):
+            fallback_phone = getattr(instance.linked_user, 'phone', '') or ''
+            if fallback_phone:
+                owner_phone = fallback_phone
+                # Persist back to clinic owner record for future responses
+                try:
+                    instance.owner.phone = fallback_phone
+                    # Some models have updated_at; ignore if not present
+                    instance.owner.save(update_fields=['phone', 'updated_at'])
+                except Exception:
+                    try:
+                        instance.owner.save(update_fields=['phone'])
+                    except Exception:
+                        pass
+
         data = {
             'id': str(instance.id),
             'name': instance.name,
             'species': instance.species,
             'breed': instance.breed or '',
-            'age': instance.age_text or _calculate_age_text(instance.date_of_birth) or '',
+            'age': age_value,
             'dateOfBirth': instance.date_of_birth.isoformat() if instance.date_of_birth else None,
             'gender': instance.gender or 'unknown',
             'ownerName': instance.owner.full_name,
-            'ownerPhone': instance.owner.phone or '',
+            'ownerPhone': owner_phone,
             'ownerEmail': instance.owner.email or '',
             'status': instance.status,
             'linked_user': instance.linked_user_id,
