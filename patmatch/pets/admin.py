@@ -20,7 +20,7 @@ class PetAdmin(admin.ModelAdmin):
     
     fieldsets = (
         ('معلومات أساسية', {
-            'fields': ('owner', 'name', 'pet_type', 'breed', 'age_months', 'gender', 'weight')
+            'fields': ('owner', 'name', 'pet_type', 'breed', 'age_months', 'gender')
         }),
         ('التزاوج', {
             'fields': ('breeding_history', 'last_breeding_date', 'number_of_offspring')
