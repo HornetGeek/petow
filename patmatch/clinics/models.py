@@ -328,25 +328,12 @@ class ClinicInvite(models.Model):
             if not self.patient.linked_pet:
                 from pets.models import Pet, Breed
                 
-                # Try 1: Find existing pet with exact match
+                # Only link if exact match by name AND species exists
                 matching_pet = Pet.objects.filter(
                     owner=user,
                     name__iexact=self.patient.name,
                     pet_type=self.patient.species
                 ).first()
-                
-                # Try 2: Match by name only (if species mismatch)
-                if not matching_pet:
-                    matching_pet = Pet.objects.filter(
-                        owner=user,
-                        name__iexact=self.patient.name
-                    ).first()
-                
-                # Try 3: If user has only one pet, link it automatically
-                if not matching_pet:
-                    user_pets = Pet.objects.filter(owner=user)
-                    if user_pets.count() == 1:
-                        matching_pet = user_pets.first()
                 
                 # If no matching pet found, CREATE a new one
                 if not matching_pet:
