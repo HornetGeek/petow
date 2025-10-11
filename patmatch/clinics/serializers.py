@@ -469,10 +469,8 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'updatedAt': instance.updated_at.isoformat(),
         }
 
-        try:
-            invite = create_invite_for_patient(instance)
-        except Exception:
-            invite = None
+        # Only include existing pending invite info; do NOT create/resend during serialization
+        invite = instance.invites.filter(status=getattr(instance.invites.model, 'STATUS_PENDING', 'pending')).order_by('-created_at').first()
 
         if invite:
             data.update({
