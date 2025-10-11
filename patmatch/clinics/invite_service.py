@@ -325,7 +325,12 @@ def respond_to_invite(invite: ClinicInvite, *, user: User, accept: bool) -> Clin
         else:
             invite.mark_declined(user=user)
 
-        _ensure_invite_notification(invite)
+        # Delete the notification after the invite is handled
+        # This prevents the accept button from reappearing when the app is reopened
+        user.notifications.filter(
+            type='clinic_invite',
+            extra_data__invite_token=str(invite.token)
+        ).delete()
 
         if fields:
             invite.save(update_fields=fields)
