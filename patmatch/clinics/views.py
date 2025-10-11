@@ -1235,9 +1235,20 @@ class OwnerLookupView(ClinicContextMixin, APIView):
             owner_record = ClinicClientRecord.objects.create(
                 clinic=clinic,
                 full_name=user.get_full_name() or user.email,
-                email=user.email,
-                phone=user.phone or '',
+                email=email or user.email,
+                phone=normalized_phone or phone_raw or user.phone or '',
             )
+        else:
+            # Update owner record with the phone from the form if it's missing
+            updates = {}
+            if phone_raw and not owner_record.phone:
+                updates['phone'] = normalized_phone or phone_raw
+            if email and not owner_record.email:
+                updates['email'] = email
+            if updates:
+                for field, value in updates.items():
+                    setattr(owner_record, field, value)
+                owner_record.save(update_fields=list(updates.keys()) + ['updated_at'])
 
         payload = {
             'found': True,
@@ -1272,6 +1283,10 @@ class PrepareInviteView(ClinicContextMixin, APIView):
         user_id = request.data.get('user_id')
         pet_id = request.data.get('pet_id')
         local_pet = request.data.get('local_pet') or {}
+        
+        # Get phone and email from request (if provided by the lookup flow)
+        phone_raw = (request.data.get('phone') or '').strip()
+        email_raw = (request.data.get('email') or '').strip()
 
         if not user_id:
             return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1281,17 +1296,34 @@ class PrepareInviteView(ClinicContextMixin, APIView):
         except User.DoesNotExist:
             return Response({'error': 'user not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        # Use provided contact info or fall back to user's stored info
+        owner_email = email_raw or target_user.email
+        owner_phone = phone_raw or target_user.phone or ''
+        if phone_raw:
+            owner_phone = _normalize_phone(phone_raw) or phone_raw
+
         # Ensure owner record exists in clinic
         owner_record = clinic.client_records.filter(
-            models.Q(email__iexact=target_user.email) | models.Q(phone=target_user.phone)
+            models.Q(email__iexact=owner_email) | models.Q(phone=owner_phone)
         ).first()
         if not owner_record:
             owner_record = ClinicClientRecord.objects.create(
                 clinic=clinic,
                 full_name=target_user.get_full_name() or target_user.email,
-                email=target_user.email,
-                phone=target_user.phone or '',
+                email=owner_email,
+                phone=owner_phone,
             )
+        else:
+            # Update owner record with the phone/email from request if missing
+            updates = {}
+            if owner_phone and not owner_record.phone:
+                updates['phone'] = owner_phone
+            if owner_email and not owner_record.email:
+                updates['email'] = owner_email
+            if updates:
+                for field, value in updates.items():
+                    setattr(owner_record, field, value)
+                owner_record.save(update_fields=list(updates.keys()) + ['updated_at'])
 
         # Branch: select existing pet vs register new local patient
         selected_pet = None
