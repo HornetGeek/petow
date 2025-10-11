@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from django.contrib.auth import authenticate
 from django.db.models import Count, Q, Sum
+from django.db import models
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -29,7 +30,8 @@ from .models import (
     ClinicPatientRecord,
     ClinicInvite,
 )
-from pets.models import Notification, ChatRoom
+from pets.models import Notification, ChatRoom, Pet
+from pets.serializers import PublicPetSerializer
 from pets.notifications import create_notification, _send_push_notification
 from .permissions import IsClinicStaff
 from .serializers import (
@@ -1180,3 +1182,140 @@ class ClinicInviteRespondView(APIView):
         invite = respond_to_invite(invite, user=user, accept=accept)
         serializer = ClinicInviteSerializer(invite)
         return Response(serializer.data)
+
+
+class OwnerLookupView(ClinicContextMixin, APIView):
+    """Verify an owner by phone and email; return minimal user info."""
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def post(self, request):
+        clinic = self.get_clinic()
+        phone = (request.data.get('phone') or '').strip()
+        email = (request.data.get('email') or '').strip().lower()
+
+        if not phone or not email:
+            return Response({'error': 'phone and email are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email, phone=phone).first()
+        if not user:
+            return Response({'found': False}, status=status.HTTP_200_OK)
+
+        # Ensure there is (or create) a clinic owner record for contact continuity
+        owner_record = clinic.client_records.filter(models.Q(email__iexact=email) | models.Q(phone=phone)).first()
+        if not owner_record:
+            owner_record = ClinicClientRecord.objects.create(
+                clinic=clinic,
+                full_name=user.get_full_name() or user.email,
+                email=user.email,
+                phone=user.phone or '',
+            )
+
+        payload = {
+            'found': True,
+            'user': {
+                'id': user.id,
+                'full_name': user.get_full_name() or user.email,
+                'email': user.email,
+                'phone': user.phone or '',
+            },
+            'owner_record_id': owner_record.id,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class PublicUserPetsView(ClinicContextMixin, APIView):
+    """Return public info about a user's pets for clinic preview."""
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def get(self, request, user_id):
+        # Only public fields are returned via PublicPetSerializer
+        pets_qs = Pet.objects.filter(owner_id=user_id).select_related('breed')
+        serializer = PublicPetSerializer(pets_qs, many=True, context={'request': request})
+        return Response(serializer.data)
+
+
+class PrepareInviteView(ClinicContextMixin, APIView):
+    """Create or reuse a ClinicPatientRecord and prepare an invite for association."""
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def post(self, request):
+        clinic = self.get_clinic()
+        user_id = request.data.get('user_id')
+        pet_id = request.data.get('pet_id')
+        local_pet = request.data.get('local_pet') or {}
+
+        if not user_id:
+            return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            target_user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'user not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Ensure owner record exists in clinic
+        owner_record = clinic.client_records.filter(
+            models.Q(email__iexact=target_user.email) | models.Q(phone=target_user.phone)
+        ).first()
+        if not owner_record:
+            owner_record = ClinicClientRecord.objects.create(
+                clinic=clinic,
+                full_name=target_user.get_full_name() or target_user.email,
+                email=target_user.email,
+                phone=target_user.phone or '',
+            )
+
+        # Branch: select existing pet vs register new local patient
+        selected_pet = None
+        if pet_id:
+            try:
+                selected_pet = Pet.objects.get(id=pet_id, owner_id=target_user.id)
+            except Pet.DoesNotExist:
+                return Response({'error': 'pet not found for this user'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Idempotent get_or_create based on clinic + linked_pet
+            patient, created = ClinicPatientRecord.objects.get_or_create(
+                clinic=clinic,
+                linked_pet=selected_pet,
+                defaults={
+                    'owner': owner_record,
+                    'name': selected_pet.name,
+                    'species': selected_pet.pet_type,
+                    'breed': selected_pet.breed.name if selected_pet.breed else '',
+                    'gender': selected_pet.gender,
+                    'status': 'active',
+                }
+            )
+        else:
+            # Create a local-only patient (unlinked) using provided minimal fields
+            name = (local_pet.get('name') or '').strip()
+            species = (local_pet.get('species') or '').strip() or 'dogs'
+            breed = (local_pet.get('breed') or '').strip() or ''
+            gender = (local_pet.get('gender') or '').strip() or 'unknown'
+            date_of_birth = local_pet.get('date_of_birth')
+
+            if not name:
+                return Response({'error': 'local_pet.name is required when no pet_id provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+            patient = ClinicPatientRecord.objects.create(
+                clinic=clinic,
+                owner=owner_record,
+                name=name,
+                species=species,
+                breed=breed,
+                gender=gender,
+                date_of_birth=date_of_birth,
+                status='active',
+            )
+
+        # Create or refresh an invite; attach intended_pet if selected
+        from .invite_service import create_invite_for_patient
+        invite = create_invite_for_patient(patient, resend=False, intended_pet=selected_pet)
+
+        # Response payload
+        patient_payload = ClinicPatientRecordSerializer(patient).data
+        invite_payload = {
+            'token': str(invite.token),
+            'status': invite.status,
+            'createdAt': invite.created_at.isoformat(),
+        }
+        return Response({'patient': patient_payload, 'invite': invite_payload}, status=status.HTTP_201_CREATED)

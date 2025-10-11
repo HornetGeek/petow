@@ -20,6 +20,9 @@ from .views import (
     ClinicBroadcastStatsView,
     ClinicInviteListView,
     ClinicInviteRespondView,
+    OwnerLookupView,
+    PublicUserPetsView,
+    PrepareInviteView,
 )
 
 router = DefaultRouter()
@@ -44,5 +47,9 @@ urlpatterns = [
     path('messages/broadcast/', ClinicBroadcastView.as_view(), name='clinic-broadcast'),
     path('invites/', ClinicInviteListView.as_view(), name='clinic-invites'),
     path('invites/<str:token>/<str:action>/', ClinicInviteRespondView.as_view(), name='clinic-invite-respond'),
+    # Owner lookup and pets preview
+    path('owner-lookup/', OwnerLookupView.as_view(), name='clinic-owner-lookup'),
+    path('users/<int:user_id>/pets/public/', PublicUserPetsView.as_view(), name='clinic-user-public-pets'),
+    path('patients/prepare-invite/', PrepareInviteView.as_view(), name='clinic-patient-prepare-invite'),
     path('', include(router.urls)),
 ]

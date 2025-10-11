@@ -63,8 +63,16 @@ def build_invite_message(invite: ClinicInvite) -> str:
 
 
 
-def create_invite_for_patient(patient: ClinicPatientRecord, *, resend: bool = False) -> ClinicInvite:
-    """Create (or refresh) an invite for a clinic patient and return it for sharing."""
+def create_invite_for_patient(
+    patient: ClinicPatientRecord,
+    *,
+    resend: bool = False,
+    intended_pet=None,
+) -> ClinicInvite:
+    """Create (or refresh) an invite for a clinic patient and return it for sharing.
+
+    intended_pet: optional pets.Pet to be prioritized upon acceptance.
+    """
     owner = patient.owner
     clinic = patient.clinic
     phone = _normalize_phone(owner.phone)
@@ -81,6 +89,9 @@ def create_invite_for_patient(patient: ClinicPatientRecord, *, resend: bool = Fa
         if email and invite.email != email:
             invite.email = email
             updated_fields.append('email')
+        if intended_pet and invite.intended_pet_id != getattr(intended_pet, 'id', None):
+            invite.intended_pet = intended_pet
+            updated_fields.append('intended_pet')
         if updated_fields:
             updated_fields.append('updated_at')
             invite.save(update_fields=updated_fields)
@@ -92,6 +103,7 @@ def create_invite_for_patient(patient: ClinicPatientRecord, *, resend: bool = Fa
             token=_generate_token(),
             phone=phone,
             email=email,
+            intended_pet=intended_pet if intended_pet else None,
         )
 
     _trigger_immediate_invite_notifications(
