@@ -192,7 +192,7 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             user = User.objects.filter(phone=owner_phone).first()
         
         if not user and owner_email:
-            # Create new user account
+            # Create new user account (ensure a unique username since AbstractUser keeps a unique username field)
             from django.contrib.auth.hashers import make_password
             import random
             import string
@@ -205,7 +205,9 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             first_name = name_parts[0] if len(name_parts) > 0 else owner_name
             last_name = name_parts[1] if len(name_parts) > 1 else ''
             
+            # Use email as username to satisfy the unique username constraint
             user = User.objects.create(
+                username=owner_email,
                 email=owner_email,
                 phone=owner_phone or '',
                 first_name=first_name,
