@@ -1,0 +1,536 @@
+import React, { useState, useEffect } from 'react';
+import {
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  TextInput,
+  Image,
+  Dimensions,
+  KeyboardAvoidingView,
+  Platform,
+  Alert,
+  ActivityIndicator,
+  Button,
+} from 'react-native';
+import { NavigationContainer, useNavigation } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import ApiService from './services/api';
+
+const { width, height } = Dimensions.get('window');
+
+// Navigation types
+type RootStackParamList = {
+  Login: undefined;
+  Register: undefined;
+  Home: undefined;
+  Search: undefined;
+  AddPet: undefined;
+  Messages: undefined;
+  Profile: undefined;
+  PetDetails: { petId: number };
+  Favorites: undefined;
+};
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+// Loading Screen Component
+const LoadingScreen: React.FC = () => (
+  <View style={styles.loadingContainer}>
+    <ActivityIndicator size="large" color="#e74c3c" />
+    <Text style={styles.loadingText}>جاري التحميل...</Text>
+  </View>
+);
+
+// Login Screen Component
+const LoginScreen: React.FC = () => {
+  const navigation = useNavigation();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleLogin = async () => {
+    if (!email || !password) {
+      Alert.alert('خطأ', 'يرجى إدخال البريد الإلكتروني وكلمة المرور');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const result = await ApiService.login({ email, password });
+      if (result.success) {
+        Alert.alert('نجح', 'تم تسجيل الدخول بنجاح', [
+          { text: 'موافق', onPress: () => navigation.navigate('Home' as never) }
+        ]);
+      } else {
+        Alert.alert('خطأ', result.error || 'فشل في تسجيل الدخول');
+      }
+    } catch (error) {
+      Alert.alert('خطأ', 'حدث خطأ في الاتصال');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.keyboardView}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      >
+        <ScrollView 
+          contentContainerStyle={styles.scrollContainer}
+          keyboardShouldPersistTaps="always"
+        >
+          <View style={styles.header}>
+            <Image source={require('../assets/icon.png')} style={styles.logo} />
+            <Text style={styles.title}>Petow</Text>
+            <Text style={styles.subtitle}>منصة التزاوج الآمن للحيوانات الأليفة</Text>
+          </View>
+
+          <View style={styles.form}>
+            <Text style={styles.label}>البريد الإلكتروني</Text>
+            <TextInput
+              style={styles.input}
+              value={email}
+              onChangeText={setEmail}
+              placeholder="أدخل بريدك الإلكتروني"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+
+            <Text style={styles.label}>كلمة المرور</Text>
+            <TextInput
+              style={styles.input}
+              value={password}
+              onChangeText={setPassword}
+              placeholder="أدخل كلمة المرور"
+              secureTextEntry
+            />
+
+            <TouchableOpacity 
+              style={[styles.button, styles.primaryButton]} 
+              onPress={handleLogin}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>تسجيل الدخول</Text>
+              )}
+            </TouchableOpacity>
+
+            <Button
+              title="إنشاء حساب جديد"
+              onPress={() => navigation.navigate('Register' as never)}
+              color="#e74c3c"
+            />
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+};
+
+// Register Screen Component
+const RegisterScreen: React.FC = () => {
+  const navigation = useNavigation();
+  const [formData, setFormData] = useState({
+    firstName: '',
+    lastName: '',
+    email: '',
+    password: '',
+    confirmPassword: '',
+    phone: ''
+  });
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleRegister = async () => {
+    if (!formData.firstName || !formData.lastName || !formData.email || !formData.password) {
+      Alert.alert('خطأ', 'يرجى ملء جميع الحقول المطلوبة');
+      return;
+    }
+
+    if (formData.password !== formData.confirmPassword) {
+      Alert.alert('خطأ', 'كلمة المرور غير متطابقة');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const result = await ApiService.register({
+        first_name: formData.firstName,
+        last_name: formData.lastName,
+        email: formData.email,
+        phone: formData.phone,
+        password: formData.password,
+        password2: formData.confirmPassword
+      });
+      if (result.success) {
+        Alert.alert('نجح', 'تم إنشاء الحساب بنجاح', [
+          { text: 'موافق', onPress: () => navigation.navigate('Login' as never) }
+        ]);
+      } else {
+        Alert.alert('خطأ', result.error || 'فشل في إنشاء الحساب');
+      }
+    } catch (error) {
+      Alert.alert('خطأ', 'حدث خطأ في الاتصال');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.keyboardView}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      >
+        <ScrollView 
+          contentContainerStyle={styles.scrollContainer}
+          keyboardShouldPersistTaps="always"
+        >
+          <View style={styles.header}>
+            <Button
+              title="← رجوع"
+              onPress={() => navigation.goBack()}
+              color="#e74c3c"
+            />
+            <Image source={require('../assets/icon.png')} style={styles.logo} />
+            <Text style={styles.title}>إنشاء حساب جديد</Text>
+          </View>
+
+          <View style={styles.form}>
+            <Text style={styles.label}>الاسم الأول</Text>
+            <TextInput
+              style={styles.input}
+              value={formData.firstName}
+              onChangeText={(text) => setFormData({...formData, firstName: text})}
+              placeholder="أدخل اسمك الأول"
+            />
+
+            <Text style={styles.label}>الاسم الأخير</Text>
+            <TextInput
+              style={styles.input}
+              value={formData.lastName}
+              onChangeText={(text) => setFormData({...formData, lastName: text})}
+              placeholder="أدخل اسمك الأخير"
+            />
+
+            <Text style={styles.label}>البريد الإلكتروني</Text>
+            <TextInput
+              style={styles.input}
+              value={formData.email}
+              onChangeText={(text) => setFormData({...formData, email: text})}
+              placeholder="أدخل بريدك الإلكتروني"
+              keyboardType="email-address"
+              autoCapitalize="none"
+            />
+
+            <Text style={styles.label}>رقم الهاتف</Text>
+            <TextInput
+              style={styles.input}
+              value={formData.phone}
+              onChangeText={(text) => setFormData({...formData, phone: text})}
+              placeholder="أدخل رقم هاتفك"
+              keyboardType="phone-pad"
+            />
+
+            <Text style={styles.label}>كلمة المرور</Text>
+            <TextInput
+              style={styles.input}
+              value={formData.password}
+              onChangeText={(text) => setFormData({...formData, password: text})}
+              placeholder="أدخل كلمة المرور"
+              secureTextEntry
+            />
+
+            <Text style={styles.label}>تأكيد كلمة المرور</Text>
+            <TextInput
+              style={styles.input}
+              value={formData.confirmPassword}
+              onChangeText={(text) => setFormData({...formData, confirmPassword: text})}
+              placeholder="أعد إدخال كلمة المرور"
+              secureTextEntry
+            />
+
+            <TouchableOpacity 
+              style={[styles.button, styles.primaryButton]} 
+              onPress={handleRegister}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>إنشاء الحساب</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+};
+
+// Home Screen Component
+const HomeScreen: React.FC = () => {
+  const navigation = useNavigation();
+
+  const handleLogout = async () => {
+    try {
+      await ApiService.logout();
+      Alert.alert('نجح', 'تم تسجيل الخروج بنجاح', [
+        { text: 'موافق', onPress: () => navigation.navigate('Login' as never) }
+      ]);
+    } catch (error) {
+      Alert.alert('خطأ', 'حدث خطأ في تسجيل الخروج');
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
+      <View style={styles.header}>
+        <Text style={styles.title}>مرحباً بك في Petow</Text>
+        <Button
+          title="تسجيل الخروج"
+          onPress={handleLogout}
+          color="#e74c3c"
+        />
+      </View>
+      
+      <View style={styles.content}>
+        <Text style={styles.welcomeText}>تطبيق Petow جاهز للاستخدام!</Text>
+        
+        <View style={styles.buttonContainer}>
+          <Button
+            title="البحث عن حيوانات"
+            onPress={() => navigation.navigate('Search' as never)}
+            color="#e74c3c"
+          />
+          
+          <Button
+            title="إضافة حيوان"
+            onPress={() => navigation.navigate('AddPet' as never)}
+            color="#e74c3c"
+          />
+          
+          <Button
+            title="الرسائل"
+            onPress={() => navigation.navigate('Messages' as never)}
+            color="#e74c3c"
+          />
+          
+          <Button
+            title="الملف الشخصي"
+            onPress={() => navigation.navigate('Profile' as never)}
+            color="#e74c3c"
+          />
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+};
+
+// Placeholder screens
+const SearchScreen = () => (
+  <View style={styles.placeholder}>
+    <Text>صفحة البحث</Text>
+    <Button title="رجوع" onPress={() => {}} color="#e74c3c" />
+  </View>
+);
+
+const AddPetScreen = () => (
+  <View style={styles.placeholder}>
+    <Text>صفحة إضافة حيوان</Text>
+    <Button title="رجوع" onPress={() => {}} color="#e74c3c" />
+  </View>
+);
+
+const MessagesScreen = () => (
+  <View style={styles.placeholder}>
+    <Text>صفحة الرسائل</Text>
+    <Button title="رجوع" onPress={() => {}} color="#e74c3c" />
+  </View>
+);
+
+const ProfileScreen = () => (
+  <View style={styles.placeholder}>
+    <Text>صفحة الملف الشخصي</Text>
+    <Button title="رجوع" onPress={() => {}} color="#e74c3c" />
+  </View>
+);
+
+const PetDetailsScreen = () => (
+  <View style={styles.placeholder}>
+    <Text>صفحة تفاصيل الحيوان</Text>
+    <Button title="رجوع" onPress={() => {}} color="#e74c3c" />
+  </View>
+);
+
+const FavoritesScreen = () => (
+  <View style={styles.placeholder}>
+    <Text>صفحة المفضلة</Text>
+    <Button title="رجوع" onPress={() => {}} color="#e74c3c" />
+  </View>
+);
+
+const App: React.FC = () => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  useEffect(() => {
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
+    try {
+      const token = await ApiService.getToken();
+      if (token) {
+        setIsAuthenticated(true);
+      }
+    } catch (error) {
+      console.log('No valid token found');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (isLoading) {
+    return <LoadingScreen />;
+  }
+
+  return (
+    <NavigationContainer>
+      <Stack.Navigator 
+        screenOptions={{ headerShown: false }}
+        initialRouteName={isAuthenticated ? 'Home' : 'Login'}
+      >
+        <Stack.Screen name="Login" component={LoginScreen} />
+        <Stack.Screen name="Register" component={RegisterScreen} />
+        <Stack.Screen name="Home" component={HomeScreen} />
+        <Stack.Screen name="Search" component={SearchScreen} />
+        <Stack.Screen name="AddPet" component={AddPetScreen} />
+        <Stack.Screen name="Messages" component={MessagesScreen} />
+        <Stack.Screen name="Profile" component={ProfileScreen} />
+        <Stack.Screen name="PetDetails" component={PetDetailsScreen} />
+        <Stack.Screen name="Favorites" component={FavoritesScreen} />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#f8f9fa',
+  },
+  keyboardView: {
+    flex: 1,
+  },
+  scrollContainer: {
+    flexGrow: 1,
+    padding: 20,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f8f9fa',
+  },
+  loadingText: {
+    marginTop: 10,
+    fontSize: 16,
+    color: '#7f8c8d',
+  },
+  header: {
+    alignItems: 'center',
+    marginBottom: 30,
+  },
+  logo: {
+    width: 80,
+    height: 80,
+    marginBottom: 10,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: '#2c3e50',
+    marginBottom: 5,
+  },
+  subtitle: {
+    fontSize: 16,
+    color: '#7f8c8d',
+    textAlign: 'center',
+  },
+  form: {
+    flex: 1,
+  },
+  label: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#2c3e50',
+    marginBottom: 8,
+    marginTop: 15,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    backgroundColor: '#fff',
+    color: '#333',
+  },
+  button: {
+    padding: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  primaryButton: {
+    backgroundColor: '#e74c3c',
+  },
+  secondaryButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#e74c3c',
+  },
+  buttonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  secondaryButtonText: {
+    color: '#e74c3c',
+  },
+  content: {
+    flex: 1,
+    padding: 20,
+  },
+  welcomeText: {
+    fontSize: 18,
+    color: '#2c3e50',
+    textAlign: 'center',
+    marginBottom: 30,
+  },
+  buttonContainer: {
+    flex: 1,
+  },
+  placeholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f8f9fa',
+  },
+});
+
+export default App;

@@ -1,0 +1,8 @@
+{
+  "name": "petow",
+  "displayName": "Petow - منصة التزاوج الآمن",
+  "version": "1.0.0",
+  "description": "منصة التزاوج الآمن للحيوانات الأليفة",
+  "main": "index.js",
+  "icon": "./assets/icon.png"
+} 
