@@ -123,3 +123,82 @@ class PasswordResetOTP(models.Model):
     def is_valid(self):
         """فحص إذا كان الكود صالح للاستخدام"""
         return not self.is_used and not self.is_expired()
+
+
+class AccountVerification(models.Model):
+    """نموذج التحقق من الحساب بالهوية"""
+    
+    STATUS_CHOICES = [
+        ('pending', 'قيد المراجعة'),
+        ('approved', 'موافق عليه'),
+        ('rejected', 'مرفوض'),
+    ]
+    
+    user = models.ForeignKey(
+        User, 
+        on_delete=models.CASCADE, 
+        related_name='verification_requests',
+        verbose_name="المستخدم"
+    )
+    id_photo = models.ImageField(
+        upload_to='verification_documents/id_photos/',
+        help_text="صورة بطاقة الهوية",
+        verbose_name="صورة الهوية"
+    )
+    selfie_video = models.FileField(
+        upload_to='verification_documents/selfie_videos/',
+        help_text="فيديو سيلفي مع الهوية (10-15 ثانية)",
+        verbose_name="فيديو السيلفي",
+        null=True,
+        blank=True
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        verbose_name="حالة الطلب"
+    )
+    admin_notes = models.TextField(
+        blank=True,
+        null=True,
+        help_text="ملاحظات المشرف",
+        verbose_name="ملاحظات الإدارة"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="تاريخ الإنشاء")
+    reviewed_at = models.DateTimeField(blank=True, null=True, verbose_name="تاريخ المراجعة")
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_verifications',
+        verbose_name="تمت المراجعة بواسطة"
+    )
+    
+    class Meta:
+        verbose_name = "طلب التحقق من الحساب"
+        verbose_name_plural = "طلبات التحقق من الحسابات"
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"طلب تحقق {self.user.get_full_name()} - {self.get_status_display()}"
+    
+    def approve(self, admin_user=None, notes=None):
+        """قبول طلب التحقق"""
+        self.status = 'approved'
+        self.reviewed_at = timezone.now()
+        self.reviewed_by = admin_user
+        if notes:
+            self.admin_notes = notes
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self.save()
+    
+    def reject(self, admin_user=None, notes=None):
+        """رفض طلب التحقق"""
+        self.status = 'rejected'
+        self.reviewed_at = timezone.now()
+        self.reviewed_by = admin_user
+        if notes:
+            self.admin_notes = notes
+        self.save()
