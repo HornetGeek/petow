@@ -26,6 +26,8 @@ export interface User {
   phone?: string;
   is_phone_verified: boolean;
   address?: string;
+  latitude?: number;
+  longitude?: number;
   profile_picture?: string;
   is_verified: boolean;
   pets_count: number;
@@ -85,8 +87,8 @@ export interface ChatRoom {
   updated_at: string;
   is_active: boolean;
   participants: Record<string, ChatParticipant>;
-  other_participant: ChatParticipant;
-  pet_details: ChatPetDetails;
+  other_participant: ChatParticipant | null;
+  pet_details: ChatPetDetails | null;
 }
 
 export interface ChatParticipant {
@@ -116,15 +118,32 @@ export interface ChatRoomList {
 
 export interface ChatContext {
   chat_id: string;
-  breeding_request: {
+  breeding_request?: {
     id: number;
     status: string;
     created_at: string;
     message?: string;
-  };
-  pet: ChatPetDetails & {
-    owner_name: string;
-  };
+  } | null;
+  adoption_request?: {
+    id: number;
+    status: string;
+    created_at: string;
+    message?: string;
+  } | null;
+  clinic?: {
+    id: number | null;
+    name: string | null;
+  } | null;
+  patient?: {
+    id: number;
+    name: string | null;
+    species: string | null;
+    breed: string | null;
+    owner_name: string | null;
+    owner_email: string | null;
+    owner_phone: string | null;
+  } | null;
+  pet: (ChatPetDetails & { owner_name?: string | null }) | null;
   participants: Record<string, ChatParticipant>;
   metadata: {
     created_at: string;
@@ -158,6 +177,46 @@ class ApiService {
     } catch (error) {
       console.error('❌ Error getting token from AsyncStorage:', error);
       return null;
+    }
+  }
+
+  /**
+   * Extract a relative API path from a possibly absolute "next" URL.
+   * Handles different schemes, duplicate /api/ segments, and returns a path usable by this.request()
+   */
+  private extractPathFromFullUrl(fullUrl: string): string {
+    try {
+      // Use BASE_URL as reference
+      const base = new URL((BASE_URL.endsWith('/') ? BASE_URL : BASE_URL + '/'));
+      const url = new URL(fullUrl, base.href);
+      let path = url.pathname + url.search;
+
+      // Normalize duplicate /api/ if present
+      if (path.startsWith('/api/api/')) {
+        path = path.replace('/api/api/', '/api/');
+      }
+
+      // Our request() already prefixes BASE_URL, which includes /api
+      // So strip a leading /api if present
+      if (path.startsWith('/api/')) {
+        path = path.substring(4);
+      }
+
+      // Ensure leading slash
+      if (!path.startsWith('/')) {
+        path = '/' + path;
+      }
+
+      return path;
+    } catch (_e) {
+      // Fallback: strip origin part manually if absolute
+      if (/^https?:\/\//i.test(fullUrl)) {
+        const withoutOrigin = fullUrl.replace(/^https?:\/\/[^/]+/i, '');
+        return withoutOrigin.startsWith('/api/')
+          ? withoutOrigin.substring(4)
+          : withoutOrigin;
+      }
+      return fullUrl;
     }
   }
 
@@ -276,9 +335,10 @@ class ApiService {
           data: data,
         };
       } else {
+        const formattedError = this.formatErrorMessage(data) || `HTTP ${response.status}`;
         return {
           success: false,
-          error: data?.error || data?.message || `HTTP ${response.status}`,
+          error: formattedError,
         };
       }
     } catch (error) {
@@ -288,6 +348,47 @@ class ApiService {
         error: error instanceof Error ? error.message : 'Network error',
       };
     }
+  }
+
+
+  private formatErrorMessage(errorData: any): string | undefined {
+    if (errorData === null || errorData === undefined) {
+      return undefined;
+    }
+
+    if (typeof errorData === 'string') {
+      const trimmed = errorData.trim();
+      return trimmed.length ? trimmed : undefined;
+    }
+
+    if (Array.isArray(errorData)) {
+      const normalized = errorData
+        .map(item => this.formatErrorMessage(item))
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+      return normalized.length ? normalized.join(", ") : undefined;
+    }
+
+    if (typeof errorData === 'object') {
+      const parts: string[] = [];
+      const friendlyKeys = new Set(['non_field_errors', 'detail', 'error', 'message', 'errors']);
+
+      Object.entries(errorData).forEach(([key, value]) => {
+        const formattedValue = this.formatErrorMessage(value);
+        if (!formattedValue) {
+          return;
+        }
+
+        if (friendlyKeys.has(key)) {
+          parts.push(formattedValue);
+        } else {
+          parts.push(`${key}: ${formattedValue}`);
+        }
+      });
+
+      return parts.length ? parts.join(", ") : undefined;
+    }
+
+    return String(errorData);
   }
 
   // Authentication endpoints
@@ -450,6 +551,66 @@ class ApiService {
     return this.request<PaginatedResponse<Pet>>(endpoint);
   }
 
+  /**
+   * Fetch all pets across all pages with the given filters.
+   * Returns a flat list of Pet objects.
+   */
+  async getAllPets(params?: {
+    search?: string;
+    pet_type?: string;
+    gender?: string;
+    status?: string;
+    location?: string;
+    min_price?: number;
+    max_price?: number;
+    breed?: number;
+    ordering?: string;
+    page_size?: number;
+  }): Promise<ApiResponse<Pet[]>> {
+    try {
+      // Build initial path from params
+      const queryParams = new URLSearchParams();
+      if (params?.search) queryParams.append('search', params.search);
+      if (params?.pet_type) queryParams.append('pet_type', params.pet_type);
+      if (params?.gender) queryParams.append('gender', params.gender);
+      if (params?.status) queryParams.append('status', params.status);
+      if (params?.location) queryParams.append('location', params.location);
+      if (params?.min_price) queryParams.append('min_price', String(params.min_price));
+      if (params?.max_price) queryParams.append('max_price', String(params.max_price));
+      if (params?.breed) queryParams.append('breed', String(params.breed));
+      if (params?.ordering) queryParams.append('ordering', params.ordering);
+      if (params?.page_size) queryParams.append('page_size', String(params.page_size));
+
+      const initialPath = queryParams.toString() ? `/pets/?${queryParams.toString()}` : '/pets/';
+
+      const allPets: Pet[] = [];
+      let nextPath: string | null = initialPath;
+      let pageCount = 0;
+      const MAX_PAGES = 50; // safety limit
+
+      while (nextPath && pageCount < MAX_PAGES) {
+        pageCount += 1;
+        const response = await this.request<PaginatedResponse<Pet>>(nextPath);
+        if (!response.success || !response.data) {
+          return { success: false, error: response.error || 'Failed to load pets' };
+        }
+
+        const pagePets = response.data.results || [];
+        allPets.push(...pagePets);
+
+        if (response.data.next) {
+          nextPath = this.extractPathFromFullUrl(response.data.next);
+        } else {
+          nextPath = null;
+        }
+      }
+
+      return { success: true, data: allPets };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to load all pets' };
+    }
+  }
+
   async getPet(id: number): Promise<ApiResponse<Pet>> {
     return this.request<Pet>(`/pets/${id}/`);
   }
@@ -555,6 +716,17 @@ class ApiService {
 
   async getUnreadNotificationsCount(): Promise<ApiResponse<{ count: number }>> {
     return this.request<{ count: number }>('/pets/notifications/unread-count/');
+  }
+
+  async getClinicInvites(status: 'pending' | 'accepted' | 'declined' | 'expired' | 'all' = 'pending'): Promise<ApiResponse<any[]>> {
+    const query = status && status !== 'all' ? `?status=${status}` : '';
+    return this.request<any[]>(`/clinics/invites/${query}`);
+  }
+
+  async respondToClinicInvite(token: string, action: 'accept' | 'decline'): Promise<ApiResponse<any>> {
+    return this.request<any>(`/clinics/invites/${token}/${action}/`, {
+      method: 'POST',
+    });
   }
 
   // Veterinary clinics endpoints
@@ -802,6 +974,20 @@ class ApiService {
     const attempt = await this.request<{ message: string }>('/accounts/profile/', { method: 'DELETE' });
     if (attempt.success) return attempt;
     return this.request<{ message: string }>('/accounts/delete/', { method: 'POST' });
+  }
+
+  async updatePetLocationIfNeeded(petId: number, currentLocation: string | undefined | null, resolvedAddress: string): Promise<void> {
+    try {
+      const looksLikeCoords = (s: string | undefined | null) => !!s && /^\s*-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?\s*$/.test(s);
+      if (!resolvedAddress || resolvedAddress.trim().length < 3) return;
+      if (currentLocation && !looksLikeCoords(currentLocation)) return; // already human-readable
+      await this.request(`/pets/${petId}/`, {
+        method: 'PATCH',
+        body: JSON.stringify({ location: resolvedAddress }),
+      });
+    } catch {
+      // best-effort; ignore errors
+    }
   }
 }
 

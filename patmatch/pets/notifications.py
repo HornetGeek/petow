@@ -211,6 +211,44 @@ def notify_breeding_request_rejected(breeding_request):
 
     return notification
 
+
+def notify_breeding_request_pending_reminder(breeding_request):
+    """
+    إرسال تذكير للمستلم بأن هناك طلب تزاوج ما زال قيد المراجعة.
+    يتم استخدامه عادة في المهام المجدولة لتذكير المستخدمين باتخاذ إجراء.
+    """
+    receiver = breeding_request.receiver
+    target_pet = breeding_request.target_pet
+    requester = breeding_request.requester
+
+    title = f"تذكير بطلب تزاوج لـ {target_pet.name}"
+    message = (
+        f"هناك طلب تزاوج من {requester.get_full_name()} بانتظار ردك. "
+        "فضلاً قم بقبول أو رفض الطلب لإبلاغ الطرف الآخر."
+    )
+
+    notification = create_notification(
+        user=receiver,
+        notification_type='breeding_request_pending_reminder',
+        title=title,
+        message=message,
+        related_pet=target_pet,
+        related_breeding_request=breeding_request,
+        extra_data={
+            'requester_name': requester.get_full_name(),
+            'requester_pet_name': breeding_request.requester_pet.name,
+        },
+    )
+
+    push_payload = {
+        'type': 'breeding_request_pending_reminder',
+        'breeding_request_id': str(breeding_request.id),
+        'pet_id': str(target_pet.id),
+    }
+    _send_push_notification(receiver, title, message, push_payload)
+
+    return notification
+
 def notify_breeding_request_completed(breeding_request):
     """إشعار بإكمال المقابلة"""
     # إشعار لكلا الطرفين

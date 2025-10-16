@@ -354,6 +354,7 @@ class Notification(models.Model):
         ('pet_nearby', 'حيوان جديد بالقرب منك'),
         ('clinic_broadcast', 'إشعار من العيادة'),
         ('clinic_invite', 'دعوة ربط عيادة'),
+        ('breeding_request_pending_reminder', 'تذكير بطلب مقابلة معلق'),
     ]
     
     user = models.ForeignKey(

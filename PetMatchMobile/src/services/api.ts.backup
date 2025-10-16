@@ -1,0 +1,852 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+import { CHAT_API_ENABLED } from './config';
+
+const BASE_URL = 'https://api.petow.app/api';
+
+export interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+export interface PaginatedResponse<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+export interface User {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  phone?: string;
+  is_phone_verified: boolean;
+  address?: string;
+  profile_picture?: string;
+  is_verified: boolean;
+  pets_count: number;
+  date_joined: string;
+}
+
+export interface Breed {
+  id: number;
+  name: string;
+  pet_type: string;
+  description?: string;
+}
+
+export interface Pet {
+  id: number;
+  name: string;
+  pet_type: string;
+  pet_type_display: string;
+  breed: number;
+  breed_name: string;
+  age_months: number;
+  age_display: string;
+  gender: string;
+  gender_display: string;
+  description: string;
+  location: string;
+  latitude?: number;
+  longitude?: number;
+  is_free: boolean;
+  price?: number;
+  price_display?: string;
+  status: string;
+  status_display: string;
+  main_image?: string;
+  image_2?: string;
+  image_3?: string;
+  image_4?: string;
+  vaccination_certificate?: string;
+  health_certificate?: string;
+  disease_free_certificate?: string;
+  additional_certificate?: string;
+  owner_name: string;
+  owner_email: string;
+  created_at: string;
+  updated_at: string;
+  distance_display?: string;
+  has_health_certificates: boolean;
+  hosting_preference?: string;
+}
+
+
+// Chat Interfaces
+export interface ChatRoom {
+  id: number;
+  firebase_chat_id: string;
+  created_at: string;
+  updated_at: string;
+  is_active: boolean;
+  participants: Record<string, ChatParticipant>;
+  other_participant: ChatParticipant;
+  pet_details: ChatPetDetails;
+}
+
+export interface ChatParticipant {
+  id: number;
+  name: string;
+  email: string;
+  phone: string;
+}
+
+export interface ChatPetDetails {
+  id: number;
+  name: string;
+  breed_name: string;
+  pet_type_display: string;
+  main_image?: string;
+}
+
+export interface ChatRoomList {
+  id: number;
+  firebase_chat_id: string;
+  created_at: string;
+  updated_at: string;
+  other_participant: string;
+  pet_name: string;
+  pet_image?: string;
+}
+
+export interface ChatContext {
+  chat_id: string;
+  breeding_request: {
+    id: number;
+    status: string;
+    created_at: string;
+    message?: string;
+  };
+  pet: ChatPetDetails & {
+    owner_name: string;
+  };
+  participants: Record<string, ChatParticipant>;
+  metadata: {
+    created_at: string;
+    updated_at: string;
+    is_active: boolean;
+  };
+}
+
+export interface ChatStatus {
+  id: number;
+  firebase_chat_id: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  breeding_request_status: string;
+  participants_count: number;
+}
+
+export interface UserChatStatus {
+  has_active_chats: boolean;
+  active_chats_count: number;
+  has_unread_messages: boolean;
+}
+
+class ApiService {
+  private async getToken(): Promise<string | null> {
+    try {
+      const token = await AsyncStorage.getItem('authToken');
+      console.log('🔑 Token from AsyncStorage:', token ? 'Found' : 'Not found');
+      return token;
+    } catch (error) {
+      console.error('❌ Error getting token from AsyncStorage:', error);
+      return null;
+    }
+  }
+
+  // Push notifications
+  async registerPushToken(token: string, platform: string): Promise<ApiResponse<{ message: string }>> {
+    // Endpoint may differ on your backend; attempt common paths and fail gracefully.
+    try {
+      // Try a likely endpoint first
+      const res = await this.request<{ message: string }>(`/accounts/update-notification-token/`, {
+        method: 'POST',
+        body: JSON.stringify({ fcm_token: token, platform }),
+      });
+      if (res.success) return res;
+    } catch {}
+    // Fallback: try alternative path
+    try {
+      const res2 = await this.request<{ message: string }>(`/notifications/register-device/`, {
+        method: 'POST',
+        body: JSON.stringify({ fcm_token: token, platform }),
+      });
+      return res2;
+    } catch (error) {
+      console.log('registerPushToken: backend not available', error);
+      return { success: false, error: 'registerPushToken failed' };
+    }
+  }
+
+  private async setToken(token: string): Promise<void> {
+    try {
+      await AsyncStorage.setItem('authToken', token);
+      console.log('✅ Token saved to AsyncStorage');
+    } catch (error) {
+      console.error('❌ Error saving token to AsyncStorage:', error);
+    }
+  }
+
+  private async removeToken(): Promise<void> {
+    try {
+      await AsyncStorage.removeItem('authToken');
+      console.log('✅ Token removed from AsyncStorage');
+    } catch (error) {
+      console.error('❌ Error removing token from AsyncStorage:', error);
+    }
+  }
+
+  private async getAuthHeaders() {
+    const token = await this.getToken();
+    return {
+      'Authorization': `Token ${token}`,
+    };
+  }
+
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<ApiResponse<T>> {
+    try {
+      console.log(`🌐 Making API request to: ${BASE_URL}${endpoint}`);
+      console.log(`📤 Request method: ${options.method || 'GET'}`);
+      if (options.body instanceof FormData) {
+        console.log(`📤 Request body: FormData (contains files)`);
+      } else {
+        console.log(`📤 Request body: ${options.body}`);
+      }
+
+      const token = await this.getToken();
+      const headers: Record<string, string> = {
+        ...(options.headers as Record<string, string> || {}),
+      };
+
+      if (!(options.body instanceof FormData)) {
+        headers['Content-Type'] = 'application/json';
+      }
+
+      if (token) {
+        headers['Authorization'] = `Token ${token}`;
+        console.log('🔑 Using token for authorization');
+      } else {
+        console.log('⚠️ No token available for authorization');
+      }
+
+      const response = await fetch(`${BASE_URL}${endpoint}`, {
+        headers,
+        ...options,
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      let data: any = null;
+      if (contentType.includes('application/json')) {
+        try {
+          data = await response.json();
+        } catch (jsonError) {
+          console.error('❌ JSON parsing error:', jsonError);
+          return {
+            success: false,
+            error: 'Invalid JSON response',
+          };
+        }
+      } else {
+        // Non-JSON response (e.g., HTML 404 page). Avoid logging full HTML.
+        const text = await response.text();
+        const snippet = text.slice(0, 200).replace(/\n/g, ' ');
+        console.warn(`⚠️ Non-JSON response (${response.status} ${response.statusText}): ${snippet}...`);
+        return {
+          success: false,
+          error: `HTTP ${response.status}`,
+        };
+      }
+
+      console.log(`📥 Response status: ${response.status}`);
+      console.log(`📥 Response data:`, data);
+
+      if (response.ok) {
+        return {
+          success: true,
+          data: data,
+        };
+      } else {
+        const formattedError = this.formatErrorMessage(data) || `HTTP ${response.status}`;
+        return {
+          success: false,
+          error: formattedError,
+        };
+      }
+    } catch (error) {
+      console.error('❌ Network error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Network error',
+      };
+    }
+  }
+
+
+  private formatErrorMessage(errorData: any): string | undefined {
+    if (errorData === null || errorData === undefined) {
+      return undefined;
+    }
+
+    if (typeof errorData === 'string') {
+      const trimmed = errorData.trim();
+      return trimmed.length ? trimmed : undefined;
+    }
+
+    if (Array.isArray(errorData)) {
+      const normalized = errorData
+        .map(item => this.formatErrorMessage(item))
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+      return normalized.length ? normalized.join('
+') : undefined;
+    }
+
+    if (typeof errorData === 'object') {
+      const parts: string[] = [];
+      const friendlyKeys = new Set(['non_field_errors', 'detail', 'error', 'message', 'errors']);
+
+      Object.entries(errorData).forEach(([key, value]) => {
+        const formattedValue = this.formatErrorMessage(value);
+        if (!formattedValue) {
+          return;
+        }
+
+        if (friendlyKeys.has(key)) {
+          parts.push(formattedValue);
+        } else {
+          parts.push(`${key}: ${formattedValue}`);
+        }
+      });
+
+      return parts.length ? parts.join('
+') : undefined;
+    }
+
+    return String(errorData);
+  }
+
+  // Authentication endpoints
+  async login(email: string, password: string): Promise<ApiResponse<{ key: string; user: User }>> {
+    const response = await this.request<{ key: string; user: User }>('/auth/login/', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+
+    if (response.success && response.data?.key) {
+      await this.setToken(response.data.key);
+    }
+
+    return response;
+  }
+
+  async sendPasswordResetOTP(email: string): Promise<ApiResponse<{ success?: boolean; message?: string; debug_otp?: string }>> {
+    return this.request<{ success?: boolean; message?: string; debug_otp?: string }>(
+      '/accounts/send-password-reset-otp/',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }
+    );
+  }
+
+  async verifyPasswordResetOTP(email: string, otpCode: string): Promise<ApiResponse<{ success?: boolean; message?: string; reset_token?: string }>> {
+    return this.request<{ success?: boolean; message?: string; reset_token?: string }>(
+      '/accounts/verify-password-reset-otp/',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, otp_code: otpCode }),
+      }
+    );
+  }
+
+  async resetPasswordConfirm(resetToken: string, newPassword: string, confirmPassword: string): Promise<ApiResponse<{ success?: boolean; message?: string }>> {
+    return this.request<{ success?: boolean; message?: string }>(
+      '/accounts/reset-password-confirm/',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          reset_token: resetToken,
+          new_password: newPassword,
+          confirm_password: confirmPassword,
+        }),
+      }
+    );
+  }
+
+  async register(userData: {
+    email: string;
+    password1: string;
+    password2: string;
+    first_name: string;
+    last_name: string;
+    phone?: string;
+  }): Promise<ApiResponse<{ key: string; user: User }>> {
+    const response = await this.request<{ key: string; user: User }>('/auth/register/', {
+      method: 'POST',
+      body: JSON.stringify(userData),
+    });
+
+    if (response.success && response.data?.key) {
+      await this.setToken(response.data.key);
+    }
+
+    return response;
+  }
+
+  async logout(): Promise<void> {
+    await this.removeToken();
+  }
+
+  // Breeds endpoint - With pagination to get all breeds
+  async getBreeds(): Promise<Breed[]> {
+    try {
+      console.log('🔍 Loading all breeds with pagination...');
+      const allBreeds: Breed[] = [];
+      let nextUrl = '/pets/breeds/';
+      let pageCount = 0;
+      
+      while (nextUrl && pageCount < 10) { // Safety limit to prevent infinite loops
+        pageCount++;
+        console.log(`🔍 Fetching page ${pageCount}: ${nextUrl}`);
+        
+        const response = await this.request<PaginatedResponse<Breed>>(nextUrl);
+        
+        if (response.success && response.data) {
+          const pageBreeds = response.data.results || [];
+          allBreeds.push(...pageBreeds);
+          console.log(`✅ Loaded ${pageBreeds.length} breeds from page ${pageCount}`);
+          console.log(`📊 Total breeds so far: ${allBreeds.length}`);
+          
+          // Check if there's a next page
+          if (response.data.next) {
+            // Extract the path from the full URL
+            // Simple string manipulation to extract path from full URL
+            // From "http://api.petow.app/api/pets/breeds/?page=2" get "/pets/breeds/?page=2"
+            const baseUrl = "http://api.petow.app/api";
+            nextUrl = response.data.next.replace(baseUrl, "");
+            console.log(`🔍 Next page URL: ${nextUrl}`);
+            console.log(`🔍 Next page URL: ${nextUrl}`);
+          } else {
+            nextUrl = '';
+            console.log('🔍 No more pages available');
+          }
+        } else {
+          console.error('❌ Failed to load breeds from page:', response.error);
+          break;
+        }
+      }
+      
+      console.log(`🎉 Total breeds loaded: ${allBreeds.length}`);
+      
+      // Log breed distribution
+      const catsBreeds = allBreeds.filter(breed => breed.pet_type === 'cats');
+      const dogsBreeds = allBreeds.filter(breed => breed.pet_type === 'dogs');
+      console.log(`🐱 Cats breeds: ${catsBreeds.length}`);
+      console.log(`🐕 Dogs breeds: ${dogsBreeds.length}`);
+      
+      return allBreeds;
+    } catch (error) {
+      console.error('❌ Error loading breeds:', error);
+      return [];
+    }
+  }
+
+  // Pet endpoints
+  async getPets(params?: {
+    search?: string;
+    pet_type?: string;
+    gender?: string;
+    status?: string;
+    location?: string;
+    min_price?: number;
+    max_price?: number;
+    breed?: number;
+    ordering?: string;
+    page?: number;
+    page_size?: number;  // إضافة page_size
+  }): Promise<ApiResponse<PaginatedResponse<Pet>>> {
+    const queryParams = new URLSearchParams();
+    
+    if (params?.search) queryParams.append('search', params.search);
+    if (params?.pet_type) queryParams.append('pet_type', params.pet_type);
+    if (params?.gender) queryParams.append('gender', params.gender);
+    if (params?.status) queryParams.append('status', params.status);
+    if (params?.location) queryParams.append('location', params.location);
+    if (params?.min_price) queryParams.append('min_price', params.min_price.toString());
+    if (params?.max_price) queryParams.append('max_price', params.max_price.toString());
+    if (params?.breed) queryParams.append('breed', params.breed.toString());
+    if (params?.ordering) queryParams.append('ordering', params.ordering);
+    if (params?.page) queryParams.append('page', params.page.toString());
+    if (params?.page_size) queryParams.append('page_size', params.page_size.toString());
+
+    const queryString = queryParams.toString();
+    const endpoint = queryString ? `/pets/?${queryString}` : '/pets/';
+    
+    return this.request<PaginatedResponse<Pet>>(endpoint);
+  }
+
+  async getPet(id: number): Promise<ApiResponse<Pet>> {
+    return this.request<Pet>(`/pets/${id}/`);
+  }
+
+  async createPet(petData: FormData): Promise<ApiResponse<Pet>> {
+    return this.request<Pet>('/pets/', {
+      method: 'POST',
+      body: petData,
+    });
+  }
+
+  async updatePet(id: number, petData: FormData): Promise<ApiResponse<Pet>> {
+    return this.request<Pet>(`/pets/${id}/`, {
+      method: 'PUT',
+      body: petData,
+    });
+  }
+
+  async deletePet(id: number): Promise<ApiResponse<void>> {
+    return this.request<void>(`/pets/${id}/`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getMyPets(): Promise<ApiResponse<PaginatedResponse<Pet>>> {
+    return this.request<PaginatedResponse<Pet>>('/pets/my/');
+  }
+
+  // User endpoints
+  async getProfile(): Promise<ApiResponse<User>> {
+    return this.request<User>('/accounts/profile/');
+  }
+
+  async updateProfile(userData: Partial<User>): Promise<ApiResponse<User>> {
+    return this.request<User>('/accounts/profile/', {
+      method: 'PATCH',
+      body: JSON.stringify(userData),
+    });
+  }
+
+  // Favorites endpoints
+  async getFavorites(): Promise<ApiResponse<Pet[]>> {
+    return this.request<Pet[]>('/pets/favorites/');
+  }
+
+  async toggleFavorite(petId: number): Promise<ApiResponse<{ is_favorite: boolean }>> {
+    return this.request<{ is_favorite: boolean }>(`/pets/${petId}/toggle-favorite/`, {
+      method: 'POST',
+    });
+  }
+
+  // Breeding requests endpoints
+  async getBreedingRequests(): Promise<ApiResponse<PaginatedResponse<any>>> {
+    return this.request<PaginatedResponse<any>>('/pets/breeding-requests/');
+  }
+
+  async createBreedingRequest(requestData: any): Promise<ApiResponse<any>> {
+    return this.request<any>('/pets/breeding-requests/', {
+      method: 'POST',
+      body: JSON.stringify(requestData),
+    });
+  }
+
+  async getMyBreedingRequests(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/pets/breeding-requests/my/');
+  }
+
+  async getReceivedBreedingRequests(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/pets/breeding-requests/received/');
+  }
+
+  async respondToBreedingRequest(
+    requestId: number,
+    response: 'approve' | 'reject',
+    message?: string
+  ): Promise<ApiResponse<any>> {
+    const payload: Record<string, any> = { response };
+    if (message && response === 'reject') {
+      payload.message = message;
+    }
+    return this.request<any>(`/pets/breeding-requests/${requestId}/respond/`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  // Notifications endpoints
+  async getNotifications(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/pets/notifications/');
+  }
+
+  async markNotificationAsRead(notificationId: number): Promise<ApiResponse<void>> {
+    return this.request<void>(`/pets/notifications/${notificationId}/mark-read/`, {
+      method: 'POST',
+    });
+  }
+
+  async markAllNotificationsAsRead(): Promise<ApiResponse<void>> {
+    return this.request<void>('/pets/notifications/mark-all-read/', {
+      method: 'POST',
+    });
+  }
+
+  async getUnreadNotificationsCount(): Promise<ApiResponse<{ count: number }>> {
+    return this.request<{ count: number }>('/pets/notifications/unread-count/');
+  }
+
+  // Veterinary clinics endpoints
+  async getVeterinaryClinics(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/pets/veterinary-clinics/');
+  }
+
+  // Stats endpoints
+  async getPetStats(): Promise<ApiResponse<any>> {
+    return this.request<any>('/pets/stats/');
+  }
+
+  // Chat API Methods
+  async getChatRooms(): Promise<ApiResponse<{ results: ChatRoomList[]; count: number }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' };
+    }
+    return this.request<{ results: ChatRoomList[]; count: number }>('/pets/chat/rooms/');
+  }
+
+  async getArchivedChatRooms(): Promise<ApiResponse<{ results: ChatRoomList[]; count: number }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' };
+    }
+    return this.request<{ results: ChatRoomList[]; count: number }>('/pets/chat/rooms/archived/');
+  }
+
+  async getChatRoomByFirebaseId(firebaseChatId: string): Promise<ApiResponse<ChatRoom>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' };
+    }
+    // Align with frontend/backend: chat endpoints are under /api/pets/chat/
+    return this.request<ChatRoom>(`/pets/chat/firebase/${firebaseChatId}/`);
+  }
+
+  async getChatRoomByBreedingRequest(breedingRequestId: number): Promise<ApiResponse<ChatRoom | null>> {
+    try {
+      const response = await this.request<ChatRoom>(`/pets/chat/breeding-request/${breedingRequestId}/`);
+      return response;
+    } catch (error) {
+      console.error('Error getting chat room by breeding request:', error);
+      return { success: false, error: 'Failed to get chat room', data: null };
+    }
+  }
+
+  async getChatRoomContext(chatId: number): Promise<ApiResponse<{ id: number; firebase_chat_id: string; chat_context: ChatContext }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' } as any;
+    }
+    return this.request<{ id: number; firebase_chat_id: string; chat_context: ChatContext }>(`/pets/chat/rooms/${chatId}/context/`);
+  }
+
+  async createChatRoom(breedingRequestId: number): Promise<ApiResponse<{
+    chat_room: ChatRoom;
+    context: ChatContext;
+    message: string;
+  }>> {
+    return this.request<{
+      chat_room: ChatRoom;
+      context: ChatContext;
+      message: string;
+    }>(CHAT_API_ENABLED ? '/pets/chat/create/' : '/__disabled__', {
+      method: 'POST',
+      body: JSON.stringify({
+        breeding_request_id: breedingRequestId
+      }),
+    });
+  }
+
+  async archiveChatRoom(chatId: number): Promise<ApiResponse<{ message: string }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' };
+    }
+    return this.request<{ message: string }>(`/pets/chat/rooms/${chatId}/archive/`, {
+      method: 'POST'
+    });
+  }
+
+  async reactivateChatRoom(chatId: number): Promise<ApiResponse<{
+    message: string;
+    chat_room: ChatRoom;
+  }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' } as any;
+    }
+    return this.request<{
+      message: string;
+      chat_room: ChatRoom;
+    }>(`/pets/chat/rooms/${chatId}/reactivate/`, {
+      method: 'POST'
+    });
+  }
+
+  async getChatRoomStatus(chatId: number): Promise<ApiResponse<ChatStatus>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' } as any;
+    }
+    return this.request<ChatStatus>(`/pets/chat/rooms/${chatId}/status/`);
+  }
+
+  async getUserChatStatus(): Promise<ApiResponse<UserChatStatus>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' } as any;
+    }
+    return this.request<UserChatStatus>('/pets/chat/user-status/');
+  }
+
+  async sendChatMessageNotification(firebaseChatId: string, message: string): Promise<ApiResponse<{ message: string }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' } as any;
+    }
+    return this.request<{ message: string }>('/pets/notifications/chat-message/', {
+      method: 'POST',
+      body: JSON.stringify({
+        chat_id: firebaseChatId,
+        message,
+      }),
+    });
+  }
+
+  async uploadChatImage(imageFile: any): Promise<ApiResponse<{ image_url: string; filename: string }>> {
+    if (!CHAT_API_ENABLED) {
+      return { success: false, error: 'Chat API disabled' } as any;
+    }
+    try {
+      const formData = new FormData();
+      // Normalize RN file object: ensure uri/name/type present
+      if (imageFile && typeof imageFile === 'object' && 'uri' in imageFile) {
+        let uri: string = imageFile.uri as string;
+        // iOS sometimes requires stripping file:// prefix
+        if (Platform.OS === 'ios' && uri.startsWith('file://')) {
+          uri = uri.replace('file://', '');
+        }
+        const filePart: any = {
+          uri,
+          name: imageFile.name || `chat_${Date.now()}.jpg`,
+          type: imageFile.type || 'image/jpeg',
+        };
+        formData.append('image', filePart);
+      } else {
+        formData.append('image', imageFile as any);
+      }
+      
+      const response = await fetch(`${BASE_URL}/pets/chat/upload-image/`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          ...(await this.getAuthHeaders()),
+          Accept: 'application/json',
+          // Don't set Content-Type for FormData, let the browser set it
+        },
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Upload failed:', response.status, errorText);
+        throw new Error(`Upload failed: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      // Fix malformed URLs
+      if (result.image_url) {
+        if (result.image_url.includes('https:/.petow.app') || result.image_url.includes('.petow.app')) {
+          result.image_url = result.image_url.replace(/https:\/.?petow\.app/g, 'https://api.petow.app');
+        } else if (result.image_url.startsWith('https:/') && !result.image_url.startsWith('https://')) {
+          result.image_url = result.image_url.replace('https:/', 'https://');
+        } else if (!result.image_url.startsWith('http')) {
+          result.image_url = `https://api.petow.app${result.image_url.startsWith('/') ? '' : '/'}${result.image_url}`;
+        }
+        
+        if (result.image_url.includes('/api/media/')) {
+          result.image_url = result.image_url.replace('/api/media/', '/media/');
+        }
+      }
+      
+      return { success: true, data: result };
+    } catch (error) {
+      console.error('Error uploading chat image:', error);
+      return { success: false, error: 'Failed to upload image', data: undefined };
+    }
+  }
+
+  // Adoption endpoints
+  async getAdoptionPets(): Promise<ApiResponse<Pet[]>> {
+    return this.request<Pet[]>('/pets/adoption/pets/');
+  }
+
+  // Breeding notifications (optional; backend must implement)
+  async notifyBreedingEvent(event: 'requested' | 'accepted' | 'rejected', payload: any): Promise<ApiResponse<{ message: string }>> {
+    try {
+      return await this.request<{ message: string }>(`/pets/breeding/notify/`, {
+        method: 'POST',
+        body: JSON.stringify({ event, ...payload }),
+      });
+    } catch (error) {
+      return { success: false, error: 'notifyBreedingEvent failed' };
+    }
+  }
+
+  async createAdoptionRequest(requestData: any): Promise<ApiResponse<any>> {
+    return this.request<any>('/pets/adoption/', {
+      method: 'POST',
+      body: JSON.stringify(requestData),
+    });
+  }
+
+  async getMyAdoptionRequests(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/pets/adoption/my/');
+  }
+
+  async getReceivedAdoptionRequests(): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('/pets/adoption/received/');
+  }
+
+  async respondToAdoptionRequest(requestId: number, response: 'accepted' | 'rejected'): Promise<ApiResponse<any>> {
+    return this.request<any>(`/pets/adoption/${requestId}/respond/`, {
+      method: 'POST',
+      body: JSON.stringify({ response }),
+    });
+  }
+
+  async getAdoptionStats(): Promise<ApiResponse<any>> {
+    return this.request<any>('/pets/adoption/stats/');
+  }
+
+  // User profile endpoints
+  async getUserProfile(): Promise<ApiResponse<User>> {
+    return this.request<User>('/accounts/profile/');
+  }
+
+  async getUserPets(): Promise<ApiResponse<Pet[]>> {
+    return this.request<Pet[]>('/pets/my/');
+  }
+
+  // Account management
+  async updateUserProfile(data: Partial<User> & { password?: string; phone?: string }): Promise<ApiResponse<User>> {
+    return this.request<User>('/accounts/profile/', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteAccount(): Promise<ApiResponse<{ message: string }>> {
+    const attempt = await this.request<{ message: string }>('/accounts/profile/', { method: 'DELETE' });
+    if (attempt.success) return attempt;
+    return this.request<{ message: string }>('/accounts/delete/', { method: 'POST' });
+  }
+}
+
+export const apiService = new ApiService();

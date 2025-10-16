@@ -5,8 +5,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
-from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer
-from .models import User, PhoneOTP, PasswordResetOTP
+from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer, AccountVerificationSerializer, AccountVerificationStatusSerializer
+from .models import User, PhoneOTP, PasswordResetOTP, AccountVerification
 from .email_notifications import send_welcome_email, send_password_reset_email
 from django.core.mail import send_mail
 from django.conf import settings
@@ -696,3 +696,91 @@ def admin_send_push_to_token(request):
     except Exception as e:
         logger.error(f"admin_send_push_to_token error: {e}")
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def submit_account_verification(request):
+    """إرسال طلب التحقق من الحساب"""
+    try:
+        # التحقق من عدم وجود طلب قيد المراجعة
+        pending_verification = AccountVerification.objects.filter(
+            user=request.user,
+            status='pending'
+        ).exists()
+        
+        if pending_verification:
+            return Response(
+                {'error': 'لديك طلب تحقق قيد المراجعة بالفعل. يرجى الانتظار حتى تتم مراجعته.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # التحقق من وجود الصور/الفيديو المطلوب
+        if 'id_photo' not in request.FILES:
+            return Response(
+                {'error': 'صورة الهوية مطلوبة'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if 'selfie_video' not in request.FILES:
+            return Response(
+                {'error': 'فيديو السيلفي مطلوب'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # إنشاء طلب التحقق
+        verification = AccountVerification.objects.create(
+            user=request.user,
+            id_photo=request.FILES['id_photo'],
+            selfie_video=request.FILES['selfie_video']
+        )
+        
+        serializer = AccountVerificationSerializer(verification)
+        
+        logger.info(f"Account verification submitted by user {request.user.email}")
+        
+        return Response({
+            'success': True,
+            'message': 'تم إرسال طلب التحقق بنجاح. سيتم مراجعته في أقرب وقت.',
+            'verification': serializer.data
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        logger.error(f"Error submitting account verification: {str(e)}")
+        return Response(
+            {'error': 'حدث خطأ أثناء إرسال طلب التحقق'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_verification_status(request):
+    """الحصول على حالة التحقق من الحساب"""
+    try:
+        # البحث عن آخر طلب تحقق للمستخدم
+        verification = AccountVerification.objects.filter(
+            user=request.user
+        ).order_by('-created_at').first()
+        
+        if not verification:
+            return Response({
+                'has_verification': False,
+                'is_verified': request.user.is_verified,
+                'message': 'لم يتم تقديم طلب تحقق بعد'
+            })
+        
+        serializer = AccountVerificationStatusSerializer(verification)
+        
+        return Response({
+            'has_verification': True,
+            'is_verified': request.user.is_verified,
+            'verification': serializer.data
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting verification status: {str(e)}")
+        return Response(
+            {'error': 'حدث خطأ أثناء الحصول على حالة التحقق'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

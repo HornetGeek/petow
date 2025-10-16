@@ -125,10 +125,24 @@ class PetListCreateView(generics.ListCreateAPIView):
         return PetListSerializer
     
     def get_queryset(self):
-        # استبعاد حيوانات التبني والحيوانات غير المتاحة من القائمة العامة
-        queryset = Pet.objects.select_related('breed', 'owner').exclude(
-            status__in=['available_for_adoption', 'adoption_pending', 'adopted', 'unavailable']
-        )
+        # Start with all pets
+        queryset = Pet.objects.select_related('breed', 'owner')
+        
+        # Handle status filtering
+        status = self.request.query_params.get('status')
+        exclude_status = self.request.query_params.get('exclude_status')
+        
+        if status:
+            # Filter to only include pets with specific status
+            queryset = queryset.filter(status=status)
+        elif exclude_status:
+            # Exclude pets with specific status
+            queryset = queryset.exclude(status=exclude_status)
+        else:
+            # Default behavior: exclude adoption pets and unavailable pets from general list
+            queryset = queryset.exclude(
+                status__in=['available_for_adoption', 'adoption_pending', 'adopted', 'unavailable']
+            )
         
         # فلترة حسب المنطقة
         location = self.request.query_params.get('location', None)
@@ -1124,6 +1138,13 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
     
     def create(self, request, *args, **kwargs):
         """إنشاء طلب تبني جديد مع إرسال إشعار"""
+        # التحقق من أن المستخدم قد تم التحقق من حسابه
+        if not request.user.is_verified:
+            return Response({
+                'error': 'يجب التحقق من حسابك قبل تقديم طلب تبني. يرجى تقديم طلب التحقق من الحساب أولاً.',
+                'verification_required': True
+            }, status=status.HTTP_403_FORBIDDEN)
+        
         response = super().create(request, *args, **kwargs)
         
         # إرسال إشعار لصاحب الحيوان

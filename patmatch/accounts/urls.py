@@ -20,4 +20,7 @@ urlpatterns = [
     # Admin push endpoint (API key protected)
     path('admin/send-push-to-email/', views.admin_send_push_to_email, name='admin_send_push_to_email'),
     path('admin/send-push-to-token/', views.admin_send_push_to_token, name='admin_send_push_to_token'),
+    # Account verification endpoints
+    path('verification/request/', views.submit_account_verification, name='submit_account_verification'),
+    path('verification/status/', views.get_verification_status, name='get_verification_status'),
 ]

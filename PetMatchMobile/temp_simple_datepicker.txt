@@ -1,0 +1,65 @@
+  const showDatePickerModal = () => {
+    Alert.alert(
+      'اختر تاريخ المقابلة',
+      'يرجى إدخال التاريخ بالصيغة التالية:\nاليوم/الشهر/السنة\nمثال: 25/12/2024',
+      [
+        { text: 'إلغاء', style: 'cancel' },
+        {
+          text: 'إدخال التاريخ',
+          onPress: () => {
+            Alert.prompt(
+              'تاريخ المقابلة',
+              'أدخل التاريخ (يوم/شهر/سنة)\nمثال: 25/12/2024',
+              (text) => {
+                if (text) {
+                  const formattedDate = parseManualDate(text);
+                  if (formattedDate) {
+                    handleChange('meetingDate', formattedDate);
+                    setSelectedDate(new Date(formattedDate));
+                  } else {
+                    Alert.alert('خطأ', 'تنسيق التاريخ غير صحيح. يرجى استخدام الصيغة: يوم/شهر/سنة');
+                  }
+                }
+              },
+              'plain-text',
+              requestData.meetingDate ? formatDateForInput(requestData.meetingDate) : ''
+            );
+          }
+        }
+      ]
+    );
+  };
+
+  const parseManualDate = (dateString: string): string | null => {
+    // Parse DD/MM/YYYY format
+    const parts = dateString.trim().split('/');
+    if (parts.length !== 3) return null;
+    
+    const day = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10);
+    const year = parseInt(parts[2], 10);
+    
+    if (isNaN(day) || isNaN(month) || isNaN(year)) return null;
+    if (day < 1 || day > 31 || month < 1 || month > 12 || year < 2024) return null;
+    
+    const date = new Date(year, month - 1, day);
+    if (date.getDate() !== day || date.getMonth() !== month - 1 || date.getFullYear() !== year) {
+      return null;
+    }
+    
+    // Check if date is in the future
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (date < today) return null;
+    
+    return date.toISOString().split('T')[0]; // YYYY-MM-DD format
+  };
+
+  const formatDateForInput = (dateString: string): string => {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    const day = date.getDate().toString().padStart(2, '0');
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const year = date.getFullYear();
+    return `${day}/${month}/${year}`;
+  };
