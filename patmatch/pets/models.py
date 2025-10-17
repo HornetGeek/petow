@@ -364,7 +364,7 @@ class Notification(models.Model):
         help_text="المستخدم المرسل إليه الإشعار"
     )
     type = models.CharField(
-        max_length=30, 
+        max_length=64,
         choices=NOTIFICATION_TYPES,
         help_text="نوع الإشعار"
     )
