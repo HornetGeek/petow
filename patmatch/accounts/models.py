@@ -182,6 +182,28 @@ class AccountVerification(models.Model):
     
     def __str__(self):
         return f"طلب تحقق {self.user.get_full_name()} - {self.get_status_display()}"
+
+    def save(self, *args, **kwargs):
+        """Ensure user verification flag stays in sync with request status."""
+        previous_status = None
+        if self.pk:
+            previous_status = type(self).objects.filter(pk=self.pk).values_list('status', flat=True).first()
+
+        super().save(*args, **kwargs)
+
+        if self.status == 'approved':
+            if not self.user.is_verified:
+                self.user.is_verified = True
+                self.user.save(update_fields=['is_verified'])
+        elif previous_status == 'approved' and self.status != 'approved':
+            # Only unset verification if there are no other approved requests
+            has_other_approved = type(self).objects.filter(
+                user=self.user,
+                status='approved'
+            ).exclude(pk=self.pk).exists()
+            if not has_other_approved and self.user.is_verified:
+                self.user.is_verified = False
+                self.user.save(update_fields=['is_verified'])
     
     def approve(self, admin_user=None, notes=None):
         """قبول طلب التحقق"""
@@ -190,8 +212,6 @@ class AccountVerification(models.Model):
         self.reviewed_by = admin_user
         if notes:
             self.admin_notes = notes
-        self.user.is_verified = True
-        self.user.save(update_fields=['is_verified'])
         self.save()
     
     def reject(self, admin_user=None, notes=None):
