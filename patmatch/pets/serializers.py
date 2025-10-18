@@ -682,6 +682,7 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdoptionRequest
         fields = [
+            'id',
             'pet',
             # معلومات أساسية
             'adopter_name', 'adopter_email', 'adopter_phone', 'adopter_age',
@@ -703,6 +704,7 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
             # معلومات إضافية
             'reason_for_adoption',
         ]
+        read_only_fields = ['id']
         extra_kwargs = {
             'feeding_plan': {'required': False, 'allow_blank': True, 'allow_null': True},
             'exercise_plan': {'required': False, 'allow_blank': True, 'allow_null': True},
