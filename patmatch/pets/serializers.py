@@ -703,6 +703,12 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
             # معلومات إضافية
             'reason_for_adoption',
         ]
+        extra_kwargs = {
+            'feeding_plan': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'exercise_plan': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'vet_care_plan': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'emergency_plan': {'required': False, 'allow_blank': True, 'allow_null': True},
+        }
     
     def validate_pet(self, value):
         """التحقق من أن الحيوان متاح للتبني"""

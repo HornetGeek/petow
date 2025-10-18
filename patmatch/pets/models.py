@@ -855,10 +855,30 @@ class AdoptionRequest(models.Model):
     agrees_to_training = models.BooleanField(default=True, verbose_name="موافقة على التدريب")
     
     # خطط الرعاية
-    feeding_plan = models.TextField(default="ستتم العناية بالتغذية بانتظام", verbose_name="خطة التغذية")
-    exercise_plan = models.TextField(default="ستتم ممارسة التمارين يومياً", verbose_name="خطة التمارين")
-    vet_care_plan = models.TextField(default="ستتم المتابعة البيطرية المنتظمة", verbose_name="خطة الرعاية البيطرية")
-    emergency_plan = models.TextField(default="سيتم التعامل مع الطوارئ فوراً", verbose_name="خطة الطوارئ")
+    feeding_plan = models.TextField(
+        verbose_name="خطة التغذية",
+        blank=True,
+        null=True,
+        help_text="خطة العناية بالتغذية (اختياري)"
+    )
+    exercise_plan = models.TextField(
+        verbose_name="خطة التمارين",
+        blank=True,
+        null=True,
+        help_text="خطة التمارين اليومية أو الأسبوعية (اختياري)"
+    )
+    vet_care_plan = models.TextField(
+        verbose_name="خطة الرعاية البيطرية",
+        blank=True,
+        null=True,
+        help_text="خطة الزيارات البيطرية والمتابعة الصحية (اختياري)"
+    )
+    emergency_plan = models.TextField(
+        verbose_name="خطة الطوارئ",
+        blank=True,
+        null=True,
+        help_text="كيفية التعامل مع الحالات الطارئة (اختياري)"
+    )
     
 
     
