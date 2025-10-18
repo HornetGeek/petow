@@ -636,6 +636,7 @@ class AdoptionRequestSerializer(serializers.ModelSerializer):
     
     adopter_name = serializers.CharField(source='adopter.get_full_name', read_only=True)
     adopter_email = serializers.CharField(source='adopter.email', read_only=True)
+    pet = PetListSerializer(read_only=True)
     pet_name = serializers.CharField(source='pet.name', read_only=True)
     pet_owner_name = serializers.CharField(source='pet.owner.get_full_name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -761,22 +762,20 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class AdoptionRequestListSerializer(serializers.ModelSerializer):
-    """سيريالايزر لقائمة طلبات التبني"""
+class AdoptionRequestListSerializer(AdoptionRequestSerializer):
+    """سيريالايزر لقائمة طلبات التبني بنفس تفاصيل العرض مع حقول legacy"""
     
-    adopter_name = serializers.CharField(source='adopter.get_full_name', read_only=True)
-    pet_name = serializers.CharField(source='pet.name', read_only=True)
-    pet_image = serializers.ImageField(source='pet.main_image', read_only=True)
-    pet_breed = serializers.CharField(source='pet.breed.name', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
-    class Meta:
-        model = AdoptionRequest
-        fields = [
-            'id', 'adopter_name', 'pet_name', 'pet_image', 'pet_breed',
-            'adopter_phone', 'status', 'status_display',
-            'created_at'
-        ]
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        pet_data = data.get('pet') or {}
+        
+        # حقول متوافقة مع الواجهات القديمة
+        data['pet_image'] = pet_data.get('main_image')
+        data['pet_breed'] = pet_data.get('breed_name')
+        data['adopter_full_name'] = data.get('adopter_name')
+        data['monthly_budget'] = getattr(instance, 'monthly_budget', '') or ''
+        
+        return data
 
 
 class AdoptionRequestResponseSerializer(serializers.Serializer):
