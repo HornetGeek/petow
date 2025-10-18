@@ -740,6 +740,19 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
         if not data.get('agrees_to_training'):
             raise serializers.ValidationError("يجب الموافقة على تدريب الحيوان إذا لزم الأمر")
         
+        request = self.context.get('request')
+        pet = data.get('pet')
+        if request and pet:
+            # منع إنشاء أكثر من طلب قيد المراجعة لنفس الحيوان والمستخدم
+            if AdoptionRequest.objects.filter(
+                adopter=request.user,
+                pet=pet,
+                status='pending'
+            ).exists():
+                raise serializers.ValidationError(
+                    "لديك بالفعل طلب تبني قيد المراجعة لهذا الحيوان. يرجى انتظار نتيجة الطلب الحالي."
+                )
+        
         return data
     
     def create(self, validated_data):
