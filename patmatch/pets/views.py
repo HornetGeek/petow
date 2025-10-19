@@ -130,20 +130,27 @@ class PetListCreateView(generics.ListCreateAPIView):
         queryset = Pet.objects.select_related('breed', 'owner')
         
         # Handle status filtering
-        status = self.request.query_params.get('status')
-        exclude_status = self.request.query_params.get('exclude_status')
+        status_param = self.request.query_params.get('status')
+        exclude_status_param = self.request.query_params.get('exclude_status')
         
-        if status:
-            # Filter to only include pets with specific status
-            queryset = queryset.filter(status=status)
-        elif exclude_status:
-            # Exclude pets with specific status
-            queryset = queryset.exclude(status=exclude_status)
+        if status_param:
+            # Filter to only include pets with specific status (caller is explicit)
+            queryset = queryset.filter(status=status_param)
         else:
-            # Default behavior: exclude adoption pets and unavailable pets from general list
-            queryset = queryset.exclude(
-                status__in=['available_for_adoption', 'adoption_pending', 'adopted', 'unavailable']
-            )
+            # Always exclude unavailable pets from public listings
+            excluded_statuses = {'unavailable'}
+            
+            # Unless a specific status is requested, also hide adoption-only statuses from breeding lists
+            excluded_statuses.update({'available_for_adoption', 'adoption_pending', 'adopted'})
+            
+            if exclude_status_param:
+                # Support comma separated values
+                extra_excludes = {
+                    value.strip() for value in exclude_status_param.split(',') if value.strip()
+                }
+                excluded_statuses.update(extra_excludes)
+            
+            queryset = queryset.exclude(status__in=excluded_statuses)
         
         # فلترة حسب المنطقة
         location = self.request.query_params.get('location', None)
