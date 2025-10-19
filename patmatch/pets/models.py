@@ -184,16 +184,34 @@ class Pet(models.Model):
             self.additional_certificate
         )
     
+    def _resolve_coordinates(self):
+        """الحصول على إحداثيات الحيوان، مع استخدام إحداثيات المالك كخيار احتياطي."""
+        pet_lat = self.latitude
+        pet_lng = self.longitude
+
+        if pet_lat is not None and pet_lng is not None:
+            return float(pet_lat), float(pet_lng)
+
+        owner = getattr(self, 'owner', None)
+        if owner:
+            owner_lat = getattr(owner, 'latitude', None)
+            owner_lng = getattr(owner, 'longitude', None)
+            if owner_lat is not None and owner_lng is not None:
+                return float(owner_lat), float(owner_lng)
+
+        return None, None
+    
     def calculate_distance(self, user_lat, user_lng):
         """حساب المسافة بين الحيوان والمستخدم بالكيلومتر"""
-        if not self.latitude or not self.longitude:
+        pet_lat, pet_lng = self._resolve_coordinates()
+        if pet_lat is None or pet_lng is None:
             return None
-            
+        
         import math
         
         # تحويل إلى راديان
-        lat1 = math.radians(float(self.latitude))
-        lon1 = math.radians(float(self.longitude))
+        lat1 = math.radians(pet_lat)
+        lon1 = math.radians(pet_lng)
         lat2 = math.radians(float(user_lat))
         lon2 = math.radians(float(user_lng))
         
@@ -218,8 +236,8 @@ class Pet(models.Model):
     
     def get_distance_display(self, user_lat, user_lng):
         """عرض المسافة بشكل مفهوم"""
-        # التحقق من وجود إحداثيات للحيوان
-        if not self.latitude or not self.longitude:
+        pet_lat, pet_lng = self._resolve_coordinates()
+        if pet_lat is None or pet_lng is None:
             return "إحداثيات الموقع غير متوفرة"
         
         distance = self.calculate_distance(user_lat, user_lng)
