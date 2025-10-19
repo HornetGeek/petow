@@ -752,6 +752,41 @@ def chat_room_by_breeding_request(request, breeding_request_id):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def chat_room_by_adoption_request(request, adoption_request_id):
+    """الحصول على غرفة محادثة بواسطة معرف طلب التبني"""
+    from .models import AdoptionRequest  # local import to avoid circular dependency at top
+    try:
+        adoption_request = AdoptionRequest.objects.get(id=adoption_request_id)
+        participants = [adoption_request.adopter, getattr(adoption_request.pet, 'owner', None)]
+        if request.user not in participants:
+            return Response(
+                {'error': 'غير مخول لك بالوصول لهذا الطلب'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            chat_room = ChatRoom.objects.get(adoption_request=adoption_request)
+            serializer = ChatRoomSerializer(chat_room, context={'request': request})
+            return Response(serializer.data)
+        except ChatRoom.DoesNotExist:
+            return Response(
+                {'error': 'لا توجد محادثة لهذا الطلب'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+    except AdoptionRequest.DoesNotExist:
+        return Response(
+            {'error': 'طلب التبني غير موجود'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error fetching chat room by adoption request {adoption_request_id}: {str(e)}")
+        return Response(
+            {'error': 'خطأ في تحميل المحادثة'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -763,7 +798,7 @@ def create_chat_room(request):
         print(f"DEBUG: Request user: {request.user}")
         
         # استخدام السيريلايزر للتحقق من البيانات
-        creation_serializer = ChatCreationSerializer(data=request.data)
+        creation_serializer = ChatCreationSerializer(data=request.data, context={'request': request})
         if not creation_serializer.is_valid():
             print(f"DEBUG: Serializer errors: {creation_serializer.errors}")
             return Response(
@@ -771,30 +806,21 @@ def create_chat_room(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        breeding_request_id = creation_serializer.validated_data['breeding_request_id']
-        print(f"DEBUG: Breeding request ID: {breeding_request_id}")
+        breeding_request = creation_serializer.validated_data.get('breeding_request')
+        adoption_request = creation_serializer.validated_data.get('adoption_request')
         
-        breeding_request = BreedingRequest.objects.get(id=breeding_request_id)
-        print(f"DEBUG: Breeding request status: {breeding_request.status}")
-        
-        # التحقق من أن المستخدم مخول لإنشاء المحادثة
-        if request.user not in [breeding_request.requester, breeding_request.target_pet.owner]:
-            print(f"DEBUG: User not authorized. User: {request.user}, Requester: {breeding_request.requester}, Owner: {breeding_request.target_pet.owner}")
+        if breeding_request:
+            print(f"DEBUG: Creating chat for breeding request ID: {breeding_request.id}")
+            chat_room = ChatRoom.objects.create(breeding_request=breeding_request)
+        elif adoption_request:
+            print(f"DEBUG: Creating chat for adoption request ID: {adoption_request.id}")
+            chat_room = ChatRoom.objects.create(adoption_request=adoption_request)
+        else:
             return Response(
-                {'error': 'غير مخول لإنشاء هذه المحادثة'}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # التحقق من أن الطلب مقبول
-        if breeding_request.status != 'approved':
-            print(f"DEBUG: Request not approved. Status: {breeding_request.status}")
-            return Response(
-                {'error': 'لا يمكن إنشاء محادثة إلا للطلبات المقبولة'}, 
+                {'error': 'بيانات الطلب غير صالحة'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # إنشاء غرفة المحادثة
-        chat_room = ChatRoom.objects.create(breeding_request=breeding_request)
         print(f"DEBUG: Chat room created with ID: {chat_room.id}")
         
         # إرجاع بيانات المحادثة مع السياق الكامل

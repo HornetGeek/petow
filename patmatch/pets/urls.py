@@ -49,6 +49,7 @@ urlpatterns = [
     path('chat/rooms/<int:chat_id>/context/', views.chat_room_context, name='chat-room-context'),
     path('chat/firebase/<str:firebase_chat_id>/', views.chat_room_by_firebase_id, name='chat-room-by-firebase-id'),
     path('chat/breeding-request/<int:breeding_request_id>/', views.chat_room_by_breeding_request, name='chat-room-by-breeding-request'),
+    path('chat/adoption-request/<int:adoption_request_id>/', views.chat_room_by_adoption_request, name='chat-room-by-adoption-request'),
     path('chat/create/', views.create_chat_room, name='create-chat-room'),
     path('chat/rooms/<int:chat_id>/archive/', views.archive_chat_room, name='archive-chat-room'),
     path('chat/rooms/<int:chat_id>/reactivate/', views.reactivate_chat_room, name='reactivate-chat-room'),

@@ -610,24 +610,55 @@ class ChatStatusSerializer(serializers.ModelSerializer):
 
 class ChatCreationSerializer(serializers.Serializer):
     """سيريلايزر لإنشاء محادثة جديدة"""
-    breeding_request_id = serializers.IntegerField()
+    breeding_request_id = serializers.IntegerField(required=False)
+    adoption_request_id = serializers.IntegerField(required=False)
     
-    def validate_breeding_request_id(self, value):
-        """التحقق من صحة معرف طلب التزاوج"""
-        try:
-            breeding_request = BreedingRequest.objects.get(id=value)
-        except BreedingRequest.DoesNotExist:
-            raise serializers.ValidationError("طلب التزاوج غير موجود")
-        
-        # التحقق من أن الطلب مقبول
-        if breeding_request.status != 'approved':
-            raise serializers.ValidationError("لا يمكن إنشاء محادثة إلا للطلبات المقبولة")
-        
-        # التحقق من عدم وجود محادثة مسبقة
-        if hasattr(breeding_request, 'chat_room'):
-            raise serializers.ValidationError("توجد محادثة بالفعل لهذا الطلب")
-        
-        return value 
+    def validate(self, attrs):
+        request = self.context.get('request')
+        breeding_request_id = attrs.get('breeding_request_id')
+        adoption_request_id = attrs.get('adoption_request_id')
+
+        if not breeding_request_id and not adoption_request_id:
+            raise serializers.ValidationError("يجب تحديد طلب التزاوج أو التبني لإنشاء المحادثة")
+
+        if breeding_request_id and adoption_request_id:
+            raise serializers.ValidationError("لا يمكن إنشاء المحادثة لأكثر من نوع طلب في آنٍ واحد")
+
+        if breeding_request_id:
+            try:
+                breeding_request = BreedingRequest.objects.get(id=breeding_request_id)
+            except BreedingRequest.DoesNotExist:
+                raise serializers.ValidationError({'breeding_request_id': "طلب التزاوج غير موجود"})
+
+            if breeding_request.status != 'approved':
+                raise serializers.ValidationError({'breeding_request_id': "لا يمكن إنشاء محادثة إلا للطلبات المقبولة"})
+
+            if hasattr(breeding_request, 'chat_room'):
+                raise serializers.ValidationError({'breeding_request_id': "توجد محادثة بالفعل لهذا الطلب"})
+
+            if request and request.user not in [breeding_request.requester, breeding_request.target_pet.owner]:
+                raise serializers.ValidationError({'breeding_request_id': "غير مخول لإنشاء محادثة لهذا الطلب"})
+
+            attrs['breeding_request'] = breeding_request
+
+        if adoption_request_id:
+            try:
+                adoption_request = AdoptionRequest.objects.get(id=adoption_request_id)
+            except AdoptionRequest.DoesNotExist:
+                raise serializers.ValidationError({'adoption_request_id': "طلب التبني غير موجود"})
+
+            if adoption_request.status not in ('approved', 'completed'):
+                raise serializers.ValidationError({'adoption_request_id': "لا يمكن إنشاء محادثة إلا للطلبات المقبولة"})
+
+            if hasattr(adoption_request, 'chat_room'):
+                raise serializers.ValidationError({'adoption_request_id': "توجد محادثة بالفعل لهذا الطلب"})
+
+            if request and request.user not in [adoption_request.adopter, adoption_request.pet.owner]:
+                raise serializers.ValidationError({'adoption_request_id': "غير مخول لإنشاء محادثة لهذا الطلب"})
+
+            attrs['adoption_request'] = adoption_request
+
+        return attrs
 
 
 # Adoption Serializers
