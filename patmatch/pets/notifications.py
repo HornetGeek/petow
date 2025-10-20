@@ -354,6 +354,10 @@ def _haversine_km(lat1, lng1, lat2, lng2):
 
 def notify_new_pet_added(pet, radius_km=30):
     """إرسال إشعار عند إضافة حيوان جديد للمستخدمين القريبين أو في نفس المدينة."""
+    if pet.status != 'available':
+        logger.info("Skipping nearby pet notifications for pet %s with status %s", pet.id, pet.status)
+        return []
+
     recipients = set()
 
     normalised_location = _normalise_location(pet.location)
