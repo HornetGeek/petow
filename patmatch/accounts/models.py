@@ -202,7 +202,7 @@ class AccountVerification(models.Model):
                 self.user.is_verified = True
                 self.user.save(update_fields=['is_verified'])
             if previous_status != 'approved':
-                self._send_approval_notifications()
+                self.send_approval_notifications()
         elif previous_status == 'approved' and self.status != 'approved':
             # Only unset verification if there are no other approved requests
             has_other_approved = type(self).objects.filter(
@@ -231,7 +231,7 @@ class AccountVerification(models.Model):
             self.admin_notes = notes
         self.save()
 
-    def _send_approval_notifications(self):
+    def send_approval_notifications(self):
         """Send email and push notification when verification is approved."""
         user = self.user
         if not user:
