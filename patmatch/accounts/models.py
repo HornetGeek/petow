@@ -201,6 +201,8 @@ class AccountVerification(models.Model):
             if not self.user.is_verified:
                 self.user.is_verified = True
                 self.user.save(update_fields=['is_verified'])
+            if previous_status != 'approved':
+                self._send_approval_notifications()
         elif previous_status == 'approved' and self.status != 'approved':
             # Only unset verification if there are no other approved requests
             has_other_approved = type(self).objects.filter(
@@ -213,15 +215,12 @@ class AccountVerification(models.Model):
     
     def approve(self, admin_user=None, notes=None):
         """قبول طلب التحقق"""
-        status_changed = self.status != 'approved'
         self.status = 'approved'
         self.reviewed_at = timezone.now()
         self.reviewed_by = admin_user
         if notes:
             self.admin_notes = notes
         self.save()
-        if status_changed:
-            self._send_approval_notifications()
     
     def reject(self, admin_user=None, notes=None):
         """رفض طلب التحقق"""
