@@ -1,9 +1,15 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+import logging
 import random
 import string
 from datetime import datetime, timedelta
 from django.utils import timezone
+
+from .email_notifications import send_account_verification_approved_email
+from .firebase_service import firebase_service
+
+logger = logging.getLogger(__name__)
 
 class User(AbstractUser):
     """نموذج المستخدم المخصص للمالكين والعيادات"""
@@ -207,12 +213,15 @@ class AccountVerification(models.Model):
     
     def approve(self, admin_user=None, notes=None):
         """قبول طلب التحقق"""
+        status_changed = self.status != 'approved'
         self.status = 'approved'
         self.reviewed_at = timezone.now()
         self.reviewed_by = admin_user
         if notes:
             self.admin_notes = notes
         self.save()
+        if status_changed:
+            self._send_approval_notifications()
     
     def reject(self, admin_user=None, notes=None):
         """رفض طلب التحقق"""
@@ -222,3 +231,45 @@ class AccountVerification(models.Model):
         if notes:
             self.admin_notes = notes
         self.save()
+
+    def _send_approval_notifications(self):
+        """Send email and push notification when verification is approved."""
+        user = self.user
+        if not user:
+            logger.warning("AccountVerification %s has no user attached; skipping notifications", self.pk)
+            return
+
+        try:
+            send_account_verification_approved_email(user)
+        except Exception as exc:
+            logger.error(
+                "Failed to send verification approval email for user %s: %s",
+                user.id,
+                exc,
+            )
+
+        if not user.fcm_token:
+            logger.debug(
+                "User %s has no FCM token; skipping verification approval push notification",
+                user.id,
+            )
+            return
+
+        if not firebase_service.is_initialized:
+            logger.warning("Firebase not initialised; cannot send verification approval push for user %s", user.id)
+            return
+
+        push_data = {
+            'type': 'account_verification_approved',
+            'verification_id': str(self.id),
+            'user_id': str(user.id),
+        }
+
+        ok = firebase_service.send_notification(
+            fcm_token=user.fcm_token,
+            title="تم اعتماد حسابك في Petow",
+            body="تهانينا! تم اعتماد التحقق من حسابك ويمكنك الآن الاستفادة من جميع المزايا.",
+            data=push_data,
+        )
+        if not ok:
+            logger.warning("Verification approval push notification to user %s failed to send", user.id)
