@@ -74,6 +74,11 @@ def register(request):
     if serializer.is_valid():
         try:
             user = serializer.save()
+
+            try:
+                send_welcome_email(user)
+            except Exception as exc:
+                logger.error("Failed to send welcome email to %s: %s", user.email, exc)
             
             # إنشاء token للمستخدم الجديد
             token, created = Token.objects.get_or_create(user=user)
@@ -92,53 +97,6 @@ def register(request):
             )
     
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def register(request):
-    """إنشاء حساب جديد"""
-    email = request.data.get('email')
-    password = request.data.get('password1')
-    password2 = request.data.get('password2')
-    first_name = request.data.get('first_name')
-    last_name = request.data.get('last_name')
-    
-    if not all([email, password, password2, first_name, last_name]):
-        return Response(
-            {'error': 'جميع الحقول مطلوبة'}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    if password != password2:
-        return Response(
-            {'error': 'كلمات المرور غير متطابقة'}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    if User.objects.filter(email=email).exists():
-        return Response(
-            {'error': 'المستخدم موجود بالفعل'}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    user = User.objects.create_user(
-        username=email,
-        email=email,
-        password=password,
-        first_name=first_name,
-        last_name=last_name
-    )
-    
-    try:
-        send_welcome_email(user)
-    except Exception as exc:
-        logger.error("Failed to send welcome email to %s: %s", user.email, exc)
-    
-    token, created = Token.objects.get_or_create(user=user)
-    return Response({
-        'key': token.key,
-        'user': UserSerializer(user).data
-    })
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
