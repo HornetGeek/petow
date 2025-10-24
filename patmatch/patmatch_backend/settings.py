@@ -296,6 +296,13 @@ BREVO_CONFIG = {
     'base_url': 'https://api.brevo.com/v3',
 }
 
+# Infobip SMS configuration
+INFOBIP_BASE_URL = config('INFOBIP_BASE_URL', default='https://694zm8.api.infobip.com')
+if INFOBIP_BASE_URL and not INFOBIP_BASE_URL.startswith('http'):
+    INFOBIP_BASE_URL = f'https://{INFOBIP_BASE_URL}'
+INFOBIP_API_KEY = config('INFOBIP_API_KEY', default='b3cfb133b6f2a5304cb30f9d96500f68-8ec2d886-9199-4d9f-9560-c4cda0c84af8')
+INFOBIP_SMS_SENDER = config('INFOBIP_SMS_SENDER', default='Petow')
+
 # Email settings for development/production
 if DEBUG:
     # In development, you might want to use console backend for testing

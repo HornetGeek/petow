@@ -370,6 +370,7 @@ class Notification(models.Model):
         ('system_message', 'رسالة من النظام'),
         ('chat_message_received', 'تم استلام رسالة جديدة'),
         ('pet_nearby', 'حيوان جديد بالقرب منك'),
+        ('adoption_pet_nearby', 'حيوان للتبني بالقرب منك'),
         ('clinic_broadcast', 'إشعار من العيادة'),
         ('clinic_invite', 'دعوة ربط عيادة'),
         ('breeding_request_pending_reminder', 'تذكير بطلب مقابلة معلق'),

@@ -326,6 +326,12 @@ def notify_pet_status_changed(pet, old_status, new_status):
     }
     _send_push_notification(pet_owner, title, message, push_payload)
 
+    if new_status == 'available_for_adoption':
+        try:
+            notify_new_adoption_pet(pet)
+        except Exception as exc:
+            logger.error('Failed to send adoption notifications after status change for pet %s: %s', pet.id, exc)
+
     return notification
 
 
@@ -354,6 +360,9 @@ def _haversine_km(lat1, lng1, lat2, lng2):
 
 def notify_new_pet_added(pet, radius_km=30):
     """إرسال إشعار عند إضافة حيوان جديد للمستخدمين القريبين أو في نفس المدينة."""
+    if pet.status == 'available_for_adoption':
+        return notify_new_adoption_pet(pet, radius_km=10)
+
     if pet.status != 'available':
         logger.info("Skipping nearby pet notifications for pet %s with status %s", pet.id, pet.status)
         return []
@@ -417,6 +426,91 @@ def notify_new_pet_added(pet, radius_km=30):
         _send_push_notification(user, title, message, push_payload)
 
     logger.info("Sent nearby pet notifications for pet %s to %d users", pet.id, len(notifications))
+    return notifications
+
+
+def notify_new_adoption_pet(pet, radius_km=10):
+    """إرسال إشعار عند توفر حيوان للتبني للمستخدمين القريبين."""
+    if pet.status != 'available_for_adoption':
+        logger.info("Skipping adoption notifications for pet %s with status %s", pet.id, pet.status)
+        return []
+
+    recipients = {}
+
+    pet_lat = pet.latitude
+    pet_lng = pet.longitude
+
+    if pet_lat is not None and pet_lng is not None:
+        geo_users = User.objects.exclude(id=pet.owner_id).exclude(
+            latitude__isnull=True
+        ).exclude(
+            longitude__isnull=True
+        ).exclude(
+            fcm_token__isnull=True
+        ).exclude(
+            fcm_token=''
+        )
+
+        for user in geo_users:
+            distance = _haversine_km(pet_lat, pet_lng, user.latitude, user.longitude)
+            if distance is not None and distance <= radius_km:
+                recipients[user.id] = (user, distance)
+
+    normalised_location = _normalise_location(pet.location)
+    if normalised_location:
+        location_users = User.objects.exclude(id=pet.owner_id).exclude(
+            fcm_token__isnull=True
+        ).exclude(
+            fcm_token=''
+        )
+        for user in location_users:
+            if _normalise_location(getattr(user, 'address', '')) == normalised_location:
+                recipients.setdefault(user.id, (user, None))
+
+    if not recipients:
+        logger.info("No nearby users found for adoption pet %s", pet.id)
+        return []
+
+    notifications = []
+    location_text = pet.location or 'بالقرب منك'
+
+    for user, distance in recipients.values():
+        if distance is not None:
+            distance_text = f"على بعد حوالي {distance:.1f} كم"
+        else:
+            distance_text = f"في {location_text}"
+
+        title = "فرصة تبني قريبة منك"
+        message = f"🐾 {pet.name or 'حيوان أليف'} متاح للتبني مجاناً {distance_text}. شاهد التفاصيل الآن!"
+
+        extra = {
+            'pet_id': pet.id,
+            'pet_name': pet.name,
+            'pet_type': pet.pet_type,
+            'distance_km': round(distance, 1) if distance is not None else None,
+            'location': location_text,
+        }
+
+        notification = create_notification(
+            user=user,
+            notification_type='adoption_pet_nearby',
+            title=title,
+            message=message,
+            related_pet=pet,
+            extra_data=extra
+        )
+        notifications.append(notification)
+
+        push_payload = {
+            'type': 'adoption_pet_nearby',
+            'pet_id': str(pet.id),
+            'pet_name': pet.name,
+            'distance_km': extra['distance_km'],
+            'location': location_text,
+        }
+        _send_push_notification(user, title, message, push_payload)
+
+    logger.info("Sent adoption pet notifications for pet %s to %d users", pet.id, len(notifications))
     return notifications
 
 def send_system_message(user, title, message, extra_data=None):
