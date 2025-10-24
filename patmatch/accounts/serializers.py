@@ -86,8 +86,8 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("كلمات المرور غير متطابقة")
         
         password = attrs['password1']
-        if len(password) < 6:
-            raise serializers.ValidationError("كلمة المرور يجب أن تتكون من 6 أحرف على الأقل")
+        if len(password) < 4:
+            raise serializers.ValidationError("كلمة المرور يجب أن تتكون من 4 أحرف على الأقل")
         
         # التحقق من قوة كلمة المرور
         try:
