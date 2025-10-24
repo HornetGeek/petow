@@ -6,7 +6,6 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from django.db import transaction
 from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
-from accounts.models import AccountVerification
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, 
     BreedingRequestSerializer, FavoriteSerializer, VeterinaryClinicSerializer,
@@ -1172,27 +1171,13 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
     
     def create(self, request, *args, **kwargs):
         """إنشاء طلب تبني جديد مع إرسال إشعار"""
-        # التحقق من أن المستخدم قد تم التحقق من حسابه
-        request.user.refresh_from_db(fields=['is_verified'])
-        if not request.user.is_verified:
-            has_approved_verification = AccountVerification.objects.filter(
-                user=request.user,
-                status='approved'
-            ).exists()
-            if has_approved_verification:
-                request.user.is_verified = True
-                request.user.save(update_fields=['is_verified'])
-            else:
-                return Response({
-                    'error': 'يجب التحقق من حسابك قبل تقديم طلب تبني. يرجى تقديم طلب التحقق من الحساب أولاً.',
-                    'verification_required': True
-                }, status=status.HTTP_403_FORBIDDEN)
-            
-        # Ensure we return early if the verification flag was just fixed
-        if not request.user.is_verified:
+        # التحقق من أن المستخدم موثق برقم الهاتف
+        request.user.refresh_from_db(fields=['is_phone_verified', 'phone'])
+        if not request.user.is_phone_verified:
             return Response({
-                'error': 'يجب التحقق من حسابك قبل تقديم طلب تبني. يرجى تقديم طلب التحقق من الحساب أولاً.',
-                'verification_required': True
+                'error': 'يجب توثيق رقم هاتفك قبل تقديم طلب تبني. يرجى إتمام التحقق عبر الكود المرسل برسالة نصية.',
+                'verification_required': True,
+                'phone_verification_required': True,
             }, status=status.HTTP_403_FORBIDDEN)
         
         response = super().create(request, *args, **kwargs)

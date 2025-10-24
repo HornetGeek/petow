@@ -8,15 +8,92 @@ from rest_framework.authtoken.models import Token
 from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer, AccountVerificationSerializer, AccountVerificationStatusSerializer
 from .models import User, PhoneOTP, PasswordResetOTP, AccountVerification
 from .email_notifications import send_welcome_email, send_password_reset_email
-from django.core.mail import send_mail
 from django.conf import settings
 import requests
 import logging
 import os
+import re
 
 from .email_notifications import send_welcome_email
 
 logger = logging.getLogger(__name__)
+
+def normalize_phone_number(raw_number: str) -> str:
+    if not raw_number:
+        return ''
+
+    raw = str(raw_number).strip()
+    if raw.startswith('00'):
+        raw = '+' + raw[2:]
+
+    if raw.startswith('+'):
+        digits = re.sub(r'[^0-9]', '', raw)
+        return f'+{digits}' if digits else ''
+
+    digits = re.sub(r'[^0-9]', '', raw)
+    if not digits:
+        return ''
+
+    if digits.startswith('01') and len(digits) in (10, 11):
+        return f'+20{digits[1:]}'
+
+    if digits.startswith('1') and len(digits) == 10:
+        return f'+20{digits}'
+
+    if digits.startswith('20') and len(digits) >= 11:
+        return f'+{digits}'
+
+    if digits.startswith('966') and len(digits) >= 12:
+        return f'+{digits}'
+
+    if digits.startswith('971') and len(digits) >= 12:
+        return f'+{digits}'
+
+    return ''
+
+
+def send_infobip_sms(phone_number: str, otp_code: str) -> bool:
+    base_url = getattr(settings, 'INFOBIP_BASE_URL', '')
+    api_key = getattr(settings, 'INFOBIP_API_KEY', '')
+    sender = getattr(settings, 'INFOBIP_SMS_SENDER', 'Petow')
+
+    if not base_url or not api_key:
+        logger.warning("Infobip credentials missing; skipping SMS send for %s", phone_number)
+        return False
+
+    endpoint = base_url.rstrip('/') + '/sms/2/text/advanced'
+    payload = {
+        "messages": [
+            {
+                "from": sender,
+                "destinations": [{"to": phone_number}],
+                "text": f"كود التحقق من Petow هو {otp_code}. صالح لمدة 5 دقائق."
+            }
+        ]
+    }
+
+    headers = {
+        "Authorization": f"App {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    try:
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=8)
+        if 200 <= response.status_code < 300:
+            logger.info("Infobip SMS sent successfully to %s", phone_number)
+            return True
+        logger.error(
+            "Failed to send Infobip SMS to %s: status=%s response=%s",
+            phone_number,
+            response.status_code,
+            response.text,
+        )
+        return False
+    except requests.RequestException as exc:
+        logger.error("Error sending SMS via Infobip to %s: %s", phone_number, exc)
+        return False
+
 
 # Create your views here.
 
@@ -115,60 +192,46 @@ def logout(request):
 def send_phone_otp(request):
     """إرسال كود التحقق للهاتف"""
     phone_number = request.data.get('phone_number')
-    
+
     if not phone_number:
         return Response(
-            {'error': 'رقم الهاتف مطلوب'}, 
+            {'error': 'رقم الهاتف مطلوب'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # تنسيق رقم الهاتف المصري (إضافة +20 إذا لم يكن موجود)
-    if not phone_number.startswith('+'):
-        # أرقام الموبايل المصرية تبدأ بـ 01 (010, 011, 012, 015)
-        if phone_number.startswith('01'):
-            phone_number = '+20' + phone_number[1:]  # +2010xxxxxxx, +2011xxxxxxx, etc.
-        elif phone_number.startswith('1') and len(phone_number) == 10:
-            phone_number = '+20' + phone_number  # +201xxxxxxxxx
-        else:
-            return Response(
-                {'error': 'تنسيق رقم الهاتف غير صحيح. يجب أن يبدأ بـ 010, 011, 012, أو 015'}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-    
-    # التحقق من صحة الرقم المصري
-    if not phone_number.startswith('+201'):
+
+    normalised_phone = normalize_phone_number(phone_number)
+    if not normalised_phone:
         return Response(
-            {'error': 'رقم الهاتف يجب أن يكون مصري (يبدأ بـ +201)'}, 
+            {'error': 'تنسيق رقم الهاتف غير صحيح. يرجى إدخال الرقم بصيغة دولية (مثال: +201234567890).'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # التحقق من طول الرقم (يجب أن يكون 13 رقم: +20 + 10 أرقام)
-    if len(phone_number) != 13:
-        return Response(
-            {'error': 'رقم الهاتف غير صحيح'}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
+
     try:
-        # إنشاء كود OTP
-        otp = PhoneOTP.generate_otp(request.user, phone_number)
-        
-        # إرسال الرسالة (للتطوير: طباعة الكود في الكونسول)
-        print(f"📱 OTP for {phone_number}: {otp.otp_code}")
-        logger.info(f"OTP generated for user {request.user.email}, phone {phone_number}: {otp.otp_code}")
-        
-        # في الإنتاج، ستستخدم Firebase Auth هنا
-        # send_firebase_sms(phone_number, otp.otp_code)
-        
-        return Response({
+        otp = PhoneOTP.generate_otp(request.user, normalised_phone)
+
+        sms_sent = send_infobip_sms(normalised_phone, otp.otp_code)
+        if not sms_sent and not settings.DEBUG:
+            return Response(
+                {'error': 'تعذر إرسال كود التحقق. يرجى المحاولة مرة أخرى بعد قليل.'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        logger.info("OTP generated for user %s, phone %s", request.user.email, normalised_phone)
+
+        response_payload = {
             'message': 'تم إرسال كود التحقق بنجاح',
-            'expires_in': 300  # 5 دقائق
-        })
-        
+            'expires_in': 300,
+            'sms_sent': sms_sent,
+        }
+        if settings.DEBUG:
+            response_payload['debug_otp'] = otp.otp_code
+
+        return Response(response_payload)
+
     except Exception as e:
         logger.error(f"Error sending OTP: {str(e)}")
         return Response(
-            {'error': 'خطأ في إرسال كود التحقق'}, 
+            {'error': 'خطأ في إرسال كود التحقق'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -179,102 +242,96 @@ def verify_phone_otp(request):
     """التحقق من كود OTP"""
     phone_number = request.data.get('phone_number')
     otp_code = request.data.get('otp_code')
-    
+
     if not phone_number or not otp_code:
         return Response(
-            {'error': 'رقم الهاتف وكود التحقق مطلوبان'}, 
+            {'error': 'رقم الهاتف وكود التحقق مطلوبان'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # تنسيق رقم الهاتف المصري
-    if not phone_number.startswith('+'):
-        if phone_number.startswith('01'):
-            phone_number = '+20' + phone_number[1:]
-        elif phone_number.startswith('1') and len(phone_number) == 10:
-            phone_number = '+20' + phone_number
-    
+
+    normalised_phone = normalize_phone_number(phone_number)
+    if not normalised_phone:
+        return Response(
+            {'error': 'تنسيق رقم الهاتف غير صحيح. يرجى إدخال الرقم بصيغة دولية.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
     try:
-        # البحث عن كود OTP صالح
         otp = PhoneOTP.objects.filter(
             user=request.user,
-            phone_number=phone_number,
+            phone_number=normalised_phone,
             otp_code=otp_code,
             is_used=False
         ).first()
-        
+
         if not otp:
             return Response(
-                {'error': 'كود التحقق غير صحيح'}, 
+                {'error': 'كود التحقق غير صحيح'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         if otp.is_expired():
             return Response(
-                {'error': 'كود التحقق منتهي الصلاحية'}, 
+                {'error': 'كود التحقق منتهي الصلاحية'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # تأكيد الكود
+
         otp.is_used = True
         otp.save()
-        
-        # تحديث المستخدم
-        request.user.phone = phone_number
+
+        request.user.phone = normalised_phone
         request.user.is_phone_verified = True
-        request.user.save()
-        
+        request.user.save(update_fields=['phone', 'is_phone_verified'])
+
         return Response({
             'message': 'تم التحقق من رقم الهاتف بنجاح',
             'user': UserSerializer(request.user).data
         })
-        
+
     except Exception as e:
         logger.error(f"Error verifying OTP: {str(e)}")
         return Response(
-            {'error': 'خطأ في التحقق من الكود'}, 
+            {'error': 'خطأ في التحقق من الكود'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def verify_firebase_phone(request):
     """التحقق من رقم الهاتف عبر Firebase"""
     phone_number = request.data.get('phone_number')
-    
+
     if not phone_number:
         return Response(
-            {'error': 'رقم الهاتف مطلوب'}, 
+            {'error': 'رقم الهاتف مطلوب'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    
-    # تنسيق رقم الهاتف المصري
-    if not phone_number.startswith('+'):
-        if phone_number.startswith('01'):
-            phone_number = '+20' + phone_number[1:]
-        elif phone_number.startswith('1') and len(phone_number) == 10:
-            phone_number = '+20' + phone_number
-    
+
+    normalised_phone = normalize_phone_number(phone_number)
+    if not normalised_phone:
+        return Response(
+            {'error': 'تنسيق رقم الهاتف غير صحيح. يرجى إدخال الرقم بصيغة دولية.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
     try:
-        # تحديث المستخدم مباشرة (Firebase تحقق من الكود في Frontend)
-        request.user.phone = phone_number
+        request.user.phone = normalised_phone
         request.user.is_phone_verified = True
-        request.user.save()
-        
-        print(f"✅ Firebase phone verification successful for {request.user.email}: {phone_number}")
-        
+        request.user.save(update_fields=['phone', 'is_phone_verified'])
+
+        logger.info('Firebase phone verification successful for %s: %s', request.user.email, normalised_phone)
+
         return Response({
             'message': 'تم التحقق من رقم الهاتف بنجاح عبر Firebase',
             'user': UserSerializer(request.user).data
         })
-        
+
     except Exception as e:
         logger.error(f"Error updating phone verification: {str(e)}")
         return Response(
-            {'error': 'خطأ في حفظ معلومات التحقق'}, 
+            {'error': 'خطأ في حفظ معلومات التحقق'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
 
 def send_firebase_sms(phone_number, otp_code):
     """إرسال رسالة SMS عبر Firebase (للاستخدام في الإنتاج)"""
