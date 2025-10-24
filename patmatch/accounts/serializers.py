@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 import re
 from .models import AccountVerification
 
@@ -84,9 +85,22 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
         if attrs['password1'] != attrs['password2']:
             raise serializers.ValidationError("كلمات المرور غير متطابقة")
         
+        password = attrs['password1']
+        if len(password) < 6:
+            raise serializers.ValidationError("كلمة المرور يجب أن تتكون من 6 أحرف على الأقل")
+        
         # التحقق من قوة كلمة المرور
         try:
-            validate_password(attrs['password1'])
+            validate_password(password)
+        except DjangoValidationError as exc:
+            allowed_messages = {
+                "This password is entirely numeric.",
+                "كلمة المرور هذه تتكون من أرقام فقط.",
+            }
+            filtered_messages = [msg for msg in exc.messages if msg not in allowed_messages]
+            if filtered_messages:
+                joined = ' '.join(filtered_messages)
+                raise serializers.ValidationError(f"كلمة المرور ضعيفة: {joined}")
         except Exception as e:
             raise serializers.ValidationError(f"كلمة المرور ضعيفة: {e}")
         
