@@ -45,7 +45,7 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
             'address', 'password1', 'password2'
         ]
         extra_kwargs = {
-            'phone': {'required': True, 'help_text': 'رقم الهاتف مطلوب'},
+            'phone': {'required': False, 'allow_blank': True, 'help_text': 'رقم الهاتف (اختياري)'},
             'first_name': {'required': True},
             'last_name': {'required': True},
             'address': {'required': False},
@@ -54,7 +54,7 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
     def validate_phone(self, value):
         """التحقق من صحة رقم الهاتف"""
         if not value:
-            raise serializers.ValidationError("رقم الهاتف مطلوب")
+            return ''
         
         # إزالة المسافات والرموز الإضافية
         clean_phone = re.sub(r'[\s\-\(\)]', '', value)
@@ -71,7 +71,7 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
                 "رقم الهاتف غير صحيح. يرجى إدخال رقم سعودي أو مصري أو إماراتي صحيح"
             )
         
-        return value
+        return clean_phone
     
     def validate_email(self, value):
         """التحقق من عدم تكرار البريد الإلكتروني"""
@@ -97,11 +97,13 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
         # إزالة password2 لأنها للتأكيد فقط
         validated_data.pop('password2')
         password = validated_data.pop('password1')
+        phone = validated_data.pop('phone', '')
         
         # إنشاء المستخدم
         user = User.objects.create_user(
             username=validated_data['email'],  # نستخدم البريد كـ username
             password=password,
+            phone=phone or '',
             **validated_data
         )
         
@@ -172,4 +174,3 @@ class AccountVerificationStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = AccountVerification
         fields = ['id', 'status', 'status_display', 'admin_notes', 'created_at', 'reviewed_at']
-
