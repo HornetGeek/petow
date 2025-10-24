@@ -1,5 +1,4 @@
 from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -620,7 +619,6 @@ class ClinicRegistrationSerializer(serializers.Serializer):
     def validate(self, attrs):
         if attrs['password1'] != attrs['password2']:
             raise serializers.ValidationError({'password2': "كلمات المرور غير متطابقة"})
-        validate_password(attrs['password1'])
         return attrs
 
     def create(self, validated_data):
