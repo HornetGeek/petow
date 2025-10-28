@@ -65,6 +65,7 @@ class PetSerializer(serializers.ModelSerializer):
     longitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
     owner_email = serializers.CharField(source='owner.email', read_only=True)
+    owner_is_verified = serializers.BooleanField(source='owner.is_verified', read_only=True)
     breed_name = serializers.CharField(source='breed.name', read_only=True)
     age_display = serializers.CharField(read_only=True)
     gender_display = serializers.CharField(read_only=True)
@@ -128,7 +129,7 @@ class PetSerializer(serializers.ModelSerializer):
             'hosting_preference', 'main_image', 'image_2', 'image_3', 'image_4', 'additional_images',
             'vaccination_certificate', 'health_certificate', 'disease_free_certificate', 'additional_certificate',
             'status', 'status_display', 'location', 
-            'latitude', 'longitude', 'is_free', 'owner_name', 'owner_email', 
+            'latitude', 'longitude', 'is_free', 'owner_name', 'owner_email', 'owner_is_verified',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['owner', 'created_at', 'updated_at']
@@ -220,6 +221,7 @@ class PetListSerializer(serializers.ModelSerializer):
     gender_display = serializers.CharField(read_only=True)
     status_display = serializers.CharField(read_only=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    owner_is_verified = serializers.BooleanField(source='owner.is_verified', read_only=True)
     has_health_certificates = serializers.BooleanField(read_only=True)
     distance = serializers.SerializerMethodField()
     distance_display = serializers.SerializerMethodField()
@@ -277,7 +279,7 @@ class PetListSerializer(serializers.ModelSerializer):
             'id', 'name', 'pet_type', 'pet_type_display', 'breed_name', 
             'age_display', 'gender', 'gender_display', 'description', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
-            'price_display', 'status', 'status_display', 'owner_name', 
+            'price_display', 'status', 'status_display', 'owner_name', 'owner_is_verified',
             'has_health_certificates', 'hosting_preference', 'created_at'
         ]
 
