@@ -1171,15 +1171,7 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
     
     def create(self, request, *args, **kwargs):
         """إنشاء طلب تبني جديد مع إرسال إشعار"""
-        # التحقق من أن المستخدم موثق برقم الهاتف
-        request.user.refresh_from_db(fields=['is_phone_verified', 'phone'])
-        if not request.user.is_phone_verified:
-            return Response({
-                'error': 'يجب توثيق رقم هاتفك قبل تقديم طلب تبني. يرجى إتمام التحقق عبر الكود المرسل برسالة نصية.',
-                'verification_required': True,
-                'phone_verification_required': True,
-            }, status=status.HTTP_403_FORBIDDEN)
-        
+        # فتح طلبات التبني بدون شرط توثيق رقم الهاتف
         response = super().create(request, *args, **kwargs)
         
         # إرسال إشعار لصاحب الحيوان

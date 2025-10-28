@@ -14,7 +14,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone', 'is_phone_verified', 'address', 'latitude', 'longitude', 'profile_picture', 'is_verified',
-            'user_type', 'pets_count', 'date_joined', 'fcm_token'
+            'user_type', 'pets_count', 'date_joined', 'fcm_token',
+            'notify_breeding_requests', 'notify_adoption_pets'
         ]
         read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined', 'fcm_token', 'user_type']
     

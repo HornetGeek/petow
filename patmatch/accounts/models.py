@@ -29,6 +29,11 @@ class User(AbstractUser):
     is_verified = models.BooleanField(default=False)
     fcm_token = models.TextField(blank=True, null=True, help_text="FCM token للإشعارات")
     user_type = models.CharField(max_length=30, choices=USER_TYPE_CHOICES, default='pet_owner')
+    
+    # Notification preferences
+    notify_breeding_requests = models.BooleanField(default=True, help_text="إرسال إشعارات طلبات التزاوج")
+    notify_adoption_pets = models.BooleanField(default=True, help_text="إرسال إشعارات الحيوانات المتاحة للتبني")
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
