@@ -535,22 +535,32 @@ def notify_adoption_request_received(adoption_request):
     message = f"يريد {adoption_request.adopter_name} تبني حيوانك {pet.name}"
     
     # إنشاء الإشعار
+    extra_data = {
+        'adopter_name': adoption_request.adopter_name,
+        'adopter_phone': adoption_request.adopter_phone,
+        'adopter_email': adoption_request.adopter_email,
+        'adoption_request_id': adoption_request.id,
+    }
+
     notification = create_notification(
         user=pet_owner,
         notification_type='adoption_request_received',
         title=title,
         message=message,
         related_pet=pet,
-        extra_data={
-            'adopter_name': adoption_request.adopter_name,
-            'adopter_phone': adoption_request.adopter_phone,
-            'adopter_email': adoption_request.adopter_email,
-        }
+        extra_data=extra_data
     )
-    
+
+    push_payload = {
+        'type': 'adoption_request_received',
+        'adoption_request_id': str(adoption_request.id),
+        'pet_id': str(pet.id),
+    }
+    _send_push_notification(pet_owner, title, message, push_payload)
+
     # إرسال إيميل
     send_adoption_request_email(adoption_request)
-    
+
     return notification
 
 def notify_adoption_request_approved(adoption_request):
@@ -573,10 +583,18 @@ def notify_adoption_request_approved(adoption_request):
         extra_data={
             'pet_owner_name': pet.owner.get_full_name(),
             'pet_owner_phone': pet.owner.phone,
+            'adoption_request_id': adoption_request.id,
         }
     )
-    
+
     # إرسال إيميل
     send_adoption_request_approved_email(adoption_request)
-    
+
+    push_payload = {
+        'type': 'adoption_request_approved',
+        'adoption_request_id': str(adoption_request.id),
+        'pet_id': str(pet.id),
+    }
+    _send_push_notification(adopter, title, message, push_payload)
+
     return notification 
