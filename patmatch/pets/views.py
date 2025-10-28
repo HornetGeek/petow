@@ -943,6 +943,13 @@ def user_chat_status(request):
         # إجمالي المحادثات
         total_chats = active_chats + archived_chats
         
+        # عدد الرسائل غير المقروءة (من إشعارات الرسائل)
+        unread_chat_messages = Notification.objects.filter(
+            user=user,
+            is_read=False,
+            type='chat_message_received'
+        ).count()
+        
         # طلبات التزاوج المقبولة بدون محادثة
         pending_chat_creation = BreedingRequest.objects.filter(
             Q(requester_id=user.id) | Q(target_pet__owner_id=user.id),
@@ -957,7 +964,9 @@ def user_chat_status(request):
             'total_chats': total_chats,
             'pending_chat_creation': pending_chat_creation,
             'user_id': user.id,
-            'user_name': f"{user.first_name} {user.last_name}"
+            'user_name': f"{user.first_name} {user.last_name}",
+            'unread_messages_count': unread_chat_messages,
+            'has_unread_messages': unread_chat_messages > 0,
         })
         
     except Exception as e:

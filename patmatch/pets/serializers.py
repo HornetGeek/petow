@@ -419,6 +419,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
                     'name': f"{other_user.first_name} {other_user.last_name}".strip(),
                     'email': other_user.email,
                     'phone': other_user.phone,
+                    'is_verified': getattr(other_user, 'is_verified', False),
                 }
 
         if obj.clinic_patient and obj.clinic_patient.clinic:
@@ -428,6 +429,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
                 'name': clinic.name,
                 'email': getattr(clinic, 'email', None),
                 'phone': getattr(clinic, 'phone', None),
+                'is_verified': False,
             }
         return None
     
@@ -471,6 +473,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
 class ChatRoomListSerializer(serializers.ModelSerializer):
     """سيريلايزر مبسط لقائمة المحادثات"""
     other_participant = serializers.SerializerMethodField()
+    other_participant_is_verified = serializers.SerializerMethodField()
     pet_name = serializers.SerializerMethodField()
     pet_image = serializers.SerializerMethodField()
     
@@ -478,7 +481,7 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
         model = ChatRoom
         fields = [
             'id', 'firebase_chat_id', 'created_at', 'updated_at',
-            'other_participant', 'pet_name', 'pet_image'
+            'other_participant', 'other_participant_is_verified', 'pet_name', 'pet_image'
         ]
     
     def get_other_participant(self, obj):
@@ -501,6 +504,22 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return "مستخدم آخر"
+
+    def get_other_participant_is_verified(self, obj):
+        """هل المشارك الآخر موثق"""
+        try:
+            request = self.context.get('request')
+            participants = obj.get_participants()
+            if request and request.user.is_authenticated and participants:
+                for participant in participants:
+                    if participant.id != request.user.id:
+                        return bool(getattr(participant, 'is_verified', False))
+            elif participants:
+                participant = participants[0]
+                return bool(getattr(participant, 'is_verified', False))
+        except Exception:
+            pass
+        return False
     
     def get_pet_name(self, obj):
         """اسم الحيوان او المريض"""
