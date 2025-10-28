@@ -597,6 +597,7 @@ class ChatRoom(models.Model):
                         'name': f"{participant.first_name} {participant.last_name}".strip(),
                         'email': participant.email,
                         'phone': participant.phone,
+                        'is_verified': getattr(participant, 'is_verified', False),
                     }
             return data
         except Exception:
