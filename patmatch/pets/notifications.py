@@ -9,7 +9,7 @@ from .models import Notification, Pet, BreedingRequest
 from accounts.models import User
 from accounts.firebase_service import firebase_service
 from .email_notifications import (
-    send_breeding_request_email, 
+    send_breeding_request_email,
     send_breeding_request_approved_email,
     send_adoption_request_email,
     send_adoption_request_approved_email
@@ -246,6 +246,43 @@ def notify_breeding_request_pending_reminder(breeding_request):
         'pet_id': str(target_pet.id),
     }
     _send_push_notification(receiver, title, message, push_payload)
+
+    return notification
+
+
+def notify_adoption_request_pending_reminder(adoption_request):
+    """
+    إرسال تذكير لمالك الحيوان بأن هناك طلب تبنّي ما زال قيد المراجعة.
+    يتم استخدامه عادة في المهام المجدولة لتذكير المستخدمين باتخاذ إجراء.
+    """
+    pet = adoption_request.pet
+    pet_owner = pet.owner
+    adopter = adoption_request.adopter
+
+    title = f"تذكير بطلب تبنّي لـ {pet.name}"
+    message = (
+        f"هناك طلب تبنّي من {adoption_request.adopter_name} بانتظار ردك. "
+        "فضلاً قم بقبول أو رفض الطلب لإبلاغ الطرف الآخر."
+    )
+
+    notification = create_notification(
+        user=pet_owner,
+        notification_type='adoption_request_pending_reminder',
+        title=title,
+        message=message,
+        related_pet=pet,
+        extra_data={
+            'adopter_name': adoption_request.adopter_name,
+            'adoption_request_id': adoption_request.id,
+        },
+    )
+
+    push_payload = {
+        'type': 'adoption_request_pending_reminder',
+        'adoption_request_id': str(adoption_request.id),
+        'pet_id': str(pet.id),
+    }
+    _send_push_notification(pet_owner, title, message, push_payload)
 
     return notification
 
