@@ -374,6 +374,9 @@ class Notification(models.Model):
         ('clinic_broadcast', 'إشعار من العيادة'),
         ('clinic_invite', 'دعوة ربط عيادة'),
         ('breeding_request_pending_reminder', 'تذكير بطلب مقابلة معلق'),
+        ('adoption_request_received', 'تم استلام طلب تبني جديد'),
+        ('adoption_request_approved', 'تم قبول طلب التبني'),
+        ('adoption_request_pending_reminder', 'تذكير بطلب تبني معلق'),
     ]
     
     user = models.ForeignKey(
