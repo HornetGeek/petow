@@ -52,26 +52,64 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
         }
     
     def validate_phone(self, value):
-        """التحقق من صحة رقم الهاتف"""
+        """التحقق من صحة رقم الهاتف وتطبيعه إلى E.164"""
         if not value:
             return ''
-        
-        # إزالة المسافات والرموز الإضافية
-        clean_phone = re.sub(r'[\s\-\(\)]', '', value)
-        
-        # تحقق من الأرقام السعودية والمصرية والإماراتية
-        saudi_pattern = r'^(\+966|966|0)?[5-9]\d{8}$'
-        egyptian_pattern = r'^(\+20|20|0)?1[0-5]\d{8}$'
-        uae_pattern = r'^(\+971|971|0)?[5-9]\d{8}$'
-        
-        if not (re.match(saudi_pattern, clean_phone) or 
-                re.match(egyptian_pattern, clean_phone) or 
-                re.match(uae_pattern, clean_phone)):
+
+        # إزالة المسافات والرموز الإضافية الشائعة
+        raw = re.sub(r'[\s\-\(\)]', '', str(value).strip())
+
+        # احتفاظ فقط بالأرقام مع السماح بإشارة + في البداية
+        if raw.startswith('+'):
+            digits_only = re.sub(r'[^0-9]', '', raw)
+            normalized = f'+{digits_only}' if digits_only else ''
+        else:
+            digits_only = re.sub(r'[^0-9]', '', raw)
+            normalized = digits_only
+
+        if not normalized:
+            raise serializers.ValidationError("رقم الهاتف غير صالح")
+
+        # إصلاح الأخطاء الشائعة: إضافة 0 محلي بعد كود الدولة
+        if normalized.startswith('+200') and len(normalized) >= 5 and normalized[4] == '1':
+            # +2001XXXXXXXXX -> +201XXXXXXXXX
+            normalized = '+201' + normalized[5:]
+        if normalized.startswith('+9660') and len(normalized) >= 6:
+            normalized = '+966' + normalized[5:]
+        if normalized.startswith('+9710') and len(normalized) >= 6:
+            normalized = '+971' + normalized[5:]
+
+        # تطبيع الأشكال المحلية إلى E.164
+        if not normalized.startswith('+'):
+            # مصر: 01XXXXXXXXX أو 1XXXXXXXXX
+            if normalized.startswith('01') and len(normalized) in (10, 11):
+                normalized = '+20' + normalized[1:]
+            elif normalized.startswith('1') and len(normalized) == 10:
+                normalized = '+20' + normalized
+            # مصر بشكل دولي بدون +
+            elif normalized.startswith('20') and len(normalized) >= 11:
+                normalized = '+' + normalized
+            # السعودية والإمارات
+            elif normalized.startswith('966') and len(normalized) >= 12:
+                normalized = '+' + normalized
+            elif normalized.startswith('971') and len(normalized) >= 12:
+                normalized = '+' + normalized
+
+        # تحقق نهائي بنمط E.164 للدول المدعومة
+        egypt_e164 = r'^\+201[0-5]\d{8}$'
+        saudi_e164 = r'^\+966[5-9]\d{8}$'
+        uae_e164   = r'^\+971[5-9]\d{8}$'
+
+        if not (
+            re.match(egypt_e164, normalized) or
+            re.match(saudi_e164, normalized) or
+            re.match(uae_e164, normalized)
+        ):
             raise serializers.ValidationError(
-                "رقم الهاتف غير صحيح. يرجى إدخال رقم سعودي أو مصري أو إماراتي صحيح"
+                "رقم الهاتف غير صحيح. يرجى إدخال رقم سعودي أو مصري أو إماراتي صحيح بصيغة دولية"
             )
-        
-        return clean_phone
+
+        return normalized
     
     def validate_email(self, value):
         """التحقق من عدم تكرار البريد الإلكتروني"""

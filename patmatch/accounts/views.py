@@ -28,6 +28,16 @@ def normalize_phone_number(raw_number: str) -> str:
 
     if raw.startswith('+'):
         digits = re.sub(r'[^0-9]', '', raw)
+        # Handle common mistake: adding a local leading 0 after country code
+        # Egypt: +2001XXXXXXXXX -> +201XXXXXXXXX
+        if digits.startswith('200') and len(digits) >= 4 and digits[3] == '1':
+            digits = '201' + digits[4:]
+        # Saudi: +9660XXXXXXXXX -> +966XXXXXXXXX (drop the local 0)
+        if digits.startswith('9660') and len(digits) >= 5:
+            digits = '966' + digits[4:]
+        # UAE: +9710XXXXXXXX -> +971XXXXXXXX (drop the local 0)
+        if digits.startswith('9710') and len(digits) >= 5:
+            digits = '971' + digits[4:]
         return f'+{digits}' if digits else ''
 
     digits = re.sub(r'[^0-9]', '', raw)
