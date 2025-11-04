@@ -25,6 +25,8 @@ from accounts.firebase_service import firebase_service
 import logging
 import time
 from django.db import models
+from django.db.models import F, Value, FloatField, ExpressionWrapper
+from django.db.models.functions import Coalesce, Cast
 import requests
 
 logger = logging.getLogger(__name__)
@@ -113,11 +115,13 @@ class PetListCreateView(generics.ListCreateAPIView):
             print(f"❌ Django: Create error: {str(e)}")
             print(f"❌ Django: Error type: {type(e)}")
             raise
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    # نُحافظ على البحث والفلترة، ونُدير الترتيب يدوياً لدعم الأقرب أولاً افتراضياً
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['pet_type', 'gender', 'status', 'breed']
     search_fields = ['name', 'breed__name', 'location', 'description']
     ordering_fields = ['created_at', 'age_months', 'breeding_fee']
-    ordering = ['-created_at']
+    # اترك ترتيب افتراضي فارغاً ليتم استخدام ترتيب النموذج أو ما نحدده يدوياً
+    ordering = []
     
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -174,6 +178,41 @@ class PetListCreateView(generics.ListCreateAPIView):
             favorite_pets = Favorite.objects.filter(user=self.request.user).values_list('pet_id', flat=True)
             queryset = queryset.filter(id__in=favorite_pets)
         
+        # مسافة الأقرب أولاً: إذا تم تمرير احداثيات المستخدم، رتب حسب الأقرب افتراضياً
+        try:
+            user_lat = self.request.query_params.get('user_lat') or \
+                       self.request.query_params.get('lat') or \
+                       self.request.query_params.get('user_latitude') or \
+                       self.request.query_params.get('latitude') or \
+                       self.request.query_params.get('current_lat')
+            user_lng = self.request.query_params.get('user_lng') or \
+                       self.request.query_params.get('lng') or \
+                       self.request.query_params.get('user_longitude') or \
+                       self.request.query_params.get('longitude') or \
+                       self.request.query_params.get('current_lng')
+
+            if user_lat is not None and user_lng is not None:
+                try:
+                    ulat = float(user_lat)
+                    ulng = float(user_lng)
+                    # استخدم إحداثيات الحيوان، أو إحداثيات المالك كبديل، أو قيمة بعيدة جداً لدفع العناصر بدون إحداثيات للنهاية
+                    lat_expr = Cast(Coalesce(F('latitude'), F('owner__latitude'), Value(9999.0)), FloatField())
+                    lng_expr = Cast(Coalesce(F('longitude'), F('owner__longitude'), Value(9999.0)), FloatField())
+
+                    dlat = lat_expr - Value(ulat, output_field=FloatField())
+                    dlng = lng_expr - Value(ulng, output_field=FloatField())
+                    distance_sq = ExpressionWrapper(dlat * dlat + dlng * dlng, output_field=FloatField())
+
+                    queryset = queryset.annotate(_distance_sq=distance_sq)
+                    # افتراضياً: الأقرب أولاً دائماً عند توفر الإحداثيات
+                    queryset = queryset.order_by('_distance_sq', '-created_at')
+                except (ValueError, TypeError):
+                    # في حال عدم صحة الإحداثيات، نُعيد queryset بدون ترتيب المسافة
+                    pass
+        except Exception:
+            # لا تُفشل القائمة لأية أخطاء غير متوقعة في الحساب
+            pass
+
         return queryset
     
     def get_serializer_context(self):
