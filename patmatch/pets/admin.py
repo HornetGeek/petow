@@ -45,14 +45,14 @@ class PetAdmin(admin.ModelAdmin):
 
 @admin.register(BreedingRequest)
 class BreedingRequestAdmin(admin.ModelAdmin):
-    list_display = ['__str__', 'status', 'requester', 'receiver', 'meeting_date', 'created_at']
+    list_display = ['__str__', 'status', 'requester', 'receiver', 'receiver_phone', 'meeting_date', 'created_at']
     list_filter = ['status', 'created_at']
-    search_fields = ['target_pet__name', 'requester_pet__name', 'requester__email', 'receiver__email']
-    readonly_fields = ['created_at', 'updated_at']
+    search_fields = ['target_pet__name', 'requester_pet__name', 'requester__email', 'receiver__email', 'receiver__phone']
+    readonly_fields = ['created_at', 'updated_at', 'receiver_phone_display']
     
     fieldsets = (
         ('معلومات أساسية', {
-            'fields': ('target_pet', 'requester_pet', 'requester', 'receiver', 'status')
+            'fields': ('target_pet', 'requester_pet', 'requester', 'receiver', 'receiver_phone_display', 'status')
         }),
         ('تفاصيل المقابلة', {
             'fields': ('meeting_date', 'contact_phone', 'veterinary_clinic', 'message')
@@ -64,6 +64,21 @@ class BreedingRequestAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at', 'completed_at')
         }),
     )
+    
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('requester', 'receiver')
+
+    def receiver_phone(self, obj):
+        phone = getattr(obj.receiver, 'phone', None)
+        return phone or '-'
+    receiver_phone.short_description = 'هاتف المستلم'
+    receiver_phone.admin_order_field = 'receiver__phone'
+
+    def receiver_phone_display(self, obj):
+        if not obj or not getattr(obj, 'receiver', None):
+            return '-'
+        return getattr(obj.receiver, 'phone', None) or '-'
+    receiver_phone_display.short_description = 'هاتف المستلم'
 
 @admin.register(VeterinaryClinic)
 class VeterinaryClinicAdmin(admin.ModelAdmin):
