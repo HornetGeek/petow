@@ -171,6 +171,18 @@ class PetListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(
                 Q(breeding_fee__lte=max_price) | Q(is_free=True)
             )
+
+        # فلترة حسب العمر (بالشهور)
+        min_age_months = self.request.query_params.get('min_age_months')
+        max_age_months = self.request.query_params.get('max_age_months')
+        try:
+            if min_age_months is not None and str(min_age_months).strip() != '':
+                queryset = queryset.filter(age_months__gte=int(min_age_months))
+            if max_age_months is not None and str(max_age_months).strip() != '':
+                queryset = queryset.filter(age_months__lte=int(max_age_months))
+        except (TypeError, ValueError):
+            # تجاهل قيم غير صحيحة بدون كسر الاستجابة
+            pass
         
         # فلترة المفضلات فقط
         favorites_only = self.request.query_params.get('favorites_only', None)
@@ -178,7 +190,7 @@ class PetListCreateView(generics.ListCreateAPIView):
             favorite_pets = Favorite.objects.filter(user=self.request.user).values_list('pet_id', flat=True)
             queryset = queryset.filter(id__in=favorite_pets)
         
-        # مسافة الأقرب أولاً: إذا تم تمرير احداثيات المستخدم، رتب حسب الأقرب افتراضياً
+        # مسافة الأقرب أولاً: إذا تم تمرير احداثيات المستخدم، رتب حسب الأقرب فقط عند الطلب
         try:
             user_lat = self.request.query_params.get('user_lat') or \
                        self.request.query_params.get('lat') or \
@@ -204,14 +216,26 @@ class PetListCreateView(generics.ListCreateAPIView):
                     distance_sq = ExpressionWrapper(dlat * dlat + dlng * dlng, output_field=FloatField())
 
                     queryset = queryset.annotate(_distance_sq=distance_sq)
-                    # افتراضياً: الأقرب أولاً دائماً عند توفر الإحداثيات
-                    queryset = queryset.order_by('_distance_sq', '-created_at')
+                    
+                    # جديد: التحقق من معامل ordering لتحديد طريقة الترتيب
+                    ordering_param = self.request.query_params.get('ordering', '')
+                    
+                    # تطبيق الترتيب بناءً على المعامل
+                    if ordering_param == 'distance':
+                        # ترتيب حسب المسافة
+                        queryset = queryset.order_by('_distance_sq', '-created_at')
+                    else:
+                        # ترتيب افتراضي حسب تاريخ الإنشاء
+                        queryset = queryset.order_by('-created_at')
                 except (ValueError, TypeError):
-                    # في حال عدم صحة الإحداثيات، نُعيد queryset بدون ترتيب المسافة
-                    pass
+                    # في حال عدم صحة الإحداثيات، استخدم الترتيب الافتراضي
+                    queryset = queryset.order_by('-created_at')
+            else:
+                # لا توجد إحداثيات، استخدم الترتيب الافتراضي
+                queryset = queryset.order_by('-created_at')
         except Exception:
             # لا تُفشل القائمة لأية أخطاء غير متوقعة في الحساب
-            pass
+            queryset = queryset.order_by('-created_at')
 
         return queryset
     
