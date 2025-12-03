@@ -177,11 +177,12 @@ class Pet(models.Model):
     @property
     def has_health_certificates(self):
         """التحقق من وجود شهادات صحية"""
+        # Check if any certificate field has actual content (not just empty string or None)
         return bool(
-            self.vaccination_certificate or 
-            self.health_certificate or 
-            self.disease_free_certificate or 
-            self.additional_certificate
+            (self.vaccination_certificate and str(self.vaccination_certificate).strip()) or 
+            (self.health_certificate and str(self.health_certificate).strip()) or 
+            (self.disease_free_certificate and str(self.disease_free_certificate).strip()) or 
+            (self.additional_certificate and str(self.additional_certificate).strip())
         )
     
     def _resolve_coordinates(self):
