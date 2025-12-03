@@ -218,6 +218,7 @@ class PetListSerializer(serializers.ModelSerializer):
     breed_name = serializers.CharField(source='breed.name', read_only=True)
     pet_type_display = serializers.CharField(read_only=True)
     age_display = serializers.CharField(read_only=True)
+    age_months = serializers.IntegerField(read_only=True)
     gender_display = serializers.CharField(read_only=True)
     status_display = serializers.CharField(read_only=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
@@ -277,7 +278,7 @@ class PetListSerializer(serializers.ModelSerializer):
         model = Pet
         fields = [
             'id', 'name', 'pet_type', 'pet_type_display', 'breed_name', 
-            'age_display', 'gender', 'gender_display', 'description', 'main_image', 
+            'age_display', 'age_months', 'gender', 'gender_display', 'description', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 'owner_is_verified',
             'has_health_certificates', 'hosting_preference', 'created_at'
