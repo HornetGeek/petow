@@ -120,7 +120,14 @@ class UserProfileView(generics.RetrieveUpdateDestroyAPIView):
         
         # Delete auth token if exists to invalidate sessions
         Token.objects.filter(user=user).delete()
-        user.delete()
+        
+        # Soft delete: deactivate user and rename email to allow re-registration
+        import time
+        timestamp = int(time.time())
+        user.is_active = False
+        user.email = f"deleted_{timestamp}_{user.email}"
+        user.save()
+        
         return Response(
             {'message': 'تم حذف الحساب بنجاح'},
             status=status.HTTP_200_OK
