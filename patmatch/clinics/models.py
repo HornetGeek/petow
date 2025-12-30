@@ -92,33 +92,227 @@ class ClinicService(models.Model):
         ('vaccination', 'تطعيم'),
         ('surgery', 'جراحة'),
         ('grooming', 'تنظيف وتجميل'),
+        ('dental', 'عناية بالأسنان'),
         ('breeding', 'استشارات تزاوج'),
         ('boarding', 'إقامة ورعاية'),
         ('emergency', 'طوارئ'),
+        ('diagnostic', 'فحوصات تشخيصية'),
+        ('prescription', 'وصفات طبية'),
         ('other', 'خدمات أخرى'),
+    ]
+
+    PET_TYPE_CHOICES = [
+        ('all', 'جميع الحيوانات'),
+        ('dogs', 'كلاب فقط'),
+        ('cats', 'قطط فقط'),
+        ('birds', 'طيور فقط'),
+        ('rabbits', 'أرانب فقط'),
+        ('exotic', 'حيوانات غريبة'),
     ]
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='services_list')
     name = models.CharField(max_length=150)
     description = models.TextField(blank=True, null=True)
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='general')
-    price = models.DecimalField(max_digits=9, decimal_places=2, default=0)
+    
+    # Pet Specificity - stores list like ['all'] or ['dogs', 'cats']
+    applicable_pet_types = models.JSONField(default=list, help_text="أنواع الحيوانات المطبقة عليها الخدمة")
+    
+    # Pricing - renamed from 'price' to 'base_price'
+    base_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="السعر الأساسي")
+    has_tiered_pricing = models.BooleanField(default=False, help_text="هل لديها تسعير متدرج؟")
+    
+    # Service Details
     duration_minutes = models.PositiveIntegerField(default=30)
+    requires_appointment = models.BooleanField(default=True, help_text="تتطلب موعد مسبق")
+    
+    # Visibility & Status
     is_active = models.BooleanField(default=True)
-    highlight = models.BooleanField(default=False, help_text="إبراز الخدمة في الواجهة")
+    is_featured = models.BooleanField(default=False, help_text="خدمة مميزة")
+    display_order = models.PositiveIntegerField(default=0, help_text="ترتيب العرض")
+    
+    # Media
+    service_icon = models.CharField(max_length=50, blank=True, null=True, help_text="أيقونة الخدمة (emoji أو اسم)")
+    service_image = models.ImageField(upload_to='services/', blank=True, null=True)
+    
+    # Legacy field for backward compatibility - will be deprecated
+    highlight = models.BooleanField(default=False, help_text="إبراز الخدمة في الواجهة (مهمل - استخدم is_featured)")
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "خدمة طبية"
         verbose_name_plural = "الخدمات الطبية"
-        ordering = ['clinic', 'name']
+        ordering = ['clinic', 'display_order', 'name']
+
+    def __str__(self):
+        return f"{self.name} - {self.clinic.name}"
+    
+    @property
+    def price_range(self):
+        """Calculate price range if tiered pricing exists"""
+        if not self.has_tiered_pricing:
+            return str(self.base_price)
+        
+        tiers = self.pricing_tiers.filter(is_active=True)
+        if not tiers.exists():
+            return str(self.base_price)
+        
+        prices = tiers.values_list('price', flat=True)
+        min_price = min(prices)
+        max_price = max(prices)
+        
+        if min_price == max_price:
+            return str(min_price)
+        return f"{min_price}-{max_price}"
+    
+    @property
+    def pet_type_display(self):
+        """Get display names for applicable pet types"""
+        if not self.applicable_pet_types:
+            return "جميع الحيوانات"
+        
+        type_map = dict(self.PET_TYPE_CHOICES)
+        return ', '.join([type_map.get(pt, pt) for pt in self.applicable_pet_types])
+
+
+class ClinicProduct(models.Model):
+    """منتجات العيادة المعروضة في المتجر"""
+
+    CATEGORY_CHOICES = [
+        ('food', 'طعام'),
+        ('accessories', 'اكسسوارات'),
+        ('medication', 'أدوية'),
+        ('toys', 'ألعاب'),
+        ('grooming', 'عناية'),
+        ('other', 'أخرى'),
+    ]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='products')
+    name = models.CharField(max_length=150)
+    description = models.TextField(blank=True, null=True)
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='other')
+
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    stock_quantity = models.PositiveIntegerField(default=0)
+    sku = models.CharField(max_length=80, blank=True, null=True)
+    low_stock_threshold = models.PositiveIntegerField(default=5)
+
+    is_active = models.BooleanField(default=True)
+    images = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "منتج عيادة"
+        verbose_name_plural = "منتجات العيادة"
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['clinic', 'is_active']),
+            models.Index(fields=['clinic', 'category']),
+        ]
 
     def __str__(self):
         return f"{self.name} - {self.clinic.name}"
 
 
+class ServicePricingTier(models.Model):
+    """تسعير متدرج حسب حجم/وزن الحيوان"""
+    
+    SIZE_CHOICES = [
+        ('xs', 'صغير جداً (أقل من 5 كجم)'),
+        ('sm', 'صغير (5-10 كجم)'),
+        ('md', 'متوسط (10-25 كجم)'),
+        ('lg', 'كبير (25-40 كجم)'),
+        ('xl', 'كبير جداً (أكثر من 40 كجم)'),
+    ]
+    
+    service = models.ForeignKey(
+        ClinicService, 
+        on_delete=models.CASCADE, 
+        related_name='pricing_tiers'
+    )
+    tier_name = models.CharField(max_length=50, help_text="اسم الفئة")
+    tier_size = models.CharField(max_length=10, choices=SIZE_CHOICES)
+    weight_range = models.CharField(max_length=50, blank=True, null=True, help_text="نطاق الوزن")
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = "فئة تسعير"
+        verbose_name_plural = "فئات التسعير"
+        unique_together = ['service', 'tier_size']
+        ordering = ['service', 'tier_size']
+    
+    def __str__(self):
+        return f"{self.service.name} - {self.get_tier_size_display()}: {self.price}"
+
+
+class ServicePackage(models.Model):
+    """باقات الخدمات بأسعار مخفضة"""
+    
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='service_packages')
+    name = models.CharField(max_length=150)
+    description = models.TextField()
+    services = models.ManyToManyField(ClinicService, related_name='packages')
+    
+    # Pricing
+    regular_price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        help_text="السعر العادي (مجموع الخدمات)"
+    )
+    package_price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        help_text="سعر الباقة (مخفض)"
+    )
+    savings_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        help_text="قيمة التوفير"
+    )
+    
+    # Validity
+    valid_from = models.DateField(blank=True, null=True)
+    valid_until = models.DateField(blank=True, null=True)
+    
+    is_active = models.BooleanField(default=True)
+    is_featured = models.BooleanField(default=False)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = "باقة خدمات"
+        verbose_name_plural = "باقات الخدمات"
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.name} - {self.clinic.name}"
+    
+    def save(self, *args, **kwargs):
+        """Auto-calculate savings amount"""
+        if self.regular_price and self.package_price:
+            self.savings_amount = self.regular_price - self.package_price
+        super().save(*args, **kwargs)
+    
+    @property
+    def savings_percentage(self):
+        """Calculate savings percentage"""
+        if self.regular_price and self.regular_price > 0:
+            return round((self.savings_amount / self.regular_price) * 100, 1)
+        return 0
+
+
 class ClinicPromotion(models.Model):
+
     """العروض الموسمية وباقات الخدمات"""
 
     PROMOTION_TYPE_CHOICES = [

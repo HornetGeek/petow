@@ -9,6 +9,9 @@ from .views import (
     ClinicSettingsView,
     ClinicAppointmentViewSet,
     ClinicServiceViewSet,
+    ClinicProductViewSet,
+    ServicePricingTierViewSet,
+    ServicePackageViewSet,
     ClinicPromotionViewSet,
     ClinicMessageViewSet,
     ClinicMessageSendPushView,
@@ -23,11 +26,15 @@ from .views import (
     OwnerLookupView,
     PublicUserPetsView,
     PrepareInviteView,
+    PublicStorefrontView,
 )
 
 router = DefaultRouter()
 router.register(r'appointments', ClinicAppointmentViewSet, basename='clinic-appointments')
 router.register(r'services', ClinicServiceViewSet, basename='clinic-services')
+router.register(r'products', ClinicProductViewSet, basename='clinic-products')
+router.register(r'service-tiers', ServicePricingTierViewSet, basename='service-tiers')
+router.register(r'service-packages', ServicePackageViewSet, basename='service-packages')
 router.register(r'promotions', ClinicPromotionViewSet, basename='clinic-promotions')
 router.register(r'messages', ClinicMessageViewSet, basename='clinic-messages')
 router.register(r'patients', ClinicPatientViewSet, basename='clinic-patients')
@@ -38,6 +45,7 @@ urlpatterns = [
     path('dashboard/', ClinicDashboardOverviewView.as_view(), name='clinic-dashboard'),
     path('clients/', ClinicClientsView.as_view(), name='clinic-clients'),
     path('settings/', ClinicSettingsView.as_view(), name='clinic-settings'),
+    path('storefront/<int:clinic_id>/', PublicStorefrontView.as_view(), name='clinic-storefront'),
     path('veterinarians/<int:pk>/', VeterinariansView.as_view(), name='clinic-veterinarian-detail'),
     path('veterinarians/', VeterinariansView.as_view(), name='clinic-veterinarians'),
     path('recipient-groups/', ClinicRecipientGroupsView.as_view(), name='clinic-recipient-groups'),

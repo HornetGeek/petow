@@ -7,6 +7,9 @@ from .models import (
     Clinic,
     ClinicStaff,
     ClinicService,
+    ClinicProduct,
+    ServicePricingTier,
+    ServicePackage,
     ClinicPromotion,
     ClinicMessage,
     ClinicClientRecord,
@@ -65,6 +68,16 @@ class ClinicSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'is_active', 'created_at', 'updated_at', 'logo']
 
 
+class ClinicPublicSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Clinic
+        fields = [
+            'id', 'name', 'description', 'address', 'phone',
+            'email', 'website', 'logo', 'opening_hours', 'services'
+        ]
+        read_only_fields = fields
+
+
 class ClinicStaffSerializer(serializers.ModelSerializer):
     user_full_name = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source='user.email', read_only=True)
@@ -111,14 +124,126 @@ class VeterinarianSerializer(serializers.ModelSerializer):
         return "V"
 
 
+class ServicePricingTierSerializer(serializers.ModelSerializer):
+    """Serializer for service pricing tiers"""
+    tier_size_display = serializers.CharField(source='get_tier_size_display', read_only=True)
+    
+    class Meta:
+        model = ServicePricingTier
+        fields = [
+            'id', 'service', 'tier_name', 'tier_size', 'tier_size_display',
+            'weight_range', 'price', 'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'service', 'tier_size_display', 'created_at', 'updated_at']
+
+
 class ClinicServiceSerializer(serializers.ModelSerializer):
+    """Enhanced service serializer with pet types and tiered pricing"""
+    pricing_tiers = ServicePricingTierSerializer(many=True, read_only=True)
+    price_range = serializers.SerializerMethodField()
+    pet_type_display = serializers.SerializerMethodField()
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    
     class Meta:
         model = ClinicService
         fields = [
-            'id', 'clinic', 'name', 'description', 'category', 'price',
-            'duration_minutes', 'is_active', 'highlight', 'created_at', 'updated_at'
+            'id', 'clinic', 'name', 'description', 'category', 'category_display',
+            'applicable_pet_types', 'pet_type_display',
+            'base_price', 'has_tiered_pricing', 'pricing_tiers', 'price_range',
+            'duration_minutes', 'requires_appointment',
+            'is_active', 'is_featured', 'display_order',
+            'service_icon', 'service_image', 
+            'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'clinic', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'clinic', 'pricing_tiers', 'price_range', 
+                           'category_display', 'pet_type_display', 'created_at', 'updated_at']
+    
+    def get_price_range(self, obj):
+        """Get price range for display"""
+        return obj.price_range
+    
+    def get_pet_type_display(self, obj):
+        """Get human-readable pet types"""
+        return obj.pet_type_display
+    
+    def validate_applicable_pet_types(self, value):
+        """Ensure at least one pet type is selected"""
+        if not value or len(value) == 0:
+            raise serializers.ValidationError("يجب اختيار نوع حيوان واحد على الأقل")
+        
+        # Ensure all values are valid
+        valid_types = [choice[0] for choice in ClinicService.PET_TYPE_CHOICES]
+        for pet_type in value:
+            if pet_type not in valid_types:
+                raise serializers.ValidationError(f"نوع الحيوان غير صالح: {pet_type}")
+        
+        return value
+
+
+class ClinicProductSerializer(serializers.ModelSerializer):
+    """Serializer for clinic storefront products"""
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClinicProduct
+        fields = [
+            'id', 'clinic', 'name', 'description', 'category', 'category_display',
+            'price', 'cost_price', 'stock_quantity', 'sku', 'low_stock_threshold',
+            'is_active', 'images', 'image',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'clinic', 'category_display', 'image', 'created_at', 'updated_at']
+
+    def get_image(self, obj):
+        if isinstance(obj.images, list) and obj.images:
+            return obj.images[0]
+        return None
+
+
+class ServicePackageSerializer(serializers.ModelSerializer):
+    """Serializer for service packages with discounts"""
+    services = ClinicServiceSerializer(many=True, read_only=True)
+    service_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        write_only=True,
+        required=False
+    )
+    savings_percentage = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = ServicePackage
+        fields = [
+            'id', 'clinic', 'name', 'description', 
+            'services', 'service_ids',
+            'regular_price', 'package_price', 'savings_amount', 'savings_percentage',
+            'valid_from', 'valid_until',
+            'is_active', 'is_featured',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'clinic', 'savings_amount', 'savings_percentage', 'created_at', 'updated_at']
+    
+    def get_savings_percentage(self, obj):
+        """Get savings percentage"""
+        return obj.savings_percentage
+    
+    def create(self, validated_data):
+        service_ids = validated_data.pop('service_ids', [])
+        package = ServicePackage.objects.create(**validated_data)
+        if service_ids:
+            package.services.set(service_ids)
+        return package
+    
+    def update(self, instance, validated_data):
+        service_ids = validated_data.pop('service_ids', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        
+        if service_ids is not None:
+            instance.services.set(service_ids)
+        
+        return instance
 
 
 class ClinicPromotionSerializer(serializers.ModelSerializer):
