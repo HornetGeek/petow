@@ -4,6 +4,9 @@ from .models import (
     Clinic,
     ClinicStaff,
     ClinicService,
+    ClinicProduct,
+    ServicePricingTier,
+    ServicePackage,
     ClinicPromotion,
     ClinicMessage,
     ClinicClientRecord,
@@ -28,11 +31,74 @@ class ClinicAdmin(admin.ModelAdmin):
     inlines = [ClinicStaffInline]
 
 
+class ServicePricingTierInline(admin.TabularInline):
+    model = ServicePricingTier
+    extra = 0
+    fields = ('tier_size', 'tier_name', 'price', 'weight_range', 'is_active')
+
+
 @admin.register(ClinicService)
 class ClinicServiceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clinic', 'category', 'price', 'is_active', 'highlight')
-    list_filter = ('clinic', 'category', 'is_active', 'highlight')
+    list_display = ('name', 'clinic', 'category', 'base_price', 'has_tiered_pricing', 'is_active', 'is_featured')
+    list_filter = ('clinic', 'category', 'is_active', 'is_featured', 'has_tiered_pricing')
     search_fields = ('name', 'clinic__name')
+    inlines = [ServicePricingTierInline]
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('clinic', 'name', 'description', 'category', 'service_icon')
+        }),
+        ('Pet Types', {
+            'fields': ('applicable_pet_types',)
+        }),
+        ('Pricing', {
+            'fields': ('base_price', 'has_tiered_pricing')
+        }),
+        ('Details', {
+            'fields': ('duration_minutes', 'requires_appointment')
+        }),
+        ('Visibility', {
+            'fields': ('is_active', 'is_featured', 'display_order')
+        }),
+    )
+
+
+@admin.register(ClinicProduct)
+class ClinicProductAdmin(admin.ModelAdmin):
+    list_display = ('name', 'clinic', 'category', 'price', 'stock_quantity', 'is_active', 'updated_at')
+    list_filter = ('clinic', 'category', 'is_active')
+    search_fields = ('name', 'sku', 'clinic__name')
+
+
+@admin.register(ServicePricingTier)
+class ServicePricingTierAdmin(admin.ModelAdmin):
+    list_display = ('service', 'tier_size', 'price', 'weight_range', 'is_active')
+    list_filter = ('tier_size', 'is_active')
+    search_fields = ('service__name',)
+
+
+@admin.register(ServicePackage)
+class ServicePackageAdmin(admin.ModelAdmin):
+    list_display = ('name', 'clinic', 'package_price', 'regular_price', 'savings_amount', 'is_active', 'is_featured')
+    list_filter = ('clinic', 'is_active', 'is_featured')
+    search_fields = ('name', 'clinic__name')
+    filter_horizontal = ('services',)
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('clinic', 'name', 'description')
+        }),
+        ('Services', {
+            'fields': ('services',)
+        }),
+        ('Pricing', {
+            'fields': ('regular_price', 'package_price', 'savings_amount')
+        }),
+        ('Validity', {
+            'fields': ('valid_from', 'valid_until')
+        }),
+        ('Status', {
+            'fields': ('is_active', 'is_featured')
+        }),
+    )
 
 
 @admin.register(ClinicPromotion)

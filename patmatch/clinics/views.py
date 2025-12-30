@@ -22,6 +22,9 @@ from accounts.models import User
 from .models import (
     Clinic,
     ClinicService,
+    ClinicProduct,
+    ServicePricingTier,
+    ServicePackage,
     ClinicPromotion,
     ClinicMessage,
     VeterinaryAppointment,
@@ -36,7 +39,11 @@ from pets.notifications import create_notification, _send_push_notification
 from .permissions import IsClinicStaff
 from .serializers import (
     ClinicSerializer,
+    ClinicPublicSerializer,
     ClinicServiceSerializer,
+    ClinicProductSerializer,
+    ServicePricingTierSerializer,
+    ServicePackageSerializer,
     ClinicPromotionSerializer,
     ClinicMessageSerializer,
     ClinicAppointmentSerializer,
@@ -427,9 +434,26 @@ class ClinicSettingsView(ClinicContextMixin, generics.RetrieveUpdateAPIView):
     def get_object(self):
         return self.get_clinic()
 
+class PublicStorefrontView(APIView):
+    permission_classes = [AllowAny]
 
+    def get(self, request, clinic_id):
+        clinic = get_object_or_404(Clinic, id=clinic_id, is_active=True)
 
+        products = clinic.products.filter(is_active=True).order_by('-updated_at')
+        services = (
+            clinic.services_list
+            .filter(is_active=True)
+            .prefetch_related('pricing_tiers')
+            .order_by('display_order', 'name')
+        )
 
+        payload = {
+            'clinic': ClinicPublicSerializer(clinic, context={'request': request}).data,
+            'products': ClinicProductSerializer(products, many=True, context={'request': request}).data,
+            'services': ClinicServiceSerializer(services, many=True, context={'request': request}).data,
+        }
+        return Response(payload)
 
 class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     serializer_class = ClinicPatientRecordSerializer
@@ -484,45 +508,133 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
 
 class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    """ViewSet for managing clinic services"""
     serializer_class = ClinicServiceSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
 
     def get_queryset(self):
         clinic = self.get_clinic()
-        queryset = clinic.services_list.all().order_by('-highlight', 'name')
+        queryset = clinic.services_list.all().prefetch_related('pricing_tiers').order_by('display_order', '-is_featured', 'name')
+        
+        # Filter by active status
         is_active = self.request.query_params.get('is_active')
         if is_active is not None:
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
+        
+        # Filter by category
+        category = self.request.query_params.get('category')
+        if category:
+            queryset = queryset.filter(category=category)
+        
+        # Filter by pet type
+        pet_type = self.request.query_params.get('pet_type')
+        if pet_type:
+            queryset = queryset.filter(applicable_pet_types__contains=[pet_type])
+        
+        # Filter by featured status
+        is_featured = self.request.query_params.get('is_featured')
+        if is_featured is not None:
+            queryset = queryset.filter(is_featured=is_featured.lower() == 'true')
+        
+        # Search by name or description
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+        
         return queryset
 
     def perform_create(self, serializer):
         clinic = self.get_clinic()
-        patient = serializer.validated_data.get('clinic_patient')
-
-        if patient and patient.clinic_id != clinic.id:
-            raise ValidationError({'clinic_patient': 'Patient does not belong to this clinic'})
-
-        message = serializer.save(clinic=clinic)
-        linked_patient = message.clinic_patient
-
-        if linked_patient and linked_patient.linked_user:
-            ensure_clinic_chat_room(linked_patient, message=message, staff=self.request.user)
-        elif linked_patient and not linked_patient.linked_user:
-            # لا يمكن إنشاء محادثة كاملة بدون مستخدم مرتبط بالمريض
-            pass
+        serializer.save(clinic=clinic)
 
     def perform_update(self, serializer):
         clinic = self.get_clinic()
-        patient = serializer.validated_data.get('clinic_patient')
+        serializer.save(clinic=clinic)
 
-        if patient and patient.clinic_id != clinic.id:
-            raise ValidationError({'clinic_patient': 'Patient does not belong to this clinic'})
 
-        message = serializer.save(clinic=clinic)
-        updated_patient = message.clinic_patient
+class ClinicProductViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    """ViewSet for managing clinic products"""
+    serializer_class = ClinicProductSerializer
+    permission_classes = [IsAuthenticated, IsClinicStaff]
 
-        if updated_patient and updated_patient.linked_user:
-            ensure_clinic_chat_room(updated_patient, message=message, staff=self.request.user)
+    def get_queryset(self):
+        clinic = self.get_clinic()
+        queryset = clinic.products.all().order_by('-updated_at')
+
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        category = self.request.query_params.get('category')
+        if category:
+            queryset = queryset.filter(category=category)
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search) | Q(sku__icontains=search)
+            )
+
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(clinic=self.get_clinic())
+
+    def perform_update(self, serializer):
+        serializer.save(clinic=self.get_clinic())
+
+
+
+
+class ServicePricingTierViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    """ViewSet for managing service pricing tiers"""
+    serializer_class = ServicePricingTierSerializer
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def get_queryset(self):
+        clinic = self.get_clinic()
+        # Filter tiers by services belonging to this clinic
+        queryset = ServicePricingTier.objects.filter(service__clinic=clinic).select_related('service')
+        
+        service_id = self.request.query_params.get('service_id')
+        if service_id:
+            queryset = queryset.filter(service_id=service_id)
+            
+        return queryset
+
+
+class ServicePackageViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    """ViewSet for managing service packages"""
+    serializer_class = ServicePackageSerializer
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def get_queryset(self):
+        clinic = self.get_clinic()
+        queryset = clinic.service_packages.all().prefetch_related('services').order_by('-is_featured', '-created_at')
+        
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+            
+        is_featured = self.request.query_params.get('is_featured')
+        if is_featured is not None:
+            queryset = queryset.filter(is_featured=is_featured.lower() == 'true')
+            
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+            
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(clinic=self.get_clinic())
+
+    def perform_update(self, serializer):
+        serializer.save(clinic=self.get_clinic())
 
 
 class ClinicPromotionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
