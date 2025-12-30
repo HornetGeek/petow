@@ -8,6 +8,9 @@ from .models import (
     ClinicStaff,
     ClinicService,
     ClinicProduct,
+    StorefrontOrder,
+    StorefrontOrderItem,
+    StorefrontBooking,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -199,6 +202,66 @@ class ClinicProductSerializer(serializers.ModelSerializer):
         if isinstance(obj.images, list) and obj.images:
             return obj.images[0]
         return None
+
+
+class StorefrontOrderItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StorefrontOrderItem
+        fields = [
+            'id', 'product', 'product_name', 'product_image',
+            'quantity', 'unit_price', 'line_total'
+        ]
+        read_only_fields = fields
+
+    def get_product_image(self, obj):
+        if isinstance(obj.product.images, list) and obj.product.images:
+            return obj.product.images[0]
+        return None
+
+
+class StorefrontOrderItemCreateSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+
+
+class StorefrontOrderSerializer(serializers.ModelSerializer):
+    items = StorefrontOrderItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = StorefrontOrder
+        fields = [
+            'public_id', 'clinic', 'customer_name', 'customer_phone', 'customer_email',
+            'delivery_address', 'notes', 'status', 'total_amount', 'created_at', 'items'
+        ]
+        read_only_fields = ['public_id', 'clinic', 'status', 'total_amount', 'created_at', 'items']
+
+
+class StorefrontBookingSerializer(serializers.ModelSerializer):
+    service_name = serializers.CharField(source='service.name', read_only=True)
+
+    class Meta:
+        model = StorefrontBooking
+        fields = [
+            'public_id', 'clinic', 'service', 'service_name',
+            'customer_name', 'customer_phone', 'customer_email',
+            'pet_name', 'preferred_date', 'preferred_time',
+            'notes', 'status', 'quoted_price', 'created_at'
+        ]
+        read_only_fields = ['public_id', 'clinic', 'status', 'quoted_price', 'created_at', 'service_name']
+
+
+class StorefrontBookingCreateSerializer(serializers.Serializer):
+    service_id = serializers.IntegerField()
+    customer_name = serializers.CharField()
+    customer_phone = serializers.CharField()
+    customer_email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
+    pet_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    preferred_date = serializers.DateField(required=False, allow_null=True)
+    preferred_time = serializers.TimeField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class ServicePackageSerializer(serializers.ModelSerializer):

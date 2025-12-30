@@ -5,6 +5,9 @@ from .models import (
     ClinicStaff,
     ClinicService,
     ClinicProduct,
+    StorefrontOrder,
+    StorefrontOrderItem,
+    StorefrontBooking,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -67,6 +70,29 @@ class ClinicProductAdmin(admin.ModelAdmin):
     list_display = ('name', 'clinic', 'category', 'price', 'stock_quantity', 'is_active', 'updated_at')
     list_filter = ('clinic', 'category', 'is_active')
     search_fields = ('name', 'sku', 'clinic__name')
+
+
+class StorefrontOrderItemInline(admin.TabularInline):
+    model = StorefrontOrderItem
+    extra = 0
+    readonly_fields = ('product', 'quantity', 'unit_price', 'line_total')
+
+
+@admin.register(StorefrontOrder)
+class StorefrontOrderAdmin(admin.ModelAdmin):
+    list_display = ('public_id', 'clinic', 'customer_name', 'customer_phone', 'status', 'total_amount', 'created_at')
+    list_filter = ('clinic', 'status', 'created_at')
+    search_fields = ('public_id', 'customer_name', 'customer_phone')
+    inlines = [StorefrontOrderItemInline]
+    readonly_fields = ('public_id', 'total_amount', 'created_at')
+
+
+@admin.register(StorefrontBooking)
+class StorefrontBookingAdmin(admin.ModelAdmin):
+    list_display = ('public_id', 'clinic', 'service', 'customer_name', 'customer_phone', 'status', 'created_at')
+    list_filter = ('clinic', 'status', 'created_at')
+    search_fields = ('public_id', 'customer_name', 'customer_phone')
+    readonly_fields = ('public_id', 'quoted_price', 'created_at')
 
 
 @admin.register(ServicePricingTier)

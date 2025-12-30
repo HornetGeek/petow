@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from django.contrib.auth import authenticate
 from django.db.models import Count, Q, Sum
-from django.db import models
+from django.db import models, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -23,6 +23,9 @@ from .models import (
     Clinic,
     ClinicService,
     ClinicProduct,
+    StorefrontOrder,
+    StorefrontOrderItem,
+    StorefrontBooking,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -42,6 +45,10 @@ from .serializers import (
     ClinicPublicSerializer,
     ClinicServiceSerializer,
     ClinicProductSerializer,
+    StorefrontOrderSerializer,
+    StorefrontOrderItemCreateSerializer,
+    StorefrontBookingSerializer,
+    StorefrontBookingCreateSerializer,
     ServicePricingTierSerializer,
     ServicePackageSerializer,
     ClinicPromotionSerializer,
@@ -454,6 +461,99 @@ class PublicStorefrontView(APIView):
             'services': ClinicServiceSerializer(services, many=True, context={'request': request}).data,
         }
         return Response(payload)
+
+class PublicStorefrontOrderView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, clinic_id):
+        clinic = get_object_or_404(Clinic, id=clinic_id, is_active=True)
+
+        items_serializer = StorefrontOrderItemCreateSerializer(data=request.data.get('items', []), many=True)
+        items_serializer.is_valid(raise_exception=True)
+        items = items_serializer.validated_data
+
+        if not items:
+            raise ValidationError({'items': ['يجب إضافة منتج واحد على الأقل']})
+
+        customer_name = request.data.get('customer_name') or request.data.get('name')
+        customer_phone = request.data.get('customer_phone') or request.data.get('phone')
+        customer_email = request.data.get('customer_email') or request.data.get('email')
+        delivery_address = request.data.get('delivery_address') or request.data.get('address')
+        notes = request.data.get('notes')
+
+        if not customer_name or not customer_phone:
+            raise ValidationError({'detail': 'الاسم ورقم الهاتف مطلوبان'})
+
+        with transaction.atomic():
+            order = StorefrontOrder.objects.create(
+                clinic=clinic,
+                customer_name=customer_name,
+                customer_phone=customer_phone,
+                customer_email=customer_email,
+                delivery_address=delivery_address,
+                notes=notes,
+                status='new',
+            )
+
+            total = Decimal('0')
+            for item in items:
+                product = get_object_or_404(
+                    ClinicProduct,
+                    id=item['product_id'],
+                    clinic=clinic,
+                    is_active=True
+                )
+                quantity = item['quantity']
+                unit_price = Decimal(str(product.price))
+                line_total = unit_price * quantity
+
+                StorefrontOrderItem.objects.create(
+                    order=order,
+                    product=product,
+                    quantity=quantity,
+                    unit_price=unit_price,
+                    line_total=line_total
+                )
+                total += line_total
+
+            order.total_amount = total
+            order.save(update_fields=['total_amount'])
+
+        return Response(StorefrontOrderSerializer(order).data, status=status.HTTP_201_CREATED)
+
+
+class PublicStorefrontBookingView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request, clinic_id):
+        clinic = get_object_or_404(Clinic, id=clinic_id, is_active=True)
+
+        serializer = StorefrontBookingCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        service = get_object_or_404(
+            ClinicService,
+            id=data['service_id'],
+            clinic=clinic,
+            is_active=True
+        )
+
+        booking = StorefrontBooking.objects.create(
+            clinic=clinic,
+            service=service,
+            customer_name=data['customer_name'],
+            customer_phone=data['customer_phone'],
+            customer_email=data.get('customer_email'),
+            pet_name=data.get('pet_name'),
+            preferred_date=data.get('preferred_date'),
+            preferred_time=data.get('preferred_time'),
+            notes=data.get('notes'),
+            status='new',
+            quoted_price=service.base_price,
+        )
+
+        return Response(StorefrontBookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     serializer_class = ClinicPatientRecordSerializer

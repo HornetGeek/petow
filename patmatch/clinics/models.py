@@ -219,6 +219,86 @@ class ClinicProduct(models.Model):
         return f"{self.name} - {self.clinic.name}"
 
 
+class StorefrontOrder(models.Model):
+    """طلبات المتجر الإلكتروني"""
+
+    STATUS_CHOICES = [
+        ('new', 'جديد'),
+        ('confirmed', 'مؤكد'),
+        ('completed', 'مكتمل'),
+        ('cancelled', 'ملغي'),
+    ]
+
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='storefront_orders')
+    customer_name = models.CharField(max_length=150)
+    customer_phone = models.CharField(max_length=30)
+    customer_email = models.EmailField(blank=True, null=True)
+    delivery_address = models.TextField(blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "طلب متجر"
+        verbose_name_plural = "طلبات المتجر"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"طلب {self.public_id} - {self.clinic.name}"
+
+
+class StorefrontOrderItem(models.Model):
+    """عناصر طلب المتجر"""
+
+    order = models.ForeignKey(StorefrontOrder, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(ClinicProduct, on_delete=models.CASCADE, related_name='order_items')
+    quantity = models.PositiveIntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    line_total = models.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        verbose_name = "عنصر طلب"
+        verbose_name_plural = "عناصر الطلب"
+
+    def __str__(self):
+        return f"{self.product.name} x{self.quantity}"
+
+
+class StorefrontBooking(models.Model):
+    """حجوزات خدمات المتجر الإلكتروني"""
+
+    STATUS_CHOICES = [
+        ('new', 'جديد'),
+        ('confirmed', 'مؤكد'),
+        ('completed', 'مكتمل'),
+        ('cancelled', 'ملغي'),
+    ]
+
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='storefront_bookings')
+    service = models.ForeignKey(ClinicService, on_delete=models.CASCADE, related_name='bookings')
+    customer_name = models.CharField(max_length=150)
+    customer_phone = models.CharField(max_length=30)
+    customer_email = models.EmailField(blank=True, null=True)
+    pet_name = models.CharField(max_length=120, blank=True, null=True)
+    preferred_date = models.DateField(blank=True, null=True)
+    preferred_time = models.TimeField(blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
+    quoted_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حجز متجر"
+        verbose_name_plural = "حجوزات المتجر"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"حجز {self.public_id} - {self.clinic.name}"
+
+
 class ServicePricingTier(models.Model):
     """تسعير متدرج حسب حجم/وزن الحيوان"""
     
