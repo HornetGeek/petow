@@ -253,6 +253,25 @@ class StorefrontBookingSerializer(serializers.ModelSerializer):
         read_only_fields = ['public_id', 'clinic', 'status', 'quoted_price', 'created_at', 'service_name']
 
 
+class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
+    service_name = serializers.CharField(source='service.name', read_only=True)
+
+    class Meta:
+        model = StorefrontBooking
+        fields = [
+            'public_id', 'clinic', 'service', 'service_name',
+            'customer_name', 'customer_phone', 'customer_email',
+            'pet_name', 'preferred_date', 'preferred_time',
+            'notes', 'status', 'quoted_price', 'created_at'
+        ]
+        read_only_fields = [
+            'public_id', 'clinic', 'service', 'service_name',
+            'customer_name', 'customer_phone', 'customer_email',
+            'pet_name', 'preferred_date', 'preferred_time',
+            'notes', 'quoted_price', 'created_at'
+        ]
+
+
 class StorefrontBookingCreateSerializer(serializers.Serializer):
     service_id = serializers.IntegerField()
     customer_name = serializers.CharField()

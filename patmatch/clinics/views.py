@@ -48,6 +48,7 @@ from .serializers import (
     StorefrontOrderSerializer,
     StorefrontOrderItemCreateSerializer,
     StorefrontBookingSerializer,
+    StorefrontBookingUpdateSerializer,
     StorefrontBookingCreateSerializer,
     ServicePricingTierSerializer,
     ServicePackageSerializer,
@@ -66,6 +67,14 @@ from .invite_service import claim_invites_for_user, respond_to_invite, _build_ph
 
 APPOINTMENT_TYPE_LABELS = dict(VeterinaryAppointment.APPOINTMENT_TYPE_CHOICES)
 APPOINTMENT_STATUS_LABELS = dict(VeterinaryAppointment.STATUS_CHOICES)
+SERVICE_CATEGORY_APPOINTMENT_TYPE = {
+    'general': 'checkup',
+    'vaccination': 'vaccination',
+    'surgery': 'surgery',
+    'grooming': 'grooming',
+    'dental': 'dental',
+    'emergency': 'emergency',
+}
 
 
 def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
@@ -553,6 +562,79 @@ class PublicStorefrontBookingView(APIView):
             quoted_price=service.base_price,
         )
 
+        preferred_date = data.get('preferred_date')
+        preferred_time = data.get('preferred_time')
+        customer_phone = data.get('customer_phone')
+        customer_email = data.get('customer_email')
+        pet_name = data.get('pet_name')
+
+        if preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
+            appointment_owner = None
+            appointment_pet = None
+
+            contact_query = Q()
+            if customer_phone:
+                contact_query |= Q(owner__phone__iexact=customer_phone)
+            if customer_email:
+                contact_query |= Q(owner__email__iexact=customer_email)
+
+            patient_queryset = (
+                ClinicPatientRecord.objects
+                .filter(clinic=clinic)
+                .filter(contact_query)
+                .filter(name__iexact=pet_name)
+            )
+
+            patient = (
+                patient_queryset
+                .select_related('linked_user', 'linked_pet', 'owner')
+                .filter(linked_user__isnull=False, linked_pet__isnull=False)
+                .first()
+            )
+
+            if patient:
+                appointment_owner = patient.linked_user
+                appointment_pet = patient.linked_pet
+            else:
+                owner_queryset = User.objects.filter(user_type='pet_owner')
+                if customer_phone:
+                    appointment_owner = owner_queryset.filter(phone=customer_phone).first()
+                if not appointment_owner and customer_email:
+                    appointment_owner = owner_queryset.filter(email__iexact=customer_email).first()
+
+                if appointment_owner:
+                    appointment_pet = Pet.objects.filter(owner=appointment_owner, name__iexact=pet_name).first()
+
+            if appointment_owner and appointment_pet:
+                appointment_type = SERVICE_CATEGORY_APPOINTMENT_TYPE.get(service.category, 'other')
+
+                existing = VeterinaryAppointment.objects.filter(
+                    clinic=clinic,
+                    pet=appointment_pet,
+                    owner=appointment_owner,
+                    scheduled_date=preferred_date,
+                    scheduled_time=preferred_time,
+                ).exists()
+
+                if not existing:
+                    VeterinaryAppointment.objects.create(
+                        clinic=clinic,
+                        pet=appointment_pet,
+                        owner=appointment_owner,
+                        appointment_type=appointment_type,
+                        scheduled_date=preferred_date,
+                        scheduled_time=preferred_time,
+                        duration_minutes=service.duration_minutes or 30,
+                        reason=f"حجز متجر: {service.name}",
+                        notes=data.get('notes') or '',
+                        status='scheduled',
+                        payment_status='unpaid',
+                        service_fee=service.base_price,
+                    )
+
+                booking.status = 'confirmed'
+                booking.save(update_fields=['status'])
+
         return Response(StorefrontBookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -685,6 +767,36 @@ class ClinicProductViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         serializer.save(clinic=self.get_clinic())
 
+
+class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    """ViewSet for managing storefront bookings in the clinic dashboard"""
+    serializer_class = StorefrontBookingSerializer
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+    http_method_names = ['get', 'patch', 'head', 'options']
+    lookup_field = 'public_id'
+
+    def get_queryset(self):
+        clinic = self.get_clinic()
+        queryset = StorefrontBooking.objects.filter(clinic=clinic).select_related('service').order_by('-created_at')
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(customer_name__icontains=search)
+                | Q(customer_phone__icontains=search)
+                | Q(service__name__icontains=search)
+            )
+
+        return queryset
+
+    def get_serializer_class(self):
+        if self.action in ['update', 'partial_update']:
+            return StorefrontBookingUpdateSerializer
+        return StorefrontBookingSerializer
 
 
 
