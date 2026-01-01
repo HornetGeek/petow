@@ -65,7 +65,7 @@ class ClinicSerializer(serializers.ModelSerializer):
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'emergency_phone',
-            'email', 'website', 'logo', 'opening_hours', 'services',
+            'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'is_active', 'created_at', 'updated_at', 'logo']
@@ -76,7 +76,7 @@ class ClinicPublicSerializer(serializers.ModelSerializer):
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone',
-            'email', 'website', 'logo', 'opening_hours', 'services'
+            'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color'
         ]
         read_only_fields = fields
 
