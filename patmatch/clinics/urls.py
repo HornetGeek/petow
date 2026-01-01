@@ -10,6 +10,7 @@ from .views import (
     ClinicAppointmentViewSet,
     ClinicServiceViewSet,
     ClinicProductViewSet,
+    ClinicStorefrontBookingViewSet,
     ServicePricingTierViewSet,
     ServicePackageViewSet,
     ClinicPromotionViewSet,
@@ -35,6 +36,7 @@ router = DefaultRouter()
 router.register(r'appointments', ClinicAppointmentViewSet, basename='clinic-appointments')
 router.register(r'services', ClinicServiceViewSet, basename='clinic-services')
 router.register(r'products', ClinicProductViewSet, basename='clinic-products')
+router.register(r'storefront-bookings', ClinicStorefrontBookingViewSet, basename='clinic-storefront-bookings')
 router.register(r'service-tiers', ServicePricingTierViewSet, basename='service-tiers')
 router.register(r'service-packages', ServicePackageViewSet, basename='service-packages')
 router.register(r'promotions', ClinicPromotionViewSet, basename='clinic-promotions')
