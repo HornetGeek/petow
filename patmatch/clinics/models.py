@@ -24,6 +24,7 @@ class Clinic(models.Model):
     email = models.EmailField(blank=True, null=True)
     website = models.URLField(blank=True, null=True)
     logo = models.ImageField(upload_to='clinics/logos/', blank=True, null=True)
+    storefront_primary_color = models.CharField(max_length=20, blank=True, null=True)
 
     # ساعات العمل
     opening_hours = models.TextField(help_text="ساعات العمل")
