@@ -43,6 +43,7 @@ from .permissions import IsClinicStaff
 from .serializers import (
     ClinicSerializer,
     ClinicPublicSerializer,
+    ClinicListSerializer,
     ClinicServiceSerializer,
     ClinicProductSerializer,
     StorefrontOrderSerializer,
@@ -470,6 +471,21 @@ class PublicStorefrontView(APIView):
             'services': ClinicServiceSerializer(services, many=True, context={'request': request}).data,
         }
         return Response(payload)
+
+
+class PublicClinicListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        clinics = (
+            Clinic.objects
+            .filter(is_active=True)
+            .annotate(staff_count=Count('staff_members', distinct=True))
+            .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
+            .distinct()
+        )
+        serializer = ClinicListSerializer(clinics, many=True, context={'request': request})
+        return Response(serializer.data)
 
 class PublicStorefrontOrderView(APIView):
     permission_classes = [AllowAny]

@@ -81,6 +81,25 @@ class ClinicPublicSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ClinicListSerializer(serializers.ModelSerializer):
+    has_dashboard = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Clinic
+        fields = [
+            'id', 'name', 'description', 'address', 'phone', 'email', 'website',
+            'logo', 'opening_hours', 'services', 'storefront_primary_color',
+            'latitude', 'longitude', 'is_active', 'has_dashboard'
+        ]
+        read_only_fields = fields
+
+    def get_has_dashboard(self, obj):
+        staff_count = getattr(obj, 'staff_count', None)
+        if staff_count is None:
+            staff_count = obj.staff_members.count()
+        return bool(obj.owner_id or staff_count)
+
+
 class ClinicStaffSerializer(serializers.ModelSerializer):
     user_full_name = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source='user.email', read_only=True)
