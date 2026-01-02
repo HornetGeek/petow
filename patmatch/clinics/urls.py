@@ -30,6 +30,7 @@ from .views import (
     PublicStorefrontView,
     PublicStorefrontOrderView,
     PublicStorefrontBookingView,
+    PublicClinicListView,
 )
 
 router = DefaultRouter()
@@ -52,6 +53,7 @@ urlpatterns = [
     path('storefront/<int:clinic_id>/', PublicStorefrontView.as_view(), name='clinic-storefront'),
     path('storefront/<int:clinic_id>/orders/', PublicStorefrontOrderView.as_view(), name='clinic-storefront-orders'),
     path('storefront/<int:clinic_id>/bookings/', PublicStorefrontBookingView.as_view(), name='clinic-storefront-bookings'),
+    path('clinic/', PublicClinicListView.as_view(), name='clinic-list-public'),
     path('veterinarians/<int:pk>/', VeterinariansView.as_view(), name='clinic-veterinarian-detail'),
     path('veterinarians/', VeterinariansView.as_view(), name='clinic-veterinarians'),
     path('recipient-groups/', ClinicRecipientGroupsView.as_view(), name='clinic-recipient-groups'),
