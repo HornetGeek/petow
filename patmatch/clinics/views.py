@@ -15,6 +15,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from django.conf import settings
 
 from accounts.serializers import UserSerializer
@@ -447,6 +448,7 @@ class ClinicClientsView(ClinicContextMixin, APIView):
 class ClinicSettingsView(ClinicContextMixin, generics.RetrieveUpdateAPIView):
     serializer_class = ClinicSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self):
         return self.get_clinic()
