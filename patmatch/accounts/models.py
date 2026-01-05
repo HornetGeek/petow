@@ -277,3 +277,24 @@ class AccountVerification(models.Model):
         )
         if not ok:
             logger.warning("Verification approval push notification to user %s failed to send", user.id)
+
+
+class MobileAppConfig(models.Model):
+    """Singleton-style config for mobile feature flags."""
+    key = models.CharField(max_length=32, unique=True, default='default')
+    clinic_home_enabled = models.BooleanField(default=True)
+    clinic_map_enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "إعدادات تطبيق الموبايل"
+        verbose_name_plural = "إعدادات تطبيق الموبايل"
+
+    def __str__(self):
+        return "Mobile App Config"
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(key='default')
+        return obj

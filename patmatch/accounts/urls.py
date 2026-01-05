@@ -23,4 +23,5 @@ urlpatterns = [
     # Account verification endpoints
     path('verification/request/', views.submit_account_verification, name='submit_account_verification'),
     path('verification/status/', views.get_verification_status, name='get_verification_status'),
+    path('app-config/', views.get_app_config, name='app_config'),
 ]
