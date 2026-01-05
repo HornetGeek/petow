@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
-from .models import User, PhoneOTP, AccountVerification
+from .models import User, PhoneOTP, AccountVerification, MobileAppConfig
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
@@ -136,3 +136,9 @@ class AccountVerificationAdmin(admin.ModelAdmin):
         
         self.message_user(request, f'تم رفض {count} طلب تحقق')
     reject_verification.short_description = 'رفض الطلبات المحددة'
+
+
+@admin.register(MobileAppConfig)
+class MobileAppConfigAdmin(admin.ModelAdmin):
+    list_display = ('key', 'clinic_home_enabled', 'clinic_map_enabled', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at')

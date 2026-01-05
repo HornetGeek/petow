@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
 from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer, AccountVerificationSerializer, AccountVerificationStatusSerializer
-from .models import User, PhoneOTP, PasswordResetOTP, AccountVerification
+from .models import User, PhoneOTP, PasswordResetOTP, AccountVerification, MobileAppConfig
 from .email_notifications import send_welcome_email, send_password_reset_email
 from django.conf import settings
 import requests
@@ -814,5 +814,24 @@ def get_verification_status(request):
         logger.error(f"Error getting verification status: {str(e)}")
         return Response(
             {'error': 'حدث خطأ أثناء الحصول على حالة التحقق'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_app_config(request):
+    """Public mobile app feature flags."""
+    try:
+        config = MobileAppConfig.get_solo()
+        return Response({
+            'clinic_home_enabled': config.clinic_home_enabled,
+            'clinic_map_enabled': config.clinic_map_enabled,
+            'updated_at': config.updated_at.isoformat() if config.updated_at else None,
+        })
+    except Exception as e:
+        logger.error(f"Error loading mobile app config: {str(e)}")
+        return Response(
+            {'error': 'تعذر تحميل إعدادات التطبيق'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
