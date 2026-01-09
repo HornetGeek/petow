@@ -110,6 +110,14 @@ class ClinicService(models.Model):
         ('rabbits', 'أرانب فقط'),
         ('exotic', 'حيوانات غريبة'),
     ]
+    
+    PRICING_UNIT_CHOICES = [
+        ('per_visit', 'لكل زيارة'),
+        ('per_session', 'لكل جلسة'),
+        ('per_hour', 'لكل ساعة'),
+        ('per_day', 'لكل يوم'),
+        ('per_night', 'لكل ليلة'),
+    ]
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='services_list')
     name = models.CharField(max_length=150)
@@ -122,6 +130,17 @@ class ClinicService(models.Model):
     # Pricing - renamed from 'price' to 'base_price'
     base_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="السعر الأساسي")
     has_tiered_pricing = models.BooleanField(default=False, help_text="هل لديها تسعير متدرج؟")
+    pricing_unit = models.CharField(
+        max_length=20,
+        choices=PRICING_UNIT_CHOICES,
+        default='per_visit',
+        help_text="وحدة التسعير (بالساعة/باليوم/للزيارة)"
+    )
+    min_duration_units = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        help_text="الحد الأدنى لمدة الخدمة بوحدة التسعير (مثال: 1 يوم أو 2 ساعة)"
+    )
     
     # Service Details
     duration_minutes = models.PositiveIntegerField(default=30)
@@ -696,6 +715,17 @@ class ClinicInvite(models.Model):
             if fields_to_update:
                 fields_to_update.append('updated_at')
                 self.patient.save(update_fields=fields_to_update)
+
+                if self.patient.linked_user_id and self.patient.linked_pet_id:
+                    VeterinaryAppointment.objects.filter(
+                        clinic=self.clinic,
+                        clinic_patient=self.patient,
+                        pet__isnull=True,
+                        owner__isnull=True,
+                    ).update(
+                        pet=self.patient.linked_pet,
+                        owner=self.patient.linked_user,
+                    )
                 
         self.save(update_fields=['status', 'accepted_at', 'recipient', 'updated_at'])
 
@@ -735,8 +765,28 @@ class VeterinaryAppointment(models.Model):
         ('refunded', 'مسترد'),
     ]
 
-    pet = models.ForeignKey('pets.Pet', on_delete=models.CASCADE, related_name='vet_appointments')
-    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='vet_appointments')
+    pet = models.ForeignKey(
+        'pets.Pet',
+        on_delete=models.CASCADE,
+        related_name='vet_appointments',
+        blank=True,
+        null=True,
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='vet_appointments',
+        blank=True,
+        null=True,
+    )
+    clinic_patient = models.ForeignKey(
+        ClinicPatientRecord,
+        on_delete=models.SET_NULL,
+        related_name='clinic_appointments',
+        blank=True,
+        null=True,
+        help_text='سجل المريض في لوحة العيادة (للمواعيد غير المرتبطة بالمستخدم بعد)',
+    )
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='appointments')
 
     appointment_type = models.CharField(max_length=30, choices=APPOINTMENT_TYPE_CHOICES, default='checkup')
@@ -761,7 +811,12 @@ class VeterinaryAppointment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"موعد {self.pet.name} - {self.scheduled_date}"
+        pet_name = None
+        if self.pet_id:
+            pet_name = self.pet.name
+        elif self.clinic_patient_id:
+            pet_name = self.clinic_patient.name
+        return f"موعد {pet_name or 'غير معروف'} - {self.scheduled_date}"
 
     class Meta:
         verbose_name = "موعد بيطري"

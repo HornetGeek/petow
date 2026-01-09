@@ -50,14 +50,18 @@ def update_last_visit_when_appointment_completed(sender, instance: VeterinaryApp
         clinic = instance.clinic
         target_date = instance.scheduled_date
 
-        # 1) Prefer an exact linked pet match
-        patient = ClinicPatientRecord.objects.filter(
-            clinic=clinic,
-            linked_pet=instance.pet,
-        ).first()
+        # 1) Prefer explicit clinic patient linkage
+        patient = instance.clinic_patient
 
-        # 2) Fallback by owner (email/phone) and optionally by name
-        if not patient:
+        # 2) Fallback by linked pet
+        if not patient and instance.pet_id:
+            patient = ClinicPatientRecord.objects.filter(
+                clinic=clinic,
+                linked_pet=instance.pet,
+            ).first()
+
+        # 3) Fallback by owner (email/phone) and optionally by name
+        if not patient and instance.owner_id:
             owner_filter = Q()
             owner_email = (instance.owner.email or '').strip()
             owner_phone = (instance.owner.phone or '').strip()
@@ -72,7 +76,8 @@ def update_last_visit_when_appointment_completed(sender, instance: VeterinaryApp
 
             if owner_record:
                 qs = ClinicPatientRecord.objects.filter(clinic=clinic, owner=owner_record)
-                patient = qs.filter(name__iexact=instance.pet.name).first() or qs.first()
+                pet_name = instance.pet.name if instance.pet_id else None
+                patient = qs.filter(name__iexact=pet_name).first() if pet_name else qs.first()
 
         if not patient:
             return

@@ -382,37 +382,67 @@ class ClinicClientsView(ClinicContextMixin, APIView):
 
         for appointment in appointments:
             owner = appointment.owner
+            clinic_patient = appointment.clinic_patient
+            owner_record = clinic_patient.owner if clinic_patient and clinic_patient.owner_id else None
             appointment_dt = datetime.combine(appointment.scheduled_date, appointment.scheduled_time)
             if timezone.is_naive(appointment_dt):
                 appointment_dt = timezone.make_aware(appointment_dt, timezone.get_current_timezone())
 
-            key = ('user', owner.id)
+            if owner:
+                key = ('user', owner.id)
+            elif owner_record:
+                key = ('record', owner_record.id)
+            else:
+                continue
             client_entry = clients_map.get(key)
             if not client_entry:
-                client_entry = {
-                    'id': owner.id,
-                    'full_name': owner.get_full_name() or owner.email,
-                    'email': owner.email,
-                    'phone': owner.phone or '',
-                    'pets': {},
-                    'last_visit': appointment_dt,
-                }
+                if owner:
+                    client_entry = {
+                        'id': owner.id,
+                        'full_name': owner.get_full_name() or owner.email,
+                        'email': owner.email,
+                        'phone': owner.phone or '',
+                        'pets': {},
+                        'last_visit': appointment_dt,
+                    }
+                else:
+                    client_entry = {
+                        'id': owner_record.id,
+                        'full_name': owner_record.full_name,
+                        'email': owner_record.email or '',
+                        'phone': owner_record.phone or '',
+                        'pets': {},
+                        'last_visit': appointment_dt,
+                    }
                 clients_map[key] = client_entry
             else:
                 if appointment_dt > client_entry['last_visit']:
                     client_entry['last_visit'] = appointment_dt
 
-            pet_entry = client_entry['pets'].get(appointment.pet_id)
+            pet_key = appointment.pet_id or (clinic_patient.id if clinic_patient else None)
+            if not pet_key:
+                continue
+            pet_entry = client_entry['pets'].get(pet_key)
             if not pet_entry:
-                pet_entry = {
-                    'id': appointment.pet.id,
-                    'name': appointment.pet.name,
-                    'type': appointment.pet.pet_type,
-                    'breed': appointment.pet.breed.name if appointment.pet.breed else None,
-                    'last_status': appointment.status,
-                    'last_visit': appointment_dt,
-                }
-                client_entry['pets'][appointment.pet_id] = pet_entry
+                if appointment.pet_id:
+                    pet_entry = {
+                        'id': appointment.pet.id,
+                        'name': appointment.pet.name,
+                        'type': appointment.pet.pet_type,
+                        'breed': appointment.pet.breed.name if appointment.pet.breed else None,
+                        'last_status': appointment.status,
+                        'last_visit': appointment_dt,
+                    }
+                else:
+                    pet_entry = {
+                        'id': clinic_patient.id,
+                        'name': clinic_patient.name,
+                        'type': clinic_patient.species,
+                        'breed': clinic_patient.breed,
+                        'last_status': appointment.status,
+                        'last_visit': appointment_dt,
+                    }
+                client_entry['pets'][pet_key] = pet_entry
             else:
                 if appointment_dt > pet_entry['last_visit']:
                     pet_entry['last_visit'] = appointment_dt
@@ -690,9 +720,22 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         queryset = (
             VeterinaryAppointment.objects
             .filter(clinic=clinic)
-            .select_related('pet', 'owner', 'clinic')
+            .select_related('pet', 'owner', 'clinic', 'clinic_patient', 'clinic_patient__owner')
             .order_by('-scheduled_date', '-scheduled_time')
         )
+        clinic_patient_id = self.request.query_params.get('clinic_patient') or self.request.query_params.get('clinicPatientId')
+        if clinic_patient_id:
+            try:
+                patient = ClinicPatientRecord.objects.filter(clinic=clinic, id=clinic_patient_id).first()
+            except Exception:
+                patient = None
+            if patient and patient.linked_pet_id:
+                queryset = queryset.filter(Q(clinic_patient=patient) | Q(pet=patient.linked_pet_id))
+            else:
+                queryset = queryset.filter(clinic_patient_id=clinic_patient_id)
+        pet_id = self.request.query_params.get('pet')
+        if pet_id and not clinic_patient_id:
+            queryset = queryset.filter(pet_id=pet_id)
         status_param = self.request.query_params.get('status')
         if status_param:
             queryset = queryset.filter(status=status_param)

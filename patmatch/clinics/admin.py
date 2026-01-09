@@ -54,7 +54,7 @@ class ClinicServiceAdmin(admin.ModelAdmin):
             'fields': ('applicable_pet_types',)
         }),
         ('Pricing', {
-            'fields': ('base_price', 'has_tiered_pricing')
+            'fields': ('base_price', 'has_tiered_pricing', 'pricing_unit', 'min_duration_units')
         }),
         ('Details', {
             'fields': ('duration_minutes', 'requires_appointment')
