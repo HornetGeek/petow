@@ -172,6 +172,7 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
             'id', 'clinic', 'name', 'description', 'category', 'category_display',
             'applicable_pet_types', 'pet_type_display',
             'base_price', 'has_tiered_pricing', 'pricing_tiers', 'price_range',
+            'pricing_unit', 'min_duration_units',
             'duration_minutes', 'requires_appointment',
             'is_active', 'is_featured', 'display_order',
             'service_icon', 'service_image', 
@@ -199,6 +200,11 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
             if pet_type not in valid_types:
                 raise serializers.ValidationError(f"نوع الحيوان غير صالح: {pet_type}")
         
+        return value
+
+    def validate_min_duration_units(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError("الحد الأدنى للمدة يجب أن يكون رقمًا موجبًا")
         return value
 
 
@@ -735,11 +741,16 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         return data
 
 class ClinicAppointmentSerializer(serializers.ModelSerializer):
-    pet_name = serializers.CharField(source='pet.name', read_only=True)
+    pet_name = serializers.SerializerMethodField()
     owner_name = serializers.SerializerMethodField()
-    owner_phone = serializers.CharField(source='owner.phone', read_only=True)
-    owner_email = serializers.EmailField(source='owner.email', read_only=True)
+    owner_phone = serializers.SerializerMethodField()
+    owner_email = serializers.SerializerMethodField()
     clinic_name = serializers.CharField(source='clinic.name', read_only=True)
+    clinic_patient = serializers.PrimaryKeyRelatedField(
+        queryset=ClinicPatientRecord.objects.all(),
+        required=False,
+        allow_null=True,
+    )
 
     def to_internal_value(self, data):
         if hasattr(data, 'copy'):
@@ -749,6 +760,7 @@ class ClinicAppointmentSerializer(serializers.ModelSerializer):
         camel_to_snake = {
             'petId': 'pet',
             'ownerId': 'owner',
+            'clinicPatientId': 'clinic_patient',
             'appointmentType': 'appointment_type',
             'scheduledDate': 'scheduled_date',
             'scheduledTime': 'scheduled_time',
@@ -769,7 +781,7 @@ class ClinicAppointmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = VeterinaryAppointment
         fields = [
-            'id', 'clinic', 'clinic_name', 'pet', 'pet_name', 'owner', 'owner_name',
+            'id', 'clinic', 'clinic_name', 'pet', 'pet_name', 'owner', 'owner_name', 'clinic_patient',
             'owner_phone', 'owner_email', 'appointment_type', 'scheduled_date',
             'scheduled_time', 'duration_minutes', 'reason', 'notes', 'status',
             'payment_status', 'service_fee', 'diagnosis', 'treatment',
@@ -781,11 +793,82 @@ class ClinicAppointmentSerializer(serializers.ModelSerializer):
         ]
 
     def get_owner_name(self, obj):
-        return obj.owner.get_full_name() or obj.owner.email
+        owner = getattr(obj, 'owner', None)
+        if owner:
+            return owner.get_full_name() or owner.email or ''
+        clinic_patient = getattr(obj, 'clinic_patient', None)
+        if clinic_patient and clinic_patient.owner:
+            return clinic_patient.owner.full_name or clinic_patient.owner.email or ''
+        return ''
+
+    def get_owner_phone(self, obj):
+        owner = getattr(obj, 'owner', None)
+        if owner and getattr(owner, 'phone', None):
+            return owner.phone
+        clinic_patient = getattr(obj, 'clinic_patient', None)
+        if clinic_patient and clinic_patient.owner:
+            return clinic_patient.owner.phone or ''
+        return ''
+
+    def get_owner_email(self, obj):
+        owner = getattr(obj, 'owner', None)
+        if owner and getattr(owner, 'email', None):
+            return owner.email
+        clinic_patient = getattr(obj, 'clinic_patient', None)
+        if clinic_patient and clinic_patient.owner:
+            return clinic_patient.owner.email or ''
+        return ''
+
+    def get_pet_name(self, obj):
+        pet = getattr(obj, 'pet', None)
+        if pet:
+            return pet.name or ''
+        clinic_patient = getattr(obj, 'clinic_patient', None)
+        if clinic_patient:
+            return clinic_patient.name or ''
+        return ''
+
+    def validate(self, attrs):
+        clinic = self.context.get('clinic')
+        instance = getattr(self, 'instance', None)
+        clinic_patient = attrs.get('clinic_patient', getattr(instance, 'clinic_patient', None))
+        pet = attrs.get('pet', getattr(instance, 'pet', None))
+        owner = attrs.get('owner', getattr(instance, 'owner', None))
+
+        if clinic_patient and clinic and clinic_patient.clinic_id != clinic.id:
+            raise serializers.ValidationError({'clinic_patient': 'هذا المريض لا ينتمي لهذه العيادة'})
+
+        if (pet is None) ^ (owner is None):
+            raise serializers.ValidationError('يجب توفير المالك والحيوان معًا عند الربط.')
+
+        if not clinic_patient and not (pet and owner):
+            raise serializers.ValidationError('يجب اختيار مريض أو ربط الموعد بحيوان ومالك.')
+
+        if clinic_patient and pet and owner:
+            linked_user_id = getattr(clinic_patient, 'linked_user_id', None)
+            linked_pet_id = getattr(clinic_patient, 'linked_pet_id', None)
+            if linked_user_id and owner.id != linked_user_id:
+                raise serializers.ValidationError({'owner': 'المالك المحدد لا يطابق المالك المرتبط بهذا المريض.'})
+            if linked_pet_id and pet.id != linked_pet_id:
+                raise serializers.ValidationError({'pet': 'الحيوان المحدد لا يطابق الحيوان المرتبط بهذا المريض.'})
+
+        return attrs
 
     def create(self, validated_data):
         clinic = self.context['clinic']
         validated_data['clinic'] = clinic
+        clinic_patient = validated_data.get('clinic_patient')
+        if clinic_patient and not validated_data.get('pet') and not validated_data.get('owner'):
+            if clinic_patient.linked_pet_id and clinic_patient.linked_user_id:
+                validated_data['pet'] = clinic_patient.linked_pet
+                validated_data['owner'] = clinic_patient.linked_user
+        if not clinic_patient and validated_data.get('pet'):
+            linked_patient = ClinicPatientRecord.objects.filter(
+                clinic=clinic,
+                linked_pet=validated_data['pet'],
+            ).first()
+            if linked_patient:
+                validated_data['clinic_patient'] = linked_patient
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
