@@ -527,10 +527,24 @@ class PublicClinicListView(APIView):
         if service_category:
             categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
             if categories:
-                clinics = clinics.filter(
-                    services_list__category__in=categories,
-                    services_list__is_active=True
+                category_labels = dict(ClinicService.CATEGORY_CHOICES)
+                label_terms = [category_labels.get(cat) for cat in categories if category_labels.get(cat)]
+                text_query = None
+                for label in label_terms:
+                    clause = Q(services__icontains=label)
+                    text_query = clause if text_query is None else text_query | clause
+
+                clinics = clinics.annotate(
+                    active_service_count=Count(
+                        'services_list',
+                        filter=Q(services_list__is_active=True),
+                        distinct=True
+                    )
                 )
+                filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
+                if text_query is not None:
+                    filter_query |= Q(active_service_count=0) & text_query
+                clinics = clinics.filter(filter_query)
         clinics = clinics.prefetch_related(
             models.Prefetch(
                 'services_list',
