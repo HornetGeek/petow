@@ -12,6 +12,7 @@ from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -77,6 +78,12 @@ SERVICE_CATEGORY_APPOINTMENT_TYPE = {
     'dental': 'dental',
     'emergency': 'emergency',
 }
+
+
+class ClinicListPagination(PageNumberPagination):
+    page_size = settings.REST_FRAMEWORK.get('PAGE_SIZE', 20)
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
@@ -530,8 +537,10 @@ class PublicClinicListView(APIView):
                 queryset=ClinicService.objects.filter(is_active=True).only('category', 'clinic_id')
             )
         )
-        serializer = ClinicListSerializer(clinics, many=True, context={'request': request})
-        return Response(serializer.data)
+        paginator = ClinicListPagination()
+        page = paginator.paginate_queryset(clinics, request, view=self)
+        serializer = ClinicListSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
 
 class PublicStorefrontOrderView(APIView):
     permission_classes = [AllowAny]
