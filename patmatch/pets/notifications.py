@@ -42,6 +42,23 @@ def _send_push_notification(user, title, message, data=None):
         logger.error("Error sending push notification to user %s: %s", user.id, exc)
         return False
 
+
+def _send_push_if_allowed(user, title, message, data=None, category=None):
+    """Respect user notification preferences before sending push."""
+    if not user:
+        return False
+    if category == 'breeding' and getattr(user, 'notify_breeding_requests', True) is False:
+        logger.info("Breeding push suppressed for user %s (opted out)", user.id)
+        return False
+    if category == 'adoption' and getattr(user, 'notify_adoption_pets', True) is False:
+        logger.info("Adoption push suppressed for user %s (opted out)", user.id)
+        return False
+    return _send_push_notification(user, title, message, data)
+
+
+def _adoption_notifications_enabled(user):
+    return getattr(user, 'notify_adoption_pets', True) is not False
+
 def create_notification(
     user,
     notification_type,
@@ -125,7 +142,7 @@ def notify_breeding_request_received(breeding_request):
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
     }
-    _send_push_notification(receiver, title, message, push_payload)
+    _send_push_if_allowed(receiver, title, message, push_payload, category='breeding')
 
     return notification
 
@@ -177,7 +194,7 @@ def notify_breeding_request_approved(breeding_request):
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
     }
-    _send_push_notification(requester, title, message, push_payload)
+    _send_push_if_allowed(requester, title, message, push_payload, category='breeding')
 
     return notification
 
@@ -207,7 +224,7 @@ def notify_breeding_request_rejected(breeding_request):
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
     }
-    _send_push_notification(requester, title, message, push_payload)
+    _send_push_if_allowed(requester, title, message, push_payload, category='breeding')
 
     return notification
 
@@ -245,7 +262,7 @@ def notify_breeding_request_pending_reminder(breeding_request):
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
     }
-    _send_push_notification(receiver, title, message, push_payload)
+    _send_push_if_allowed(receiver, title, message, push_payload, category='breeding')
 
     return notification
 
@@ -265,6 +282,10 @@ def notify_adoption_request_pending_reminder(adoption_request):
         "فضلاً قم بقبول أو رفض الطلب لإبلاغ الطرف الآخر."
     )
 
+    if not _adoption_notifications_enabled(pet_owner):
+        logger.info("Adoption notifications disabled for user %s", pet_owner.id)
+        return None
+
     notification = create_notification(
         user=pet_owner,
         notification_type='adoption_request_pending_reminder',
@@ -282,7 +303,7 @@ def notify_adoption_request_pending_reminder(adoption_request):
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
     }
-    _send_push_notification(pet_owner, title, message, push_payload)
+    _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
 
     return notification
 
@@ -311,7 +332,7 @@ def notify_breeding_request_completed(breeding_request):
             'type': 'breeding_request_completed',
             'breeding_request_id': str(breeding_request.id),
         }
-        _send_push_notification(user, title, message, push_payload)
+        _send_push_if_allowed(user, title, message, push_payload, category='breeding')
 
     return notifications
 
@@ -361,7 +382,7 @@ def notify_pet_status_changed(pet, old_status, new_status):
         'old_status': old_status,
         'new_status': new_status,
     }
-    _send_push_notification(pet_owner, title, message, push_payload)
+    _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
 
     if new_status == 'available_for_adoption':
         try:
@@ -460,7 +481,7 @@ def notify_new_pet_added(pet, radius_km=30):
             'pet_name': pet.name,
             'location': location_text,
         }
-        _send_push_notification(user, title, message, push_payload)
+        _send_push_if_allowed(user, title, message, push_payload, category='adoption')
 
     logger.info("Sent nearby pet notifications for pet %s to %d users", pet.id, len(notifications))
     return notifications
@@ -512,6 +533,8 @@ def notify_new_adoption_pet(pet, radius_km=10):
     location_text = pet.location or 'بالقرب منك'
 
     for user, distance in recipients.values():
+        if not _adoption_notifications_enabled(user):
+            continue
         if distance is not None:
             distance_text = f"على بعد حوالي {distance:.1f} كم"
         else:
@@ -579,6 +602,10 @@ def notify_adoption_request_received(adoption_request):
         'adoption_request_id': adoption_request.id,
     }
 
+    if not _adoption_notifications_enabled(pet_owner):
+        logger.info("Adoption notifications disabled for user %s", pet_owner.id)
+        return None
+
     notification = create_notification(
         user=pet_owner,
         notification_type='adoption_request_received',
@@ -593,7 +620,7 @@ def notify_adoption_request_received(adoption_request):
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
     }
-    _send_push_notification(pet_owner, title, message, push_payload)
+    _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
 
     # إرسال إيميل
     send_adoption_request_email(adoption_request)
@@ -611,6 +638,10 @@ def notify_adoption_request_approved(adoption_request):
     message = f"مبروك! تم قبول طلب التبني الخاص بك لحيوان {pet.name}"
     
     # إنشاء الإشعار
+    if not _adoption_notifications_enabled(adopter):
+        logger.info("Adoption notifications disabled for user %s", adopter.id)
+        return None
+
     notification = create_notification(
         user=adopter,
         notification_type='adoption_request_approved',
@@ -632,6 +663,6 @@ def notify_adoption_request_approved(adoption_request):
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
     }
-    _send_push_notification(adopter, title, message, push_payload)
+    _send_push_if_allowed(adopter, title, message, push_payload, category='adoption')
 
     return notification 
