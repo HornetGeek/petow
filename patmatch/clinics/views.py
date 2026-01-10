@@ -516,6 +516,20 @@ class PublicClinicListView(APIView):
             .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
         )
+        service_category = request.query_params.get('service_category')
+        if service_category:
+            categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
+            if categories:
+                clinics = clinics.filter(
+                    services_list__category__in=categories,
+                    services_list__is_active=True
+                )
+        clinics = clinics.prefetch_related(
+            models.Prefetch(
+                'services_list',
+                queryset=ClinicService.objects.filter(is_active=True).only('category', 'clinic_id')
+            )
+        )
         serializer = ClinicListSerializer(clinics, many=True, context={'request': request})
         return Response(serializer.data)
 

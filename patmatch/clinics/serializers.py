@@ -83,13 +83,14 @@ class ClinicPublicSerializer(serializers.ModelSerializer):
 
 class ClinicListSerializer(serializers.ModelSerializer):
     has_dashboard = serializers.SerializerMethodField()
+    service_categories = serializers.SerializerMethodField()
 
     class Meta:
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'email', 'website',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
-            'latitude', 'longitude', 'is_active', 'has_dashboard'
+            'latitude', 'longitude', 'is_active', 'has_dashboard', 'service_categories'
         ]
         read_only_fields = fields
 
@@ -98,6 +99,16 @@ class ClinicListSerializer(serializers.ModelSerializer):
         if staff_count is None:
             staff_count = obj.staff_members.count()
         return bool(obj.owner_id or staff_count)
+
+    def get_service_categories(self, obj):
+        services = getattr(obj, '_prefetched_objects_cache', {}).get('services_list')
+        if services is None:
+            services = obj.services_list.filter(is_active=True).only('category')
+        categories = {service.category for service in services if service.category}
+        if not categories:
+            return []
+        ordered = [choice[0] for choice in ClinicService.CATEGORY_CHOICES]
+        return [key for key in ordered if key in categories]
 
 
 class ClinicStaffSerializer(serializers.ModelSerializer):
