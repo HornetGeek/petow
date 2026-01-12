@@ -597,6 +597,50 @@ def get_unread_notifications_count(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def mark_chat_notifications_as_read(request):
+    """تعيين إشعارات المحادثة كمقروءة للمستخدم الحالي"""
+    chat_id = request.data.get('chat_id') or request.data.get('firebase_chat_id')
+    if not chat_id:
+        return Response(
+            {'error': 'معرف المحادثة مطلوب'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    chat_room = None
+    try:
+        chat_room = ChatRoom.objects.get(firebase_chat_id=str(chat_id))
+    except ChatRoom.DoesNotExist:
+        if str(chat_id).isdigit():
+            chat_room = ChatRoom.objects.filter(id=int(chat_id)).first()
+
+    if not chat_room:
+        return Response(
+            {'error': 'المحادثة غير موجودة'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    if not chat_room.can_user_access(request.user):
+        return Response(
+            {'error': 'غير مصرح لك بالوصول إلى هذه المحادثة'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    from django.utils import timezone
+
+    updated_count = Notification.objects.filter(
+        user=request.user,
+        is_read=False,
+        type='chat_message_received',
+        related_chat_room=chat_room
+    ).update(is_read=True, read_at=timezone.now())
+
+    return Response({
+        'message': f'تم تعيين {updated_count} إشعار كمقروء',
+        'updated_count': updated_count
+    }, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def send_chat_message_notification(request):
     """إرسال إشعار عند وصول رسالة جديدة"""
     try:
