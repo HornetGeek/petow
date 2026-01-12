@@ -27,6 +27,7 @@ urlpatterns = [
     path('notifications/<int:notification_id>/mark-read/', views.mark_notification_as_read, name='mark-notification-read'),
     path('notifications/mark-all-read/', views.mark_all_notifications_as_read, name='mark-all-notifications-read'),
     path('notifications/unread-count/', views.get_unread_notifications_count, name='unread-notifications-count'),
+    path('notifications/mark-chat-read/', views.mark_chat_notifications_as_read, name='mark-chat-notifications-read'),
     path('notifications/chat-message/', views.send_chat_message_notification, name='send-chat-message-notification'),
     
     # المفضلات
