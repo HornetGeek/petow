@@ -423,7 +423,7 @@ class ClinicClientsView(ClinicContextMixin, APIView):
                     }
                 clients_map[key] = client_entry
             else:
-                if appointment_dt > client_entry['last_visit']:
+                if not client_entry['last_visit'] or appointment_dt > client_entry['last_visit']:
                     client_entry['last_visit'] = appointment_dt
 
             pet_key = appointment.pet_id or (clinic_patient.id if clinic_patient else None)
@@ -451,7 +451,7 @@ class ClinicClientsView(ClinicContextMixin, APIView):
                     }
                 client_entry['pets'][pet_key] = pet_entry
             else:
-                if appointment_dt > pet_entry['last_visit']:
+                if not pet_entry['last_visit'] or appointment_dt > pet_entry['last_visit']:
                     pet_entry['last_visit'] = appointment_dt
                     pet_entry['last_status'] = appointment.status
 
