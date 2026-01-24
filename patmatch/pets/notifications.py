@@ -481,7 +481,7 @@ def notify_new_pet_added(pet, radius_km=30):
             'pet_name': pet.name,
             'location': location_text,
         }
-        _send_push_if_allowed(user, title, message, push_payload, category='adoption')
+        _send_push_if_allowed(user, title, message, push_payload, category='breeding')
 
     logger.info("Sent nearby pet notifications for pet %s to %d users", pet.id, len(notifications))
     return notifications
@@ -524,6 +524,25 @@ def notify_new_adoption_pet(pet, radius_km=10):
         for user in location_users:
             if _normalise_location(getattr(user, 'address', '')) == normalised_location:
                 recipients.setdefault(user.id, (user, None))
+
+    # Fallback: if still no recipients and pet has coordinates, try nearby users based on their pets' coordinates
+    if not recipients and pet_lat is not None and pet_lng is not None:
+        pet_based_users = User.objects.exclude(id=pet.owner_id).exclude(
+            fcm_token__isnull=True
+        ).exclude(
+            fcm_token=''
+        ).filter(
+            pets__latitude__isnull=False,
+            pets__longitude__isnull=False,
+        ).distinct()
+        for user in pet_based_users:
+            for upet in user.pets.all():
+                if upet.latitude is None or upet.longitude is None:
+                    continue
+                distance = _haversine_km(pet_lat, pet_lng, upet.latitude, upet.longitude)
+                if distance is not None and distance <= radius_km:
+                    recipients[user.id] = (user, distance)
+                    break  # one match is enough per user
 
     if not recipients:
         logger.info("No nearby users found for adoption pet %s", pet.id)
@@ -568,7 +587,7 @@ def notify_new_adoption_pet(pet, radius_km=10):
             'distance_km': extra['distance_km'],
             'location': location_text,
         }
-        _send_push_notification(user, title, message, push_payload)
+        _send_push_if_allowed(user, title, message, push_payload, category='adoption')
 
     logger.info("Sent adoption pet notifications for pet %s to %d users", pet.id, len(notifications))
     return notifications
