@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+import dj_database_url
 from decouple import config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -87,14 +88,18 @@ WSGI_APPLICATION = 'patmatch_backend.wsgi.application'
 
 
 # Database
-# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
+# Default to the Postgres service defined in docker-compose.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.config(
+        default="postgresql://petmatch_user:petmatch_password@db:5432/petmatch",
+        conn_max_age=600,
+    )
 }
+
+if DATABASES['default']['ENGINE'] != 'django.db.backends.postgresql':
+    raise RuntimeError("DATABASE_URL must point to a PostgreSQL instance for staging/docker setups.")
+
+print(f"✅ Using PostgreSQL database: {DATABASES['default']['HOST']}:{DATABASES['default']['PORT']}")
 
 
 # Password validation
