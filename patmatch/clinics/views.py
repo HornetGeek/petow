@@ -309,7 +309,7 @@ class ClinicMapMarkersView(APIView):
             if user_point is not None:
                 singleton_groups = singleton_groups.annotate(sort_distance=Min('map_distance_m')).order_by('sort_distance', '-point_id')
             else:
-                singleton_groups = singleton_groups.annotate(sort_id=Max('point_id')).order_by('-sort_id')
+                singleton_groups = singleton_groups.order_by('-point_id')
 
             point_ids = [row['point_id'] for row in singleton_groups[:limit_points]]
             points_queryset = queryset.filter(id__in=point_ids)
