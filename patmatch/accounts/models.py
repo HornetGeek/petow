@@ -1,5 +1,6 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 import logging
 import random
 import string
@@ -25,6 +26,7 @@ class User(AbstractUser):
     address = models.TextField(blank=True, null=True)
     latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
     profile_picture = models.ImageField(upload_to='profiles/', blank=True, null=True)
     is_verified = models.BooleanField(default=False)
     fcm_token = models.TextField(blank=True, null=True, help_text="FCM token للإشعارات")
@@ -284,6 +286,7 @@ class MobileAppConfig(models.Model):
     key = models.CharField(max_length=32, unique=True, default='default')
     clinic_home_enabled = models.BooleanField(default=True)
     clinic_map_enabled = models.BooleanField(default=True)
+    server_map_clustering_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

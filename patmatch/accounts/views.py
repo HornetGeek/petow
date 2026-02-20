@@ -827,6 +827,7 @@ def get_app_config(request):
         return Response({
             'clinic_home_enabled': config.clinic_home_enabled,
             'clinic_map_enabled': config.clinic_map_enabled,
+            'server_map_clustering_enabled': config.server_map_clustering_enabled,
             'updated_at': config.updated_at.isoformat() if config.updated_at else None,
         })
     except Exception as e:

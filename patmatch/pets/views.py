@@ -2,9 +2,13 @@ from rest_framework import generics, status, filters
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
+from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from django.db import transaction
+from django.contrib.gis.db import models as gis_models
+from django.contrib.gis.db.models.functions import Distance, Transform, X, Y
+from django.contrib.gis.geos import Point, Polygon
 from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, 
@@ -25,8 +29,8 @@ from accounts.firebase_service import firebase_service
 import logging
 import time
 from django.db import models
-from django.db.models import F, Value, FloatField, ExpressionWrapper
-from django.db.models.functions import Coalesce, Cast
+from django.db.models import F, Value, FloatField, ExpressionWrapper, Count, Avg, Min, Max, IntegerField, Func
+from django.db.models.functions import Coalesce, Cast, Floor
 import requests
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,303 @@ def reverse_geocode_address(lat: float, lng: float) -> str:
         return f"{lat:.4f}, {lng:.4f}"
     except Exception:
         return f"{lat:.4f}, {lng:.4f}"
+
+
+MAP_DEFAULT_POINT_LIMIT = 300
+MAP_MAX_POINT_LIMIT = 1000
+MAP_CLUSTER_ZOOM_THRESHOLD = 13
+
+
+def _parse_bool_param(raw_value, default=True):
+    if raw_value is None:
+        return default
+    normalized = str(raw_value).strip().lower()
+    if normalized in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    return default
+
+
+def _parse_bbox_param(raw_bbox):
+    if not raw_bbox:
+        raise ValueError('bbox مطلوب بصيغة min_lng,min_lat,max_lng,max_lat')
+    try:
+        min_lng, min_lat, max_lng, max_lat = [float(part.strip()) for part in str(raw_bbox).split(',')]
+    except (TypeError, ValueError):
+        raise ValueError('صيغة bbox غير صحيحة')
+
+    if min_lng >= max_lng or min_lat >= max_lat:
+        raise ValueError('حدود bbox غير صحيحة')
+    if min_lat < -90 or max_lat > 90 or min_lng < -180 or max_lng > 180:
+        raise ValueError('bbox خارج نطاق الإحداثيات المسموح')
+
+    return min_lng, min_lat, max_lng, max_lat
+
+
+def _parse_zoom_param(raw_zoom):
+    if raw_zoom in (None, ''):
+        raise ValueError('zoom مطلوب')
+    try:
+        zoom = int(float(raw_zoom))
+    except (TypeError, ValueError):
+        raise ValueError('zoom يجب أن يكون رقمًا صحيحًا')
+    if zoom < 0 or zoom > 25:
+        raise ValueError('zoom خارج النطاق المتوقع')
+    return zoom
+
+
+def _parse_optional_float(raw_value, field_name):
+    if raw_value in (None, ''):
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} غير صالح')
+
+
+def _parse_point_limit(raw_limit):
+    if raw_limit in (None, ''):
+        return MAP_DEFAULT_POINT_LIMIT
+    try:
+        parsed = int(raw_limit)
+    except (TypeError, ValueError):
+        raise ValueError('limit_points يجب أن يكون رقمًا صحيحًا')
+    if parsed <= 0:
+        raise ValueError('limit_points يجب أن يكون أكبر من 0')
+    return min(parsed, MAP_MAX_POINT_LIMIT)
+
+
+def _cell_size_meters_for_zoom(zoom):
+    meters_per_pixel = 40075016.686 / (256 * (2 ** max(zoom, 1)))
+    return max(meters_per_pixel * 64, 25.0)
+
+
+def _format_distance_display(distance_km):
+    if distance_km is None:
+        return None
+    if distance_km < 1:
+        return f"{int(distance_km * 1000)} متر"
+    if distance_km < 100:
+        return f"{distance_km:.1f} كم"
+    return f"{int(distance_km)} كم"
+
+
+class PetMapMarkersView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        started_at = time.perf_counter()
+        try:
+            min_lng, min_lat, max_lng, max_lat = _parse_bbox_param(request.query_params.get('bbox'))
+            zoom = _parse_zoom_param(request.query_params.get('zoom'))
+            cluster_enabled = _parse_bool_param(request.query_params.get('cluster'), default=True)
+            limit_points = _parse_point_limit(request.query_params.get('limit_points'))
+
+            user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
+            user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
+            if (user_lat is None) != (user_lng is None):
+                raise ValueError('يجب تمرير user_lat و user_lng معًا')
+            if user_lat is not None and (user_lat < -90 or user_lat > 90):
+                raise ValueError('user_lat خارج النطاق المسموح')
+            if user_lng is not None and (user_lng < -180 or user_lng > 180):
+                raise ValueError('user_lng خارج النطاق المسموح')
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        status_param = request.query_params.get('status')
+        exclude_status_param = request.query_params.get('exclude_status')
+        search_term = request.query_params.get('search')
+        pet_type = request.query_params.get('pet_type')
+        gender = request.query_params.get('gender')
+        min_age_months = request.query_params.get('min_age_months')
+        max_age_months = request.query_params.get('max_age_months')
+
+        effective_point_field = gis_models.PointField(geography=True, srid=4326)
+        bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
+        bbox.srid = 4326
+
+        queryset = (
+            Pet.objects
+            .select_related('breed', 'owner')
+            .annotate(
+                effective_point=Coalesce(
+                    'location_point',
+                    'owner__location_point',
+                    output_field=effective_point_field,
+                )
+            )
+            .exclude(effective_point__isnull=True)
+            .filter(effective_point__intersects=bbox)
+            .annotate(
+                map_latitude=Y('effective_point'),
+                map_longitude=X('effective_point'),
+            )
+        )
+
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        else:
+            queryset = queryset.filter(status='available')
+
+        if exclude_status_param:
+            excluded = [value.strip() for value in exclude_status_param.split(',') if value.strip()]
+            if excluded:
+                queryset = queryset.exclude(status__in=excluded)
+
+        if pet_type:
+            queryset = queryset.filter(pet_type=pet_type)
+        if gender:
+            queryset = queryset.filter(gender=gender)
+        if search_term:
+            queryset = queryset.filter(
+                Q(name__icontains=search_term) |
+                Q(breed__name__icontains=search_term) |
+                Q(location__icontains=search_term) |
+                Q(description__icontains=search_term)
+            )
+
+        try:
+            if min_age_months not in (None, ''):
+                queryset = queryset.filter(age_months__gte=int(min_age_months))
+            if max_age_months not in (None, ''):
+                queryset = queryset.filter(age_months__lte=int(max_age_months))
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'min_age_months و max_age_months يجب أن يكونا أرقامًا صحيحة'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
+        if user_point is not None:
+            queryset = queryset.annotate(map_distance_m=Distance('effective_point', user_point))
+
+        total_matched = queryset.count()
+        clusters_payload = []
+        points_queryset = queryset
+
+        use_clusters = cluster_enabled and zoom < MAP_CLUSTER_ZOOM_THRESHOLD
+        if use_clusters:
+            cell_size_meters = _cell_size_meters_for_zoom(zoom)
+            clustered_queryset = queryset.annotate(
+                point_mercator=Transform('effective_point', 3857),
+            ).annotate(
+                grid_x=Cast(
+                    Floor(
+                        ExpressionWrapper(
+                            Func(F('point_mercator'), function='ST_X') / Value(cell_size_meters),
+                            output_field=FloatField(),
+                        )
+                    ),
+                    IntegerField(),
+                ),
+                grid_y=Cast(
+                    Floor(
+                        ExpressionWrapper(
+                            Func(F('point_mercator'), function='ST_Y') / Value(cell_size_meters),
+                            output_field=FloatField(),
+                        )
+                    ),
+                    IntegerField(),
+                ),
+            )
+
+            grouped = clustered_queryset.values('grid_x', 'grid_y').annotate(
+                bucket_count=Count('id'),
+                latitude=Avg('map_latitude'),
+                longitude=Avg('map_longitude'),
+                point_id=Min('id'),
+            )
+
+            cluster_rows = list(grouped.filter(bucket_count__gt=1).order_by('-bucket_count'))
+            clusters_payload = [
+                {
+                    'id': f"pet-{zoom}-{row['grid_x']}-{row['grid_y']}",
+                    'latitude': float(row['latitude']) if row['latitude'] is not None else None,
+                    'longitude': float(row['longitude']) if row['longitude'] is not None else None,
+                    'count': int(row['bucket_count']),
+                    'entity_type': 'pet',
+                }
+                for row in cluster_rows
+            ]
+
+            singleton_groups = grouped.filter(bucket_count=1)
+            singleton_total = singleton_groups.count()
+            if user_point is not None:
+                singleton_groups = singleton_groups.annotate(sort_distance=Min('map_distance_m')).order_by('sort_distance', '-point_id')
+            else:
+                singleton_groups = singleton_groups.annotate(sort_id=Max('point_id')).order_by('-sort_id')
+
+            point_ids = [row['point_id'] for row in singleton_groups[:limit_points]]
+            points_queryset = queryset.filter(id__in=point_ids)
+            if user_point is not None:
+                points_queryset = points_queryset.order_by('map_distance_m', '-created_at')
+            else:
+                points_queryset = points_queryset.order_by('-created_at')
+            truncated = singleton_total > len(point_ids)
+        else:
+            if user_point is not None:
+                points_queryset = queryset.order_by('map_distance_m', '-created_at')
+            else:
+                points_queryset = queryset.order_by('-created_at')
+            points_queryset = points_queryset[:limit_points]
+            truncated = total_matched > limit_points
+
+        points = list(points_queryset)
+        serializer_context = {'request': request}
+        if user_lat is not None and user_lng is not None:
+            serializer_context['user_lat'] = user_lat
+            serializer_context['user_lng'] = user_lng
+        serializer = PetListSerializer(points, many=True, context=serializer_context)
+        points_payload = list(serializer.data)
+
+        for index, pet in enumerate(points):
+            lat_value = getattr(pet, 'map_latitude', None)
+            lng_value = getattr(pet, 'map_longitude', None)
+            if lat_value is not None:
+                points_payload[index]['latitude'] = float(lat_value)
+            if lng_value is not None:
+                points_payload[index]['longitude'] = float(lng_value)
+
+            if user_point is not None:
+                distance_value = getattr(pet, 'map_distance_m', None)
+                if distance_value is not None:
+                    distance_meters = float(getattr(distance_value, 'm', distance_value))
+                    distance_km = round(distance_meters / 1000.0, 2)
+                    points_payload[index]['distance'] = distance_km
+                    points_payload[index]['distance_display'] = _format_distance_display(distance_km)
+
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        logger.info(
+            "pets_map_markers bbox=%s zoom=%s cluster=%s total=%s clusters=%s points=%s truncated=%s duration_ms=%s",
+            request.query_params.get('bbox'),
+            zoom,
+            use_clusters,
+            total_matched,
+            len(clusters_payload),
+            len(points_payload),
+            truncated,
+            duration_ms,
+        )
+
+        return Response({
+            'clusters': clusters_payload,
+            'points': points_payload,
+            'meta': {
+                'zoom': zoom,
+                'bbox': {
+                    'min_lng': min_lng,
+                    'min_lat': min_lat,
+                    'max_lng': max_lng,
+                    'max_lat': max_lat,
+                },
+                'total_matched': total_matched,
+                'returned_clusters': len(clusters_payload),
+                'returned_points': len(points_payload),
+                'truncated': bool(truncated),
+            }
+        })
 
 class BreedListView(generics.ListAPIView):
     """قائمة السلالات"""

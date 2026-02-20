@@ -15,6 +15,11 @@ RUN apt-get update \
         gcc \
         g++ \
         libpq-dev \
+        gdal-bin \
+        libgdal-dev \
+        libproj-dev \
+        binutils \
+        libgeos-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

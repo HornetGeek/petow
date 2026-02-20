@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.gis.geos import Point
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -60,6 +61,19 @@ def _calculate_age_text(date_of_birth):
     return ' '.join(parts)
 
 
+def _point_from_coordinates(latitude, longitude):
+    if latitude in (None, '') or longitude in (None, ''):
+        return None
+    try:
+        lat = float(latitude)
+        lng = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if lat < -90 or lat > 90 or lng < -180 or lng > 180:
+        return None
+    return Point(lng, lat, srid=4326)
+
+
 class ClinicSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
@@ -69,6 +83,24 @@ class ClinicSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'is_active', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        if 'latitude' in validated_data or 'longitude' in validated_data:
+            lat = validated_data.get('latitude')
+            lng = validated_data.get('longitude')
+            validated_data['location_point'] = _point_from_coordinates(lat, lng)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        location_point = validated_data.get('location_point')
+        if location_point is not None:
+            validated_data['latitude'] = location_point.y
+            validated_data['longitude'] = location_point.x
+        elif 'latitude' in validated_data or 'longitude' in validated_data:
+            lat = validated_data.get('latitude', instance.latitude)
+            lng = validated_data.get('longitude', instance.longitude)
+            validated_data['location_point'] = _point_from_coordinates(lat, lng)
+        return super().update(instance, validated_data)
 
 
 class ClinicPublicSerializer(serializers.ModelSerializer):

@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # PostgreSQL Database
   db:
-    image: postgres:13
+    image: postgis/postgis:13-3.4
     container_name: petmatch_db_prod
     environment:
       POSTGRES_DB: petmatch

@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.gis',
     'django.contrib.sites',
     
     # Third party apps
@@ -96,10 +97,12 @@ DATABASES = {
     )
 }
 
-if DATABASES['default']['ENGINE'] != 'django.db.backends.postgresql':
-    raise RuntimeError("DATABASE_URL must point to a PostgreSQL instance for staging/docker setups.")
+default_engine = DATABASES['default'].get('ENGINE')
+if default_engine not in {'django.db.backends.postgresql', 'django.contrib.gis.db.backends.postgis'}:
+    raise RuntimeError("DATABASE_URL must point to a PostgreSQL/PostGIS instance for staging/docker setups.")
+DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
 
-print(f"✅ Using PostgreSQL database: {DATABASES['default']['HOST']}:{DATABASES['default']['PORT']}")
+print(f"✅ Using PostgreSQL/PostGIS database: {DATABASES['default']['HOST']}:{DATABASES['default']['PORT']}")
 
 
 # Password validation

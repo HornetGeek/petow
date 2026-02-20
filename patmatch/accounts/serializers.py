@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.contrib.gis.geos import Point
 import re
 from .models import AccountVerification
 
@@ -21,6 +22,30 @@ class UserProfileSerializer(serializers.ModelSerializer):
     
     def get_pets_count(self, obj):
         return obj.pets.count()
+
+    def _point_from_coordinates(self, latitude, longitude):
+        if latitude in (None, '') or longitude in (None, ''):
+            return None
+        try:
+            lat = float(latitude)
+            lng = float(longitude)
+        except (TypeError, ValueError):
+            return None
+        if lat < -90 or lat > 90 or lng < -180 or lng > 180:
+            return None
+        return Point(lng, lat, srid=4326)
+
+    def update(self, instance, validated_data):
+        location_point = validated_data.get('location_point')
+        if location_point is not None:
+            validated_data['latitude'] = location_point.y
+            validated_data['longitude'] = location_point.x
+        elif 'latitude' in validated_data or 'longitude' in validated_data:
+            lat_value = validated_data.get('latitude', instance.latitude)
+            lng_value = validated_data.get('longitude', instance.longitude)
+            validated_data['location_point'] = self._point_from_coordinates(lat_value, lng_value)
+
+        return super().update(instance, validated_data)
 
 class UserSerializer(serializers.ModelSerializer):
     """مُسلسل مبسط للمستخدم"""

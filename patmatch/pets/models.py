@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
 from accounts.models import User
@@ -122,6 +123,7 @@ class Pet(models.Model):
     location = models.CharField(max_length=200, help_text="الموقع (المدينة/الحي)")
     latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
     
     # معلومات التبني
     is_free = models.BooleanField(default=True, help_text="هل التبني مجاني؟")

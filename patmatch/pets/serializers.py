@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from django.contrib.gis.geos import Point
 import re
 from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
 import requests
@@ -103,6 +104,18 @@ class PetSerializer(serializers.ModelSerializer):
 
         return quantized
 
+    def _point_from_coordinates(self, latitude, longitude):
+        if latitude in (None, '', 'null') or longitude in (None, '', 'null'):
+            return None
+        try:
+            lat = float(latitude)
+            lng = float(longitude)
+        except (TypeError, ValueError):
+            return None
+        if lat < -90 or lat > 90 or lng < -180 or lng > 180:
+            return None
+        return Point(lng, lat, srid=4326)
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         # Fix image URLs - if it's an external URL, use the raw value instead of Django's processed URL
@@ -147,6 +160,7 @@ class PetSerializer(serializers.ModelSerializer):
             lng_f = float(lng)
             if not loc or self._looks_like_coords(loc):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
+            validated_data['location_point'] = self._point_from_coordinates(lat, lng)
 
         return super().create(validated_data)
     
@@ -210,6 +224,7 @@ class PetSerializer(serializers.ModelSerializer):
             lng_f = float(lng)
             if not loc or self._looks_like_coords(loc):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
+            validated_data['location_point'] = self._point_from_coordinates(lat, lng)
 
         return super().update(instance, validated_data)
 
@@ -226,6 +241,8 @@ class PetListSerializer(serializers.ModelSerializer):
     has_health_certificates = serializers.BooleanField(read_only=True)
     distance = serializers.SerializerMethodField()
     distance_display = serializers.SerializerMethodField()
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
     
     def get_distance(self, obj):
         """حساب المسافة بالكيلومتر"""
@@ -233,7 +250,7 @@ class PetListSerializer(serializers.ModelSerializer):
         user_lat = self.context.get('user_lat')
         user_lng = self.context.get('user_lng')
         
-        if user_lat and user_lng:
+        if user_lat is not None and user_lng is not None:
             try:
                 return obj.calculate_distance(float(user_lat), float(user_lng))
             except (ValueError, TypeError):
@@ -246,7 +263,7 @@ class PetListSerializer(serializers.ModelSerializer):
         user_lat = self.context.get('user_lat')
         user_lng = self.context.get('user_lng')
         
-        if user_lat and user_lng:
+        if user_lat is not None and user_lng is not None:
             try:
                 distance_display = obj.get_distance_display(float(user_lat), float(user_lng))
                 return distance_display
@@ -255,6 +272,18 @@ class PetListSerializer(serializers.ModelSerializer):
         else:
             print(f"❌ Serializer: No user coordinates in context")
         return None
+
+    def get_latitude(self, obj):
+        value = getattr(obj, 'map_latitude', None)
+        if value is None:
+            value = obj.latitude if obj.latitude is not None else getattr(getattr(obj, 'owner', None), 'latitude', None)
+        return float(value) if value is not None else None
+
+    def get_longitude(self, obj):
+        value = getattr(obj, 'map_longitude', None)
+        if value is None:
+            value = obj.longitude if obj.longitude is not None else getattr(getattr(obj, 'owner', None), 'longitude', None)
+        return float(value) if value is not None else None
     
     def to_representation(self, instance):
         data = super().to_representation(instance)

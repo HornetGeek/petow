@@ -9,6 +9,7 @@ urlpatterns = [
     
     # الحيوانات
     path('', views.PetListCreateView.as_view(), name='pet-list-create'),
+    path('map/markers/', views.PetMapMarkersView.as_view(), name='pet-map-markers'),
     path('<int:pk>/', views.PetDetailView.as_view(), name='pet-detail'),
     path('my/', views.MyPetsView.as_view(), name='my-pets'),
     
