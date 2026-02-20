@@ -188,11 +188,17 @@ class PetMapMarkersView(APIView):
                     output_field=effective_point_field,
                 )
             )
+            .annotate(
+                effective_point_geom=Cast(
+                    'effective_point',
+                    output_field=gis_models.PointField(srid=4326),
+                )
+            )
             .exclude(effective_point__isnull=True)
             .filter(effective_point__intersects=bbox)
             .annotate(
-                map_latitude=Cast(Func(F('effective_point'), function='ST_Y'), FloatField()),
-                map_longitude=Cast(Func(F('effective_point'), function='ST_X'), FloatField()),
+                map_latitude=Cast(Func(F('effective_point_geom'), function='ST_Y'), FloatField()),
+                map_longitude=Cast(Func(F('effective_point_geom'), function='ST_X'), FloatField()),
             )
         )
 
@@ -241,7 +247,7 @@ class PetMapMarkersView(APIView):
         if use_clusters:
             cell_size_meters = _cell_size_meters_for_zoom(zoom)
             clustered_queryset = queryset.annotate(
-                point_mercator=Transform('effective_point', 3857),
+                point_mercator=Transform('effective_point_geom', 3857),
             ).annotate(
                 grid_x=Cast(
                     Floor(
