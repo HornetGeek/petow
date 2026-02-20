@@ -8,12 +8,12 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('accounts', '0012_user_location_point_postgis'),
-        ('pets', '0023_alter_notification_type'),
+        ('clinics', '0012_veterinaryappointment_clinic_patient'),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='pet',
+            model_name='clinic',
             name='location_point',
             field=django.contrib.gis.db.models.fields.PointField(
                 blank=True,

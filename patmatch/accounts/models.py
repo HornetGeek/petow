@@ -286,7 +286,7 @@ class MobileAppConfig(models.Model):
     key = models.CharField(max_length=32, unique=True, default='default')
     clinic_home_enabled = models.BooleanField(default=True)
     clinic_map_enabled = models.BooleanField(default=True)
-    server_map_clustering_enabled = models.BooleanField(default=False)
+    server_map_clustering_enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
