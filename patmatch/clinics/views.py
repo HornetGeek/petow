@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from django.contrib.auth import authenticate
 from django.contrib.gis.db import models as gis_models
-from django.contrib.gis.db.models.functions import Distance, Transform, X, Y
+from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
 from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper
 from django.db.models.functions import Cast, Coalesce, Floor
@@ -214,8 +214,8 @@ class ClinicMapMarkersView(APIView):
             .exclude(effective_point__isnull=True)
             .filter(effective_point__intersects=bbox)
             .annotate(
-                map_latitude=Y('effective_point'),
-                map_longitude=X('effective_point'),
+                map_latitude=Cast(Func(F('effective_point'), function='ST_Y'), FloatField()),
+                map_longitude=Cast(Func(F('effective_point'), function='ST_X'), FloatField()),
             )
         )
 

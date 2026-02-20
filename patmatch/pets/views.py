@@ -7,7 +7,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from django.db import transaction
 from django.contrib.gis.db import models as gis_models
-from django.contrib.gis.db.models.functions import Distance, Transform, X, Y
+from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
 from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
 from .serializers import (
@@ -191,8 +191,8 @@ class PetMapMarkersView(APIView):
             .exclude(effective_point__isnull=True)
             .filter(effective_point__intersects=bbox)
             .annotate(
-                map_latitude=Y('effective_point'),
-                map_longitude=X('effective_point'),
+                map_latitude=Cast(Func(F('effective_point'), function='ST_Y'), FloatField()),
+                map_longitude=Cast(Func(F('effective_point'), function='ST_X'), FloatField()),
             )
         )
 
