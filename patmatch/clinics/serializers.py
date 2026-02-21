@@ -143,6 +143,70 @@ class ClinicListSerializer(serializers.ModelSerializer):
         return [key for key in ordered if key in categories]
 
 
+class ClinicMapPointSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for clinic map markers."""
+    service_categories = serializers.SerializerMethodField()
+    distance = serializers.SerializerMethodField()
+    distance_display = serializers.SerializerMethodField()
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+
+    def _distance_km(self, obj):
+        distance_value = getattr(obj, 'map_distance_m', None)
+        if distance_value is None:
+            return None
+        try:
+            distance_meters = float(getattr(distance_value, 'm', distance_value))
+        except (TypeError, ValueError):
+            return None
+        return round(distance_meters / 1000.0, 2)
+
+    def get_distance(self, obj):
+        return self._distance_km(obj)
+
+    def get_distance_display(self, obj):
+        distance_km = self._distance_km(obj)
+        if distance_km is None:
+            return None
+        if distance_km < 1:
+            return f"{int(distance_km * 1000)} متر"
+        if distance_km < 100:
+            return f"{distance_km:.1f} كم"
+        return f"{int(distance_km)} كم"
+
+    def get_latitude(self, obj):
+        value = getattr(obj, 'map_latitude', None)
+        if value is None:
+            value = obj.latitude
+        return float(value) if value is not None else None
+
+    def get_longitude(self, obj):
+        value = getattr(obj, 'map_longitude', None)
+        if value is None:
+            value = obj.longitude
+        return float(value) if value is not None else None
+
+    def get_service_categories(self, obj):
+        services = getattr(obj, '_prefetched_objects_cache', {}).get('services_list')
+        if services is None:
+            services = obj.services_list.filter(is_active=True).only('category')
+        categories = {service.category for service in services if service.category}
+        if not categories:
+            return []
+        ordered = [choice[0] for choice in ClinicService.CATEGORY_CHOICES]
+        return [key for key in ordered if key in categories]
+
+    class Meta:
+        model = Clinic
+        fields = [
+            'id', 'name', 'address', 'phone', 'email',
+            'logo', 'opening_hours', 'services', 'storefront_primary_color',
+            'latitude', 'longitude', 'is_active',
+            'service_categories', 'distance', 'distance_display',
+        ]
+        read_only_fields = fields
+
+
 class ClinicStaffSerializer(serializers.ModelSerializer):
     user_full_name = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source='user.email', read_only=True)

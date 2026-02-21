@@ -313,6 +313,79 @@ class PetListSerializer(serializers.ModelSerializer):
             'has_health_certificates', 'hosting_preference', 'created_at'
         ]
 
+
+class PetMapPointSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for map markers."""
+    breed_name = serializers.CharField(source='breed.name', read_only=True)
+    pet_type_display = serializers.CharField(read_only=True)
+    age_display = serializers.CharField(read_only=True)
+    age_months = serializers.IntegerField(read_only=True)
+    gender_display = serializers.CharField(read_only=True)
+    status_display = serializers.CharField(read_only=True)
+    distance = serializers.SerializerMethodField()
+    distance_display = serializers.SerializerMethodField()
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+
+    def _distance_km(self, obj):
+        distance_value = getattr(obj, 'map_distance_m', None)
+        if distance_value is None:
+            return None
+        try:
+            distance_meters = float(getattr(distance_value, 'm', distance_value))
+        except (TypeError, ValueError):
+            return None
+        return round(distance_meters / 1000.0, 2)
+
+    def get_distance(self, obj):
+        return self._distance_km(obj)
+
+    def get_distance_display(self, obj):
+        distance_km = self._distance_km(obj)
+        if distance_km is None:
+            return None
+        if distance_km < 1:
+            return f"{int(distance_km * 1000)} متر"
+        if distance_km < 100:
+            return f"{distance_km:.1f} كم"
+        return f"{int(distance_km)} كم"
+
+    def get_latitude(self, obj):
+        value = getattr(obj, 'map_latitude', None)
+        if value is None:
+            value = obj.latitude if obj.latitude is not None else getattr(getattr(obj, 'owner', None), 'latitude', None)
+        return float(value) if value is not None else None
+
+    def get_longitude(self, obj):
+        value = getattr(obj, 'map_longitude', None)
+        if value is None:
+            value = obj.longitude if obj.longitude is not None else getattr(getattr(obj, 'owner', None), 'longitude', None)
+        return float(value) if value is not None else None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.main_image:
+            main_image_name = instance.main_image.name
+            if main_image_name.startswith('https://') or main_image_name.startswith('http://'):
+                data['main_image'] = main_image_name
+            else:
+                request = self.context.get('request')
+                if request:
+                    data['main_image'] = request.build_absolute_uri(instance.main_image.url)
+                else:
+                    data['main_image'] = instance.main_image.url if instance.main_image else None
+        return data
+
+    class Meta:
+        model = Pet
+        fields = [
+            'id', 'name', 'pet_type', 'pet_type_display', 'breed_name',
+            'age_display', 'age_months', 'gender', 'gender_display',
+            'main_image', 'location', 'latitude', 'longitude',
+            'distance', 'distance_display', 'status', 'status_display',
+            'hosting_preference'
+        ]
+
 class BreedingRequestSerializer(serializers.ModelSerializer):
     # Pet details
     target_pet_details = PetListSerializer(source='target_pet', read_only=True)
