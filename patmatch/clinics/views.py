@@ -52,6 +52,7 @@ from .serializers import (
     ClinicSerializer,
     ClinicPublicSerializer,
     ClinicListSerializer,
+    ClinicMapPointSerializer,
     ClinicServiceSerializer,
     ClinicProductSerializer,
     StorefrontOrderSerializer,
@@ -162,16 +163,6 @@ def _parse_point_limit(raw_limit):
 def _cell_size_meters_for_zoom(zoom):
     meters_per_pixel = 40075016.686 / (256 * (2 ** max(zoom, 1)))
     return max(meters_per_pixel * 64, 25.0)
-
-
-def _format_distance_display(distance_km):
-    if distance_km is None:
-        return None
-    if distance_km < 1:
-        return f"{int(distance_km * 1000)} متر"
-    if distance_km < 100:
-        return f"{distance_km:.1f} كم"
-    return f"{int(distance_km)} كم"
 
 
 class ClinicMapMarkersView(APIView):
@@ -333,24 +324,8 @@ class ClinicMapMarkersView(APIView):
             )
         )
         points = list(points_queryset)
-        serializer = ClinicListSerializer(points, many=True, context={'request': request})
+        serializer = ClinicMapPointSerializer(points, many=True, context={'request': request})
         points_payload = list(serializer.data)
-
-        for index, clinic in enumerate(points):
-            lat_value = getattr(clinic, 'map_latitude', None)
-            lng_value = getattr(clinic, 'map_longitude', None)
-            if lat_value is not None:
-                points_payload[index]['latitude'] = float(lat_value)
-            if lng_value is not None:
-                points_payload[index]['longitude'] = float(lng_value)
-
-            if user_point is not None:
-                distance_value = getattr(clinic, 'map_distance_m', None)
-                if distance_value is not None:
-                    distance_meters = float(getattr(distance_value, 'm', distance_value))
-                    distance_km = round(distance_meters / 1000.0, 2)
-                    points_payload[index]['distance'] = distance_km
-                    points_payload[index]['distance_display'] = _format_distance_display(distance_km)
 
         duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
         request_summary = {
