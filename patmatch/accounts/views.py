@@ -1,13 +1,16 @@
 from django.shortcuts import render
 from django.contrib.auth import authenticate
-from rest_framework import generics, status
+from rest_framework import generics, status, serializers
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.authtoken.models import Token
+from rest_framework.views import APIView
 from .serializers import UserProfileSerializer, UserSerializer, CustomRegisterSerializer, AccountVerificationSerializer, AccountVerificationStatusSerializer
 from .models import User, PhoneOTP, PasswordResetOTP, AccountVerification, MobileAppConfig
 from .email_notifications import send_welcome_email, send_password_reset_email
+from .google_maps_service import GoogleMapsService, GoogleMapsServiceError
 from django.conf import settings
 import requests
 import logging
@@ -17,6 +20,112 @@ import re
 from .email_notifications import send_welcome_email
 
 logger = logging.getLogger(__name__)
+
+
+class GoogleMapsAutocompleteThrottle(UserRateThrottle):
+    scope = 'google_maps_autocomplete'
+
+
+class GoogleMapsGeocodeThrottle(UserRateThrottle):
+    scope = 'google_maps_geocode'
+
+
+class MapsAutocompleteRequestSerializer(serializers.Serializer):
+    query = serializers.CharField(min_length=2, max_length=200)
+    language = serializers.ChoiceField(choices=['ar', 'en'], required=False, default='ar')
+    session_token = serializers.RegexField(
+        regex=r'^[A-Za-z0-9_-]{8,128}$',
+        required=False,
+        allow_blank=True,
+    )
+
+    def validate_query(self, value):
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise serializers.ValidationError('Query must be at least 2 non-space characters.')
+        return normalized
+
+    def validate_session_token(self, value):
+        return value.strip()
+
+
+class MapsGeocodeRequestSerializer(serializers.Serializer):
+    place_id = serializers.CharField(min_length=10, max_length=255)
+    language = serializers.ChoiceField(choices=['ar', 'en'], required=False, default='ar')
+
+    def validate_place_id(self, value):
+        normalized = value.strip()
+        if len(normalized) < 10:
+            raise serializers.ValidationError('place_id is invalid.')
+        return normalized
+
+
+class MapsReverseGeocodeRequestSerializer(serializers.Serializer):
+    lat = serializers.FloatField(min_value=-90.0, max_value=90.0)
+    lng = serializers.FloatField(min_value=-180.0, max_value=180.0)
+    language = serializers.ChoiceField(choices=['ar', 'en'], required=False, default='ar')
+
+
+class MapsAutocompleteView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [GoogleMapsAutocompleteThrottle]
+
+    def post(self, request):
+        serializer = MapsAutocompleteRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+
+        try:
+            service = GoogleMapsService()
+            result = service.autocomplete(
+                query=payload['query'],
+                language=payload.get('language', 'ar'),
+                session_token=payload.get('session_token') or None,
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except GoogleMapsServiceError as exc:
+            return Response({'error': exc.message, 'code': exc.code}, status=exc.status_code)
+
+
+class MapsGeocodeView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [GoogleMapsGeocodeThrottle]
+
+    def post(self, request):
+        serializer = MapsGeocodeRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+
+        try:
+            service = GoogleMapsService()
+            result = service.geocode_place(
+                place_id=payload['place_id'],
+                language=payload.get('language', 'ar'),
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except GoogleMapsServiceError as exc:
+            return Response({'error': exc.message, 'code': exc.code}, status=exc.status_code)
+
+
+class MapsReverseGeocodeView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [GoogleMapsGeocodeThrottle]
+
+    def post(self, request):
+        serializer = MapsReverseGeocodeRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+
+        try:
+            service = GoogleMapsService()
+            result = service.reverse_geocode(
+                lat=payload['lat'],
+                lng=payload['lng'],
+                language=payload.get('language', 'ar'),
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except GoogleMapsServiceError as exc:
+            return Response({'error': exc.message, 'code': exc.code}, status=exc.status_code)
 
 def normalize_phone_number(raw_number: str) -> str:
     if not raw_number:

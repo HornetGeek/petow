@@ -24,6 +24,7 @@ from .notifications import (
     notify_favorite_added, notify_adoption_request_received,
     notify_adoption_request_approved, notify_new_pet_added
 )
+from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
 # إضافة imports للإشعارات الجديدة
 from accounts.firebase_service import firebase_service
 import logging
@@ -31,36 +32,22 @@ import time
 from django.db import models
 from django.db.models import F, Value, FloatField, ExpressionWrapper, Count, Avg, Min, Max, IntegerField, Func
 from django.db.models.functions import Coalesce, Cast, Floor
-import requests
 
 logger = logging.getLogger(__name__)
 
 def reverse_geocode_address(lat: float, lng: float) -> str:
+    fallback = f"{lat:.4f}, {lng:.4f}"
     try:
-        res = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={
-                "format": "jsonv2",
-                "lat": str(lat),
-                "lon": str(lng),
-                "addressdetails": "1",
-                "accept-language": "ar,en",
-            },
-            headers={
-                "User-Agent": "PetMatchBackend/1.0 (contact@yourdomain.com)",
-                "Accept": "application/json",
-            },
-            timeout=6,
-        )
-        res.raise_for_status()
-        data = res.json() or {}
-        full = data.get("display_name") or ""
+        result = GoogleMapsService().reverse_geocode(lat=lat, lng=lng, language="ar")
+        full = (result.get("address") or "").strip()
         if full:
             parts = full.split(", ")
             return ", ".join(parts[:3]) if len(parts) > 3 else full
-        return f"{lat:.4f}, {lng:.4f}"
+        return fallback
+    except GoogleMapsServiceError:
+        return fallback
     except Exception:
-        return f"{lat:.4f}, {lng:.4f}"
+        return fallback
 
 
 MAP_DEFAULT_POINT_LIMIT = 300

@@ -3,34 +3,21 @@ from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from django.contrib.gis.geos import Point
 import re
 from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
-import requests
+from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
 
 def reverse_geocode_address(lat: float, lng: float) -> str:
+    fallback = f"{lat:.4f}, {lng:.4f}"
     try:
-        res = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={
-                "format": "jsonv2",
-                "lat": str(lat),
-                "lon": str(lng),
-                "addressdetails": "1",
-                "accept-language": "ar,en",
-            },
-            headers={
-                "User-Agent": "PetMatchBackend/1.0 (contact@yourdomain.com)",
-                "Accept": "application/json",
-            },
-            timeout=6,
-        )
-        res.raise_for_status()
-        data = res.json() or {}
-        full = data.get("display_name") or ""
+        result = GoogleMapsService().reverse_geocode(lat=lat, lng=lng, language="ar")
+        full = (result.get("address") or "").strip()
         if full:
             parts = full.split(", ")
             return ", ".join(parts[:3]) if len(parts) > 3 else full
-        return f"{lat:.4f}, {lng:.4f}"
+        return fallback
+    except GoogleMapsServiceError:
+        return fallback
     except Exception:
-        return f"{lat:.4f}, {lng:.4f}"
+        return fallback
 
 class BreedSerializer(serializers.ModelSerializer):
     class Meta:
