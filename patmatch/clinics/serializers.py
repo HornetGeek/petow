@@ -199,7 +199,7 @@ class ClinicMapPointSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
         fields = [
-            'id', 'name', 'address', 'phone', 'email',
+            'id', 'name', 'address', 'city', 'phone', 'email',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active',
             'service_categories', 'distance', 'distance_display',

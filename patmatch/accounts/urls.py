@@ -24,4 +24,7 @@ urlpatterns = [
     path('verification/request/', views.submit_account_verification, name='submit_account_verification'),
     path('verification/status/', views.get_verification_status, name='get_verification_status'),
     path('app-config/', views.get_app_config, name='app_config'),
+    path('maps/autocomplete/', views.MapsAutocompleteView.as_view(), name='maps_autocomplete'),
+    path('maps/geocode/', views.MapsGeocodeView.as_view(), name='maps_geocode'),
+    path('maps/reverse-geocode/', views.MapsReverseGeocodeView.as_view(), name='maps_reverse_geocode'),
 ]

@@ -164,9 +164,15 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],
+    'DEFAULT_THROTTLE_RATES': {
+        'google_maps_autocomplete': '60/minute',
+        'google_maps_geocode': '30/minute',
+    },
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20
 }
+
+GOOGLE_MAPS_SERVER_API_KEY = config('GOOGLE_MAPS_SERVER_API_KEY', default='')
 
 # Mobile app invite links
 MOBILE_APP_INVITE_LINK_BASE = os.environ.get('MOBILE_APP_INVITE_LINK_BASE', 'https://app.petmatch.com/invite')
