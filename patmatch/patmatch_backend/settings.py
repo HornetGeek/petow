@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'rest_framework.authtoken',
     'corsheaders',
     'django_filters',
+    'storages',
     
     # Local apps
     'accounts',
@@ -142,8 +143,82 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+
+
+def _ensure_trailing_slash(value: str) -> str:
+    normalized = (value or '').strip()
+    if not normalized:
+        return normalized
+    return normalized if normalized.endswith('/') else f'{normalized}/'
+
+
+def _normalize_domain_to_url(value: str) -> str:
+    normalized = (value or '').strip()
+    if not normalized:
+        return ''
+    if normalized.startswith('http://') or normalized.startswith('https://'):
+        return normalized
+    return f'https://{normalized}'
+
+
+USE_HETZNER_OBJECT_STORAGE = config('USE_HETZNER_OBJECT_STORAGE', default=False, cast=bool)
+HETZNER_S3_ENDPOINT_URL = config('HETZNER_S3_ENDPOINT_URL', default='').strip()
+HETZNER_S3_REGION = config('HETZNER_S3_REGION', default='').strip()
+HETZNER_S3_ACCESS_KEY = config('HETZNER_S3_ACCESS_KEY', default='').strip()
+HETZNER_S3_SECRET_KEY = config('HETZNER_S3_SECRET_KEY', default='').strip()
+HETZNER_MEDIA_BUCKET = config('HETZNER_MEDIA_BUCKET', default='').strip()
+HETZNER_MEDIA_CUSTOM_DOMAIN = config('HETZNER_MEDIA_CUSTOM_DOMAIN', default='').strip()
+HETZNER_MEDIA_URL = config('HETZNER_MEDIA_URL', default='').strip()
+
+# Static bucket vars are defined for phase-2 rollout and intentionally unused in this phase.
+HETZNER_STATIC_BUCKET = config('HETZNER_STATIC_BUCKET', default='').strip()
+HETZNER_STATIC_CUSTOM_DOMAIN = config('HETZNER_STATIC_CUSTOM_DOMAIN', default='').strip()
+
+if USE_HETZNER_OBJECT_STORAGE:
+    required_values = {
+        'HETZNER_S3_ENDPOINT_URL': HETZNER_S3_ENDPOINT_URL,
+        'HETZNER_S3_REGION': HETZNER_S3_REGION,
+        'HETZNER_S3_ACCESS_KEY': HETZNER_S3_ACCESS_KEY,
+        'HETZNER_S3_SECRET_KEY': HETZNER_S3_SECRET_KEY,
+        'HETZNER_MEDIA_BUCKET': HETZNER_MEDIA_BUCKET,
+    }
+    missing = [name for name, value in required_values.items() if not value]
+    if missing:
+        raise RuntimeError(
+            f"USE_HETZNER_OBJECT_STORAGE=true but required vars are missing: {', '.join(missing)}"
+        )
+
+    AWS_ACCESS_KEY_ID = HETZNER_S3_ACCESS_KEY
+    AWS_SECRET_ACCESS_KEY = HETZNER_S3_SECRET_KEY
+    AWS_S3_REGION_NAME = HETZNER_S3_REGION
+    AWS_S3_ENDPOINT_URL = HETZNER_S3_ENDPOINT_URL
+    AWS_STORAGE_BUCKET_NAME = HETZNER_MEDIA_BUCKET
+    AWS_DEFAULT_ACL = 'public-read'
+    AWS_QUERYSTRING_AUTH = False
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
+
+    if HETZNER_MEDIA_CUSTOM_DOMAIN:
+        AWS_S3_CUSTOM_DOMAIN = HETZNER_MEDIA_CUSTOM_DOMAIN
+
+    DEFAULT_FILE_STORAGE = 'patmatch_backend.storage_backends.HetznerMediaStorage'
+    STORAGES = {
+        'default': {
+            'BACKEND': 'patmatch_backend.storage_backends.HetznerMediaStorage',
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
+
+    media_base_url = HETZNER_MEDIA_URL
+    if not media_base_url and HETZNER_MEDIA_CUSTOM_DOMAIN:
+        media_base_url = _normalize_domain_to_url(HETZNER_MEDIA_CUSTOM_DOMAIN)
+    if not media_base_url:
+        media_base_url = f"{HETZNER_S3_ENDPOINT_URL.rstrip('/')}/{HETZNER_MEDIA_BUCKET}/"
+    MEDIA_URL = _ensure_trailing_slash(media_base_url)
 
 # Allow larger payloads so multi-image uploads don't fail (413 Payload Too Large)
 MAX_UPLOAD_SIZE_MB = 200

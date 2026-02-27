@@ -14,6 +14,7 @@ from .email_notifications import (
     send_adoption_request_email,
     send_adoption_request_approved_email
 )
+from .push_targets import attach_push_targets
 
 logger = logging.getLogger(__name__)
 
@@ -137,11 +138,11 @@ def notify_breeding_request_received(breeding_request):
     send_breeding_request_email(breeding_request)
 
     # إرسال إشعار دفع
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'breeding_request_received',
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
-    }
+    }, 'breeding_request_received')
     _send_push_if_allowed(receiver, title, message, push_payload, category='breeding')
 
     return notification
@@ -189,11 +190,11 @@ def notify_breeding_request_approved(breeding_request):
     # إرسال إيميل
     send_breeding_request_approved_email(breeding_request)
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'breeding_request_approved',
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
-    }
+    }, 'breeding_request_approved')
     _send_push_if_allowed(requester, title, message, push_payload, category='breeding')
 
     return notification
@@ -219,11 +220,11 @@ def notify_breeding_request_rejected(breeding_request):
         }
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'breeding_request_rejected',
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
-    }
+    }, 'breeding_request_rejected')
     _send_push_if_allowed(requester, title, message, push_payload, category='breeding')
 
     return notification
@@ -257,11 +258,11 @@ def notify_breeding_request_pending_reminder(breeding_request):
         },
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'breeding_request_pending_reminder',
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
-    }
+    }, 'breeding_request_pending_reminder')
     _send_push_if_allowed(receiver, title, message, push_payload, category='breeding')
 
     return notification
@@ -298,11 +299,11 @@ def notify_adoption_request_pending_reminder(adoption_request):
         },
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'adoption_request_pending_reminder',
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
-    }
+    }, 'adoption_request_pending_reminder')
     _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
 
     return notification
@@ -328,10 +329,10 @@ def notify_breeding_request_completed(breeding_request):
         )
         notifications.append(notification)
 
-        push_payload = {
+        push_payload = attach_push_targets({
             'type': 'breeding_request_completed',
             'breeding_request_id': str(breeding_request.id),
-        }
+        }, 'breeding_request_completed')
         _send_push_if_allowed(user, title, message, push_payload, category='breeding')
 
     return notifications
@@ -376,12 +377,12 @@ def notify_pet_status_changed(pet, old_status, new_status):
         }
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'pet_status_changed',
         'pet_id': str(pet.id),
         'old_status': old_status,
         'new_status': new_status,
-    }
+    }, 'pet_status_changed')
     _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
 
     if new_status == 'available_for_adoption':
@@ -475,12 +476,12 @@ def notify_new_pet_added(pet, radius_km=30):
         )
         notifications.append(notification)
 
-        push_payload = {
+        push_payload = attach_push_targets({
             'type': 'pet_nearby',
             'pet_id': str(pet.id),
             'pet_name': pet.name,
             'location': location_text,
-        }
+        }, 'pet_nearby')
         _send_push_if_allowed(user, title, message, push_payload, category='breeding')
 
     logger.info("Sent nearby pet notifications for pet %s to %d users", pet.id, len(notifications))
@@ -580,13 +581,13 @@ def notify_new_adoption_pet(pet, radius_km=10):
         )
         notifications.append(notification)
 
-        push_payload = {
+        push_payload = attach_push_targets({
             'type': 'adoption_pet_nearby',
             'pet_id': str(pet.id),
             'pet_name': pet.name,
             'distance_km': extra['distance_km'],
             'location': location_text,
-        }
+        }, 'adoption_pet_nearby')
         _send_push_if_allowed(user, title, message, push_payload, category='adoption')
 
     logger.info("Sent adoption pet notifications for pet %s to %d users", pet.id, len(notifications))
@@ -634,11 +635,11 @@ def notify_adoption_request_received(adoption_request):
         extra_data=extra_data
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'adoption_request_received',
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
-    }
+    }, 'adoption_request_received')
     _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
 
     # إرسال إيميل
@@ -677,11 +678,11 @@ def notify_adoption_request_approved(adoption_request):
     # إرسال إيميل
     send_adoption_request_approved_email(adoption_request)
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'adoption_request_approved',
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
-    }
+    }, 'adoption_request_approved')
     _send_push_if_allowed(adopter, title, message, push_payload, category='adoption')
 
     return notification 
