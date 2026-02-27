@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from pets.notifications import create_notification, _send_push_notification
+from pets.push_targets import attach_push_targets
 
 from .models import ClinicInvite, ClinicPatientRecord
 
@@ -279,10 +280,10 @@ def _ensure_invite_notification(invite: ClinicInvite) -> None:
         message=message,
         extra_data=extra,
     )
-    _send_push_notification(user, title, message, {
+    _send_push_notification(user, title, message, attach_push_targets({
         'type': 'clinic_invite',
         **extra,
-    })
+    }, 'clinic_invite'))
     return None
 
 

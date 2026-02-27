@@ -47,6 +47,7 @@ from .models import (
 from pets.models import Notification, ChatRoom, Pet
 from pets.serializers import PublicPetSerializer
 from pets.notifications import create_notification, _send_push_notification
+from pets.push_targets import attach_push_targets
 from .permissions import IsClinicStaff
 from .serializers import (
     ClinicSerializer,
@@ -1393,6 +1394,7 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
             if chat_room:
                 payload['firebase_chat_id'] = chat_room.firebase_chat_id
                 payload['chat_room_id'] = str(chat_room.id)
+            payload = attach_push_targets(payload, 'clinic_chat_message')
 
             delivered = _send_push_notification(user, title, message_body, payload)
             if delivered:
@@ -1755,12 +1757,12 @@ class ClinicBroadcastView(ClinicContextMixin, APIView):
 
             targeted += 1
             pet_name = patient.name or 'Pet'
-            payload = {
+            payload = attach_push_targets({
                 'type': 'clinic_broadcast',
                 'clinic_id': str(clinic.id),
                 'patient_id': str(patient.id),
                 'patient_name': pet_name,
-            }
+            }, 'clinic_broadcast')
             extra_data = {
                 'clinic_id': str(clinic.id),
                 'clinic_name': clinic.name,

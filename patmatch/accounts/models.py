@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from .email_notifications import send_account_verification_approved_email
 from .firebase_service import firebase_service
+from pets.push_targets import attach_push_targets
 
 logger = logging.getLogger(__name__)
 
@@ -265,11 +266,11 @@ class AccountVerification(models.Model):
             logger.warning("Firebase not initialised; cannot send verification approval push for user %s", user.id)
             return
 
-        push_data = {
+        push_data = attach_push_targets({
             'type': 'account_verification_approved',
             'verification_id': str(self.id),
             'user_id': str(user.id),
-        }
+        }, 'account_verification_approved')
 
         ok = firebase_service.send_notification(
             fcm_token=user.fcm_token,

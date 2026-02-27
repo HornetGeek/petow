@@ -32,6 +32,7 @@ import time
 from django.db import models
 from django.db.models import F, Value, FloatField, ExpressionWrapper, Count, Avg, Min, Max, IntegerField, Func
 from django.db.models.functions import Coalesce, Cast, Floor
+from django.core.files.storage import default_storage
 
 logger = logging.getLogger(__name__)
 
@@ -1495,36 +1496,25 @@ def upload_chat_image(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # حفظ الصورة
+        # حفظ الصورة عبر default_storage لتدعم التخزين المحلي أو S3
         import os
-        from django.conf import settings
-        
-        # إنشاء مجلد للصور إذا لم يكن موجود
-        upload_dir = os.path.join(settings.MEDIA_ROOT, 'chat_images')
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # إنشاء اسم فريد للملف
         import uuid
-        file_extension = os.path.splitext(image_file.name)[1]
+
+        file_extension = os.path.splitext(image_file.name)[1] or '.jpg'
         unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+        storage_path = f"chat_images/{unique_filename}"
+        saved_name = default_storage.save(storage_path, image_file)
+        image_url = default_storage.url(saved_name)
+        if image_url and not image_url.startswith('http') and not image_url.startswith('/'):
+            image_url = f"/{image_url}"
         
-        # حفظ الملف
-        file_path = os.path.join(upload_dir, unique_filename)
-        with open(file_path, 'wb+') as destination:
-            for chunk in image_file.chunks():
-                destination.write(chunk)
-        
-        logger.info(f"Image saved successfully: {file_path}")
-        
-        # إرجاع URL الصورة (relative path فقط)
-        image_url = f"/media/chat_images/{unique_filename}"
-        
+        logger.info(f"Image saved successfully: {saved_name}")
         logger.info(f"Image URL generated: {image_url}")
         
         return Response({
             'success': True,
             'image_url': image_url,
-            'filename': unique_filename
+            'filename': os.path.basename(saved_name)
         })
         
     except Exception as e:

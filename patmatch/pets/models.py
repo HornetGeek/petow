@@ -3,6 +3,7 @@ from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
 from accounts.models import User
+from .push_targets import attach_push_targets
 
 class Breed(models.Model):
     """نموذج السلالات"""
@@ -475,12 +476,12 @@ class Notification(models.Model):
 
         from .notifications import _send_push_notification  # local import to avoid circular dependency
 
-        push_payload = {
+        push_payload = attach_push_targets({
             'type': 'chat_message_received',
             'chat_id': chat_room.firebase_chat_id,
             'sender_id': str(sender_user.id),
             'sender_name': sender_user.get_full_name(),
-        }
+        }, 'chat_message_received')
         _send_push_notification(recipient_user, notification.title, notification.message, push_payload)
 
         return notification

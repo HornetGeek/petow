@@ -19,7 +19,8 @@ Pillow==9.5.0
 
 # HTTP & API
 requests==2.32.4
-urllib3==2.2.3
+urllib3==1.26.20; python_version < "3.10"
+urllib3==2.2.3; python_version >= "3.10"
 
 # Development & Debug
 python-decouple==3.8
@@ -27,6 +28,8 @@ python-decouple==3.8
 # Production
 gunicorn==21.2.0
 whitenoise==6.5.0
+django-storages==1.14.4
+boto3==1.35.36
 
 # Firebase & Notifications
 firebase-admin==6.4.0
