@@ -203,7 +203,6 @@ if USE_HETZNER_OBJECT_STORAGE:
     if HETZNER_MEDIA_CUSTOM_DOMAIN:
         AWS_S3_CUSTOM_DOMAIN = HETZNER_MEDIA_CUSTOM_DOMAIN
 
-    DEFAULT_FILE_STORAGE = 'patmatch_backend.storage_backends.HetznerMediaStorage'
     STORAGES = {
         'default': {
             'BACKEND': 'patmatch_backend.storage_backends.HetznerMediaStorage',
