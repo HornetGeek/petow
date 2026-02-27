@@ -9,7 +9,17 @@ from django.db import transaction
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
-from .models import Breed, Pet, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
+from .models import (
+    Breed,
+    Pet,
+    BreedingRequest,
+    Favorite,
+    VeterinaryClinic,
+    Notification,
+    ChatRoom,
+    AdoptionRequest,
+    NotificationOutbox,
+)
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, PetMapPointSerializer,
     BreedingRequestSerializer, FavoriteSerializer, VeterinaryClinicSerializer,
@@ -18,15 +28,8 @@ from .serializers import (
     AdoptionRequestSerializer, AdoptionRequestCreateSerializer, 
     AdoptionRequestListSerializer, AdoptionRequestResponseSerializer
 )
-from .notifications import (
-    notify_breeding_request_received, notify_breeding_request_approved,
-    notify_breeding_request_rejected, notify_breeding_request_completed,
-    notify_favorite_added, notify_adoption_request_received,
-    notify_adoption_request_approved, notify_new_pet_added
-)
+from .notification_events import enqueue_notification_event
 from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
-# إضافة imports للإشعارات الجديدة
-from accounts.firebase_service import firebase_service
 import logging
 import time
 from django.db import models
@@ -368,18 +371,22 @@ class PetListCreateView(generics.ListCreateAPIView):
         print(f"🆕 Django: Request user backend: {getattr(request.user, 'backend', 'NO_BACKEND')}")
         
         try:
-            response = super().create(request, *args, **kwargs)
-            if response.status_code == status.HTTP_201_CREATED and response.data.get('id'):
-                try:
-                    pet = Pet.objects.get(id=response.data['id'])
-                    notify_new_pet_added(pet)
-                except Pet.DoesNotExist:
-                    logger.warning("Newly created pet not found for notification (id=%s)", response.data.get('id'))
-            return response
+            with transaction.atomic():
+                response = super().create(request, *args, **kwargs)
+
+                if response.status_code == status.HTTP_201_CREATED and response.data.get('id'):
+                    pet_id = response.data.get('id')
+                    enqueue_notification_event(
+                        event_type=NotificationOutbox.EVENT_PET_CREATED,
+                        object_id=pet_id,
+                        dedupe_key=f"pet_created:{pet_id}",
+                    )
         except Exception as e:
             print(f"❌ Django: Create error: {str(e)}")
             print(f"❌ Django: Error type: {type(e)}")
             raise
+
+        return response
     # نُحافظ على البحث والفلترة، ونُدير الترتيب يدوياً لدعم الأقرب أولاً افتراضياً
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['pet_type', 'gender', 'status', 'breed']
@@ -729,13 +736,17 @@ class BreedingRequestListCreateView(generics.ListCreateAPIView):
     
     def create(self, request, *args, **kwargs):
         """إنشاء طلب مقابلة جديد مع إرسال إشعار"""
-        response = super().create(request, *args, **kwargs)
-        
-        # إرسال إشعار للمستقبل
-        if response.status_code == 201:
-            breeding_request = BreedingRequest.objects.get(id=response.data['id'])
-            notify_breeding_request_received(breeding_request)
-        
+        with transaction.atomic():
+            response = super().create(request, *args, **kwargs)
+
+            if response.status_code == status.HTTP_201_CREATED and response.data.get('id'):
+                breeding_request_id = response.data['id']
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_BREEDING_REQUEST_RECEIVED,
+                    object_id=breeding_request_id,
+                    dedupe_key=f"breeding_request_received:{breeding_request_id}",
+                )
+
         return response
 
 class BreedingRequestDetailView(generics.RetrieveUpdateAPIView):
@@ -786,22 +797,29 @@ def respond_to_breeding_request(request, request_id):
     response_type = request.data.get('response')  # 'approve' or 'reject'
     response_message = request.data.get('message', '')
     
-    if response_type == 'approve':
-        breeding_request.status = 'approved'
-        # إرسال إشعار بالقبول
-        notify_breeding_request_approved(breeding_request)
-    elif response_type == 'reject':
-        breeding_request.status = 'rejected'
-        # إرسال إشعار بالرفض
-        notify_breeding_request_rejected(breeding_request)
-    else:
-        return Response(
-            {'error': 'نوع الرد غير صحيح. يجب أن يكون approve أو reject'},
-            status=status.HTTP_400_BAD_REQUEST
+    with transaction.atomic():
+        if response_type == 'approve':
+            breeding_request.status = 'approved'
+            event_type = NotificationOutbox.EVENT_BREEDING_REQUEST_APPROVED
+            event_dedupe_key = f"breeding_request_approved:{breeding_request.id}"
+        elif response_type == 'reject':
+            breeding_request.status = 'rejected'
+            event_type = NotificationOutbox.EVENT_BREEDING_REQUEST_REJECTED
+            event_dedupe_key = f"breeding_request_rejected:{breeding_request.id}"
+        else:
+            return Response(
+                {'error': 'نوع الرد غير صحيح. يجب أن يكون approve أو reject'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        breeding_request.response_message = response_message
+        breeding_request.save()
+
+        enqueue_notification_event(
+            event_type=event_type,
+            object_id=breeding_request.id,
+            dedupe_key=event_dedupe_key,
         )
-    
-    breeding_request.response_message = response_message
-    breeding_request.save()
     
     serializer = BreedingRequestSerializer(breeding_request)
     return Response(serializer.data)
@@ -1542,13 +1560,17 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
     def create(self, request, *args, **kwargs):
         """إنشاء طلب تبني جديد مع إرسال إشعار"""
         # فتح طلبات التبني بدون شرط توثيق رقم الهاتف
-        response = super().create(request, *args, **kwargs)
-        
-        # إرسال إشعار لصاحب الحيوان
-        if response.status_code == 201:
-            adoption_request = AdoptionRequest.objects.get(id=response.data['id'])
-            notify_adoption_request_received(adoption_request)
-        
+        with transaction.atomic():
+            response = super().create(request, *args, **kwargs)
+
+            if response.status_code == status.HTTP_201_CREATED and response.data.get('id'):
+                adoption_request_id = response.data['id']
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_ADOPTION_REQUEST_RECEIVED,
+                    object_id=adoption_request_id,
+                    dedupe_key=f"adoption_request_received:{adoption_request_id}",
+                )
+
         return response
 
 
@@ -1608,55 +1630,59 @@ def respond_to_adoption_request(request, request_id):
     if admin_notes:
         adoption_request.admin_notes = admin_notes
     
-    # تنفيذ الإجراء المطلوب
-    if action == 'approve':
-        if adoption_request.can_be_approved:
-            adoption_request.approve()
-            message = 'تم قبول طلب التبني'
-            
-            # إرسال إشعار لطالب التبني
-            notify_adoption_request_approved(adoption_request)
-            
-            # إنشاء غرفة محادثة عند قبول طلب التبني
-            try:
-                from .models import ChatRoom
-                # التحقق من عدم وجود غرفة محادثة مسبقة
-                existing_chat = ChatRoom.objects.filter(
-                    breeding_request__isnull=True,
-                    adoption_request=adoption_request
-                ).first()
-                
-                if not existing_chat:
-                    # إنشاء غرفة محادثة جديدة
-                    chat_room = ChatRoom.objects.create(
-                        firebase_chat_id=f"adoption_{adoption_request.id}_{int(time.time())}",
-                        adoption_request=adoption_request,
-                        is_active=True
-                    )
-                    message += ' - تم إنشاء غرفة محادثة للتواصل'
-            except Exception as e:
-                # في حالة حدوث خطأ في إنشاء المحادثة، لا نوقف العملية
-                print(f"Error creating chat room: {e}")
-                message += ' - حدث خطأ في إنشاء غرفة المحادثة'
-        else:
-            return Response(
-                {'error': 'لا يمكن قبول هذا الطلب'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-    elif action == 'reject':
-        adoption_request.reject()
-        message = 'تم رفض طلب التبني'
-    elif action == 'complete':
-        if adoption_request.can_be_completed:
-            adoption_request.complete()
-            message = 'تم إكمال عملية التبني'
-        else:
-            return Response(
-                {'error': 'لا يمكن إكمال هذا الطلب'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-    
-    adoption_request.save()
+    with transaction.atomic():
+        # تنفيذ الإجراء المطلوب
+        if action == 'approve':
+            if adoption_request.can_be_approved:
+                adoption_request.approve()
+                message = 'تم قبول طلب التبني'
+
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_ADOPTION_REQUEST_APPROVED,
+                    object_id=adoption_request.id,
+                    dedupe_key=f"adoption_request_approved:{adoption_request.id}",
+                )
+
+                # إنشاء غرفة محادثة عند قبول طلب التبني
+                try:
+                    from .models import ChatRoom
+                    # التحقق من عدم وجود غرفة محادثة مسبقة
+                    existing_chat = ChatRoom.objects.filter(
+                        breeding_request__isnull=True,
+                        adoption_request=adoption_request
+                    ).first()
+
+                    if not existing_chat:
+                        # إنشاء غرفة محادثة جديدة
+                        ChatRoom.objects.create(
+                            firebase_chat_id=f"adoption_{adoption_request.id}_{int(time.time())}",
+                            adoption_request=adoption_request,
+                            is_active=True
+                        )
+                        message += ' - تم إنشاء غرفة محادثة للتواصل'
+                except Exception as e:
+                    # في حالة حدوث خطأ في إنشاء المحادثة، لا نوقف العملية
+                    print(f"Error creating chat room: {e}")
+                    message += ' - حدث خطأ في إنشاء غرفة المحادثة'
+            else:
+                return Response(
+                    {'error': 'لا يمكن قبول هذا الطلب'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif action == 'reject':
+            adoption_request.reject()
+            message = 'تم رفض طلب التبني'
+        elif action == 'complete':
+            if adoption_request.can_be_completed:
+                adoption_request.complete()
+                message = 'تم إكمال عملية التبني'
+            else:
+                return Response(
+                    {'error': 'لا يمكن إكمال هذا الطلب'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        adoption_request.save()
     
     return Response({
         'message': message,
