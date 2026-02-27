@@ -396,6 +396,13 @@ class Notification(models.Model):
     )
     title = models.CharField(max_length=200, help_text="عنوان الإشعار")
     message = models.TextField(help_text="محتوى الإشعار")
+    event_key = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="مفتاح idempotency لمنع تكرار نفس الإشعار"
+    )
     
     # معلومات إضافية
     related_pet = models.ForeignKey(
@@ -442,6 +449,13 @@ class Notification(models.Model):
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['user', 'is_read']),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'event_key'],
+                condition=models.Q(event_key__isnull=False),
+                name='pets_notification_user_event_key_uniq',
+            ),
+        ]
     
     def __str__(self):
         return f"{self.title} - {self.user.get_full_name()}"
@@ -485,6 +499,62 @@ class Notification(models.Model):
         _send_push_notification(recipient_user, notification.title, notification.message, push_payload)
 
         return notification
+
+
+class NotificationOutbox(models.Model):
+    EVENT_PET_CREATED = 'pet_created'
+    EVENT_BREEDING_REQUEST_RECEIVED = 'breeding_request_received'
+    EVENT_BREEDING_REQUEST_APPROVED = 'breeding_request_approved'
+    EVENT_BREEDING_REQUEST_REJECTED = 'breeding_request_rejected'
+    EVENT_ADOPTION_REQUEST_RECEIVED = 'adoption_request_received'
+    EVENT_ADOPTION_REQUEST_APPROVED = 'adoption_request_approved'
+
+    EVENT_TYPE_CHOICES = [
+        (EVENT_PET_CREATED, 'Pet created'),
+        (EVENT_BREEDING_REQUEST_RECEIVED, 'Breeding request received'),
+        (EVENT_BREEDING_REQUEST_APPROVED, 'Breeding request approved'),
+        (EVENT_BREEDING_REQUEST_REJECTED, 'Breeding request rejected'),
+        (EVENT_ADOPTION_REQUEST_RECEIVED, 'Adoption request received'),
+        (EVENT_ADOPTION_REQUEST_APPROVED, 'Adoption request approved'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROCESSING = 'processing'
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROCESSING, 'Processing'),
+        (STATUS_SUCCEEDED, 'Succeeded'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    event_type = models.CharField(max_length=64, choices=EVENT_TYPE_CHOICES)
+    object_id = models.PositiveBigIntegerField()
+    payload = models.JSONField(default=dict, blank=True)
+    dedupe_key = models.CharField(max_length=255, unique=True)
+
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Notification Outbox Event"
+        verbose_name_plural = "Notification Outbox Events"
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['status', 'next_attempt_at']),
+            models.Index(fields=['event_type', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type}#{self.object_id} ({self.status})"
+
 
 class ChatRoom(models.Model):
     """غرفة محادثة بين مالكين حيوانات - metadata فقط، الرسائل في Firebase"""

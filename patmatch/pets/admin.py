@@ -1,5 +1,16 @@
 from django.contrib import admin
-from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
+from .models import (
+    Breed,
+    Pet,
+    PetImage,
+    BreedingRequest,
+    Favorite,
+    VeterinaryClinic,
+    Notification,
+    NotificationOutbox,
+    ChatRoom,
+    AdoptionRequest,
+)
 
 @admin.register(Breed)
 class BreedAdmin(admin.ModelAdmin):
@@ -97,6 +108,15 @@ class NotificationAdmin(admin.ModelAdmin):
     
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user', 'related_pet', 'related_breeding_request')
+
+
+@admin.register(NotificationOutbox)
+class NotificationOutboxAdmin(admin.ModelAdmin):
+    list_display = ['id', 'event_type', 'object_id', 'status', 'attempts', 'next_attempt_at', 'created_at']
+    list_filter = ['status', 'event_type', 'created_at']
+    search_fields = ['dedupe_key', 'last_error']
+    readonly_fields = ['created_at', 'updated_at', 'processed_at']
+
 
 @admin.register(Favorite)
 class FavoriteAdmin(admin.ModelAdmin):

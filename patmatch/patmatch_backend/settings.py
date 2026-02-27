@@ -219,6 +219,39 @@ if USE_HETZNER_OBJECT_STORAGE:
         media_base_url = f"{HETZNER_S3_ENDPOINT_URL.rstrip('/')}/{HETZNER_MEDIA_BUCKET}/"
     MEDIA_URL = _ensure_trailing_slash(media_base_url)
 
+NOTIFICATIONS_DELIVERY_MODE = config('NOTIFICATIONS_DELIVERY_MODE', default='sync').strip().lower()
+if NOTIFICATIONS_DELIVERY_MODE not in {'sync', 'async'}:
+    raise RuntimeError("NOTIFICATIONS_DELIVERY_MODE must be either 'sync' or 'async'")
+
+REDIS_URL = config('REDIS_URL', default='redis://redis:6379/0').strip()
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=REDIS_URL).strip() or REDIS_URL
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=CELERY_BROKER_URL).strip() or CELERY_BROKER_URL
+CELERY_NOTIFICATION_QUEUE = config('CELERY_NOTIFICATION_QUEUE', default='notifications').strip() or 'notifications'
+CELERY_NOTIFICATION_MAX_ATTEMPTS = config('CELERY_NOTIFICATION_MAX_ATTEMPTS', default=8, cast=int)
+CELERY_NOTIFICATION_RETRY_BASE_SECONDS = config('CELERY_NOTIFICATION_RETRY_BASE_SECONDS', default=5, cast=int)
+CELERY_NOTIFICATION_RETRY_MAX_SECONDS = config('CELERY_NOTIFICATION_RETRY_MAX_SECONDS', default=900, cast=int)
+CELERY_NOTIFICATION_STUCK_SECONDS = config('CELERY_NOTIFICATION_STUCK_SECONDS', default=900, cast=int)
+CELERY_NOTIFICATION_SWEEP_SECONDS = config('CELERY_NOTIFICATION_SWEEP_SECONDS', default=60, cast=int)
+CELERY_NOTIFICATION_SWEEP_LIMIT = config('CELERY_NOTIFICATION_SWEEP_LIMIT', default=200, cast=int)
+
+CELERY_TASK_DEFAULT_QUEUE = CELERY_NOTIFICATION_QUEUE
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TASK_ROUTES = {
+    'pets.tasks.process_notification_outbox_event': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.sweep_notification_outbox': {'queue': CELERY_NOTIFICATION_QUEUE},
+}
+CELERY_BEAT_SCHEDULE = {
+    'notification-outbox-sweep': {
+        'task': 'pets.tasks.sweep_notification_outbox',
+        'schedule': CELERY_NOTIFICATION_SWEEP_SECONDS,
+        'kwargs': {'limit': CELERY_NOTIFICATION_SWEEP_LIMIT},
+    },
+}
+
 # Allow larger payloads so multi-image uploads don't fail (413 Payload Too Large)
 MAX_UPLOAD_SIZE_MB = 200
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_SIZE_MB * 1024 * 1024
