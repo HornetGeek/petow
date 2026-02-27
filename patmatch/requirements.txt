@@ -30,6 +30,7 @@ whitenoise==6.5.0
 
 # Firebase & Notifications
 firebase-admin==6.4.0
+boto3==1.35.36
 
 # Additional Utilities
 defusedxml==0.7.1 
