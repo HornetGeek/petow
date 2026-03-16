@@ -2,7 +2,21 @@ from rest_framework import serializers
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from django.contrib.gis.geos import Point
 import re
-from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
+from .models import (
+    Breed,
+    Pet,
+    PetImage,
+    BreedingRequest,
+    Favorite,
+    VeterinaryClinic,
+    Notification,
+    NotificationInteractionEvent,
+    ChatRoom,
+    AdoptionRequest,
+)
+from .notifications import get_notification_category, get_notification_priority
+from .push_targets import build_mobile_deep_link, build_web_url
+from accounts.models import UserNotificationSettings
 from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
 
 def reverse_geocode_address(lat: float, lng: float) -> str:
@@ -230,35 +244,59 @@ class PetListSerializer(serializers.ModelSerializer):
     distance_display = serializers.SerializerMethodField()
     latitude = serializers.SerializerMethodField()
     longitude = serializers.SerializerMethodField()
-    
+
+    def _resolve_distance_km(self, obj):
+        if hasattr(obj, '_cached_distance_km'):
+            return obj._cached_distance_km
+
+        distance_km = None
+
+        annotated_km = getattr(obj, 'distance_km', None)
+        if annotated_km is None:
+            annotated_km = getattr(obj, '_distance_km', None)
+        if annotated_km is not None:
+            try:
+                distance_km = round(float(annotated_km), 2)
+            except (TypeError, ValueError):
+                distance_km = None
+
+        if distance_km is None:
+            distance_value = getattr(obj, 'distance_m', None)
+            if distance_value is None:
+                distance_value = getattr(obj, 'map_distance_m', None)
+            if distance_value is not None:
+                try:
+                    distance_meters = float(getattr(distance_value, 'm', distance_value))
+                    distance_km = round(distance_meters / 1000.0, 2)
+                except (TypeError, ValueError):
+                    distance_km = None
+
+        if distance_km is None:
+            user_lat = self.context.get('user_lat')
+            user_lng = self.context.get('user_lng')
+            if user_lat is not None and user_lng is not None:
+                try:
+                    distance_km = obj.calculate_distance(float(user_lat), float(user_lng))
+                except (ValueError, TypeError):
+                    distance_km = None
+
+        obj._cached_distance_km = distance_km
+        return distance_km
+
     def get_distance(self, obj):
         """حساب المسافة بالكيلومتر"""
-        # الحصول على الموقع من context مباشرة
-        user_lat = self.context.get('user_lat')
-        user_lng = self.context.get('user_lng')
-        
-        if user_lat is not None and user_lng is not None:
-            try:
-                return obj.calculate_distance(float(user_lat), float(user_lng))
-            except (ValueError, TypeError):
-                return None
-        return None
-    
+        return self._resolve_distance_km(obj)
+
     def get_distance_display(self, obj):
         """عرض المسافة بشكل مفهوم"""
-        # الحصول على الموقع من context مباشرة
-        user_lat = self.context.get('user_lat')
-        user_lng = self.context.get('user_lng')
-        
-        if user_lat is not None and user_lng is not None:
-            try:
-                distance_display = obj.get_distance_display(float(user_lat), float(user_lng))
-                return distance_display
-            except (ValueError, TypeError) as e:
-                return "الموقع غير محدد"
-        else:
-            print(f"❌ Serializer: No user coordinates in context")
-        return None
+        distance_km = self._resolve_distance_km(obj)
+        if distance_km is None:
+            return None
+        if distance_km < 1:
+            return f"{int(distance_km * 1000)} متر"
+        if distance_km < 100:
+            return f"{distance_km:.1f} كم"
+        return f"{int(distance_km)} كم"
 
     def get_latitude(self, obj):
         value = getattr(obj, 'map_latitude', None)
@@ -297,7 +335,7 @@ class PetListSerializer(serializers.ModelSerializer):
             'age_display', 'age_months', 'gender', 'gender_display', 'description', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 'owner_is_verified',
-            'has_health_certificates', 'hosting_preference', 'created_at'
+            'has_health_certificates', 'hosting_preference', 'created_at', 'updated_at'
         ]
 
 
@@ -452,6 +490,13 @@ class NotificationSerializer(serializers.ModelSerializer):
     type_display = serializers.CharField(source='get_type_display', read_only=True)
     related_pet_details = PetListSerializer(source='related_pet', read_only=True)
     time_ago = serializers.SerializerMethodField()
+    category = serializers.SerializerMethodField()
+    priority = serializers.SerializerMethodField()
+    deep_link = serializers.SerializerMethodField()
+    url = serializers.SerializerMethodField()
+    campaign_key = serializers.SerializerMethodField()
+    entity_type = serializers.SerializerMethodField()
+    entity_id = serializers.SerializerMethodField()
     
     class Meta:
         model = Notification
@@ -459,7 +504,9 @@ class NotificationSerializer(serializers.ModelSerializer):
             'id', 'type', 'type_display', 'title', 'message', 
             'related_pet', 'related_pet_details',
             'related_breeding_request', 'related_chat_room', 'is_read', 'read_at',
-            'extra_data', 'created_at', 'time_ago'
+            'extra_data', 'created_at', 'time_ago',
+            'category', 'priority', 'deep_link', 'url', 'campaign_key',
+            'entity_type', 'entity_id',
         ]
         read_only_fields = ['user', 'created_at', 'read_at']
     
@@ -481,6 +528,176 @@ class NotificationSerializer(serializers.ModelSerializer):
             return f"منذ {minutes} دقيقة"
         else:
             return "الآن" 
+
+    def _context_payload(self, obj):
+        payload = dict(self._extra_data(obj))
+        payload.setdefault('pet_id', obj.related_pet_id)
+        payload.setdefault('breeding_request_id', obj.related_breeding_request_id)
+        payload.setdefault('chat_room_id', obj.related_chat_room_id)
+        payload.setdefault('related_pet', obj.related_pet_id)
+        payload.setdefault('notification_id', obj.id)
+        return payload
+
+    def _extra_data(self, obj):
+        return obj.extra_data if isinstance(obj.extra_data, dict) else {}
+
+    def _resolve_push_type(self, obj):
+        extra_type = self._extra_data(obj).get('type')
+        if extra_type:
+            return str(extra_type).strip().lower()
+        return (obj.type or '').strip().lower()
+
+    def get_category(self, obj):
+        return get_notification_category(self._resolve_push_type(obj))
+
+    def get_priority(self, obj):
+        return get_notification_priority(self._resolve_push_type(obj))
+
+    def get_deep_link(self, obj):
+        payload = self._context_payload(obj)
+        if payload.get('deep_link'):
+            return payload['deep_link']
+        return build_mobile_deep_link(self._resolve_push_type(obj), payload)
+
+    def get_url(self, obj):
+        payload = self._context_payload(obj)
+        if payload.get('url'):
+            return payload['url']
+        return build_web_url(self._resolve_push_type(obj), payload)
+
+    def get_campaign_key(self, obj):
+        payload = self._extra_data(obj)
+        if payload.get('campaign_key'):
+            return payload.get('campaign_key')
+        if obj.event_key:
+            return obj.event_key
+        return self._resolve_push_type(obj)
+
+    def get_entity_type(self, obj):
+        payload = self._extra_data(obj)
+        if payload.get('entity_type'):
+            return payload.get('entity_type')
+        if payload.get('target_type'):
+            return payload.get('target_type')
+        if obj.related_chat_room_id:
+            return 'chat_room'
+        if obj.related_breeding_request_id:
+            return 'breeding_request'
+        if obj.related_pet_id:
+            return 'pet'
+        if payload.get('adoption_request_id'):
+            return 'adoption_request'
+        if payload.get('clinic_id'):
+            return 'clinic'
+        return None
+
+    def get_entity_id(self, obj):
+        payload = self._extra_data(obj)
+        if payload.get('entity_id') is not None:
+            return payload.get('entity_id')
+        if payload.get('target_id') is not None:
+            return payload.get('target_id')
+        if obj.related_chat_room_id:
+            return obj.related_chat_room_id
+        if obj.related_breeding_request_id:
+            return obj.related_breeding_request_id
+        if obj.related_pet_id:
+            return obj.related_pet_id
+        if payload.get('adoption_request_id') is not None:
+            return payload.get('adoption_request_id')
+        if payload.get('clinic_id') is not None:
+            return payload.get('clinic_id')
+        return None
+
+
+class NotificationPreferencesSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserNotificationSettings
+        fields = [
+            'enabled_global',
+            'allow_transactional',
+            'allow_chat',
+            'allow_breeding',
+            'allow_adoption',
+            'allow_clinic',
+            'allow_discovery',
+            'allow_reminders',
+            'quiet_hours_start',
+            'quiet_hours_end',
+            'timezone',
+            'max_push_per_day',
+            'max_discovery_per_day',
+            'min_minutes_between_non_transactional',
+        ]
+
+    def update(self, instance, validated_data):
+        settings_obj = super().update(instance, validated_data)
+        settings_obj.sync_to_legacy_user_fields()
+        return settings_obj
+
+
+class NotificationInteractionEventCreateSerializer(serializers.Serializer):
+    notification_id = serializers.IntegerField(required=False)
+    event_type = serializers.ChoiceField(choices=NotificationInteractionEvent.EVENT_TYPE_CHOICES)
+    source = serializers.ChoiceField(choices=NotificationInteractionEvent.SOURCE_CHOICES)
+    metadata = serializers.JSONField(required=False, default=dict)
+
+    def validate_notification_id(self, value):
+        request = self.context['request']
+        notification = Notification.objects.filter(id=value, user=request.user).first()
+        if not notification:
+            raise serializers.ValidationError("Notification not found for this user.")
+        self.context['notification_obj'] = notification
+        return value
+
+    def create(self, validated_data):
+        request = self.context['request']
+        notification = self.context.get('notification_obj')
+        return NotificationInteractionEvent.objects.create(
+            user=request.user,
+            notification=notification,
+            event_type=validated_data['event_type'],
+            source=validated_data['source'],
+            metadata=validated_data.get('metadata') or {},
+        )
+
+
+def _select_chat_pet_for_viewer(chat_room: ChatRoom, request=None):
+    """
+    Select the pet image/name we should show for a chat.
+
+    Breeding chats have two pets; we show the *other participant's* pet:
+    - requester sees target_pet
+    - target_pet.owner sees requester_pet
+
+    Adoption chats always show the adoption pet.
+    Clinic chats return None (no pet image).
+    """
+    user = getattr(request, 'user', None) if request else None
+    user_id = getattr(user, 'id', None) if user and getattr(user, 'is_authenticated', False) else None
+
+    try:
+        if chat_room.breeding_request:
+            breeding_request = chat_room.breeding_request
+            target_pet = getattr(breeding_request, 'target_pet', None)
+            requester_pet = getattr(breeding_request, 'requester_pet', None)
+
+            if user_id:
+                if getattr(breeding_request, 'requester_id', None) == user_id:
+                    return target_pet or requester_pet
+                target_owner_id = getattr(target_pet, 'owner_id', None) if target_pet else None
+                if target_owner_id == user_id:
+                    return requester_pet or target_pet
+
+            # Safe default when user context is missing/unknown.
+            return target_pet or requester_pet
+
+        if chat_room.adoption_request:
+            return getattr(chat_room.adoption_request, 'pet', None)
+    except Exception:
+        pass
+
+    return None
 
 class ChatRoomSerializer(serializers.ModelSerializer):
     """سيريلايزر لغرف المحادثة"""
@@ -528,17 +745,9 @@ class ChatRoomSerializer(serializers.ModelSerializer):
     def get_pet_details(self, obj):
         """تفاصيل الحيوان أو المريض المرتبط بالمحادثة"""
         try:
-            if obj.breeding_request and obj.breeding_request.target_pet:
-                pet = obj.breeding_request.target_pet
-                return {
-                    'id': pet.id,
-                    'name': pet.name,
-                    'breed_name': pet.breed.name,
-                    'pet_type_display': pet.pet_type_display,
-                    'main_image': pet.main_image.url if pet.main_image else None,
-                }
-            if obj.adoption_request and obj.adoption_request.pet:
-                pet = obj.adoption_request.pet
+            request = self.context.get('request')
+            pet = _select_chat_pet_for_viewer(obj, request=request)
+            if pet:
                 return {
                     'id': pet.id,
                     'name': pet.name,
@@ -616,10 +825,10 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
     def get_pet_name(self, obj):
         """اسم الحيوان او المريض"""
         try:
-            if obj.breeding_request and obj.breeding_request.target_pet:
-                return obj.breeding_request.target_pet.name
-            if obj.adoption_request and obj.adoption_request.pet:
-                return obj.adoption_request.pet.name
+            request = self.context.get('request')
+            pet = _select_chat_pet_for_viewer(obj, request=request)
+            if pet:
+                return pet.name
             if obj.clinic_patient:
                 return obj.clinic_patient.name or 'مريض العيادة'
         except Exception:
@@ -629,10 +838,10 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
     def get_pet_image(self, obj):
         """صورة الحيوان أو المريض"""
         try:
-            if obj.breeding_request and obj.breeding_request.target_pet and obj.breeding_request.target_pet.main_image:
-                return obj.breeding_request.target_pet.main_image.url
-            if obj.adoption_request and obj.adoption_request.pet and obj.adoption_request.pet.main_image:
-                return obj.adoption_request.pet.main_image.url
+            request = self.context.get('request')
+            pet = _select_chat_pet_for_viewer(obj, request=request)
+            if pet and getattr(pet, 'main_image', None):
+                return pet.main_image.url
         except Exception:
             pass
         return None
@@ -648,7 +857,30 @@ class ChatContextSerializer(serializers.ModelSerializer):
     
     def get_chat_context(self, obj):
         """الحصول على السياق الكامل للمحادثة"""
-        return obj.get_chat_context()
+        ctx = obj.get_chat_context()
+        if not ctx:
+            return ctx
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        if not (user and getattr(user, 'is_authenticated', False)):
+            return ctx
+
+        # For breeding chats, override the pet shown in the context to be the other user's pet.
+        if obj.breeding_request:
+            pet = _select_chat_pet_for_viewer(obj, request=request)
+            if pet:
+                owner = getattr(pet, 'owner', None)
+                ctx['pet'] = {
+                    'id': pet.id,
+                    'name': pet.name,
+                    'breed_name': pet.breed.name,
+                    'pet_type_display': pet.pet_type_display,
+                    'main_image': pet.main_image.url if pet.main_image else None,
+                    'owner_name': f"{owner.first_name} {owner.last_name}".strip() if owner else None,
+                }
+
+        return ctx
 
 
 class ChatStatusSerializer(serializers.ModelSerializer):

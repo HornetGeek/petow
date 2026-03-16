@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,7 @@ from django.db import models, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import generics, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
@@ -44,9 +46,10 @@ from .models import (
     ClinicPatientRecord,
     ClinicInvite,
 )
-from pets.models import Notification, ChatRoom, Pet
+from pets.models import Notification, ChatRoom, Pet, NotificationOutbox
 from pets.serializers import PublicPetSerializer
-from pets.notifications import create_notification, _send_push_notification
+from pets.notifications import create_notification
+from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
 from .permissions import IsClinicStaff
 from .serializers import (
@@ -99,6 +102,8 @@ class ClinicListPagination(PageNumberPagination):
 MAP_DEFAULT_POINT_LIMIT = 300
 MAP_MAX_POINT_LIMIT = 1000
 MAP_CLUSTER_ZOOM_THRESHOLD = 13
+MAP_LOW_ZOOM_POINT_LIMIT = 200
+NOTIFICATION_PUSH_BATCH_SIZE = max(1, int(getattr(settings, 'NOTIFICATION_PUSH_BATCH_SIZE', 500)))
 
 
 def _parse_bool_param(raw_value, default=True):
@@ -161,9 +166,21 @@ def _parse_point_limit(raw_limit):
     return min(parsed, MAP_MAX_POINT_LIMIT)
 
 
+def _cap_limit_points_for_zoom(limit_points, zoom):
+    if zoom <= 8:
+        return min(limit_points, MAP_LOW_ZOOM_POINT_LIMIT)
+    return limit_points
+
+
 def _cell_size_meters_for_zoom(zoom):
     meters_per_pixel = 40075016.686 / (256 * (2 ** max(zoom, 1)))
     return max(meters_per_pixel * 64, 25.0)
+
+
+def _build_map_cache_key(prefix, params):
+    parts = [f"{key}={params.get(key, '')}" for key in sorted(params.keys())]
+    digest = hashlib.md5("&".join(parts).encode('utf-8')).hexdigest()
+    return f"{prefix}:{digest}"
 
 
 class ClinicMapMarkersView(APIView):
@@ -176,7 +193,10 @@ class ClinicMapMarkersView(APIView):
             min_lng, min_lat, max_lng, max_lat = _parse_bbox_param(request.query_params.get('bbox'))
             zoom = _parse_zoom_param(request.query_params.get('zoom'))
             cluster_enabled = _parse_bool_param(request.query_params.get('cluster'), default=True)
-            limit_points = _parse_point_limit(request.query_params.get('limit_points'))
+            limit_points = _cap_limit_points_for_zoom(
+                _parse_point_limit(request.query_params.get('limit_points')),
+                zoom,
+            )
 
             user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
             user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
@@ -191,6 +211,23 @@ class ClinicMapMarkersView(APIView):
 
         service_category = request.query_params.get('service_category')
         search_term = request.query_params.get('search')
+
+        cache_key = _build_map_cache_key(
+            'clinics_map_markers',
+            {
+                'bbox': request.query_params.get('bbox'),
+                'zoom': zoom,
+                'cluster': cluster_enabled,
+                'limit_points': limit_points,
+                'user_lat': user_lat,
+                'user_lng': user_lng,
+                'service_category': service_category,
+                'search': search_term,
+            },
+        )
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
 
         effective_point_field = gis_models.PointField(geography=True, srid=4326)
         bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
@@ -346,7 +383,7 @@ class ClinicMapMarkersView(APIView):
             duration_ms,
         )
 
-        return Response({
+        payload = {
             'clusters': clusters_payload,
             'points': points_payload,
             'meta': {
@@ -362,7 +399,9 @@ class ClinicMapMarkersView(APIView):
                 'returned_points': len(points_payload),
                 'truncated': bool(truncated),
             }
-        })
+        }
+        cache.set(cache_key, payload, timeout=max(1, int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30))))
+        return Response(payload)
 
 
 def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
@@ -1360,58 +1399,68 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
         push_sent = 0
         results = []
 
-        for entry in targeted_users.values():
-            user = entry['user']
-            patient = entry['patient']
-            chat_room = entry['chat_room']
+        targeted_entries = list(targeted_users.values())
+        for start in range(0, len(targeted_entries), NOTIFICATION_PUSH_BATCH_SIZE):
+            batch = targeted_entries[start:start + NOTIFICATION_PUSH_BATCH_SIZE]
+            for entry in batch:
+                user = entry['user']
+                patient = entry['patient']
+                chat_room = entry['chat_room']
 
-            extra_data = {
-                'clinic_id': str(clinic.id),
-                'clinic_name': clinic.name,
-                'clinic_message_id': str(base_message.id),
-                'sender_name': sender_name,
-                'patient_id': str(patient.id),
-                'patient_name': patient.name or 'Pet',
-            }
-            if chat_room:
-                extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
-                extra_data['chat_room_id'] = chat_room.id
+                extra_data = {
+                    'type': 'clinic_chat_message',
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                    'patient_id': str(patient.id),
+                    'patient_name': patient.name or 'Pet',
+                }
+                if chat_room:
+                    extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
+                    extra_data['chat_room_id'] = chat_room.id
 
-            notification = create_notification(
-                user=user,
-                notification_type='chat_message_received',
-                title=title,
-                message=message_body,
-                extra_data=extra_data,
-            )
+                notification = create_notification(
+                    user=user,
+                    notification_type='chat_message_received',
+                    title=title,
+                    message=message_body,
+                    extra_data=extra_data,
+                )
 
-            payload = {
-                'type': 'clinic_chat_message',
-                'clinic_id': str(clinic.id),
-                'clinic_message_id': str(base_message.id),
-                'sender_name': sender_name,
-            }
-            if chat_room:
-                payload['firebase_chat_id'] = chat_room.firebase_chat_id
-                payload['chat_room_id'] = str(chat_room.id)
-            payload = attach_push_targets(payload, 'clinic_chat_message')
+                payload = {
+                    'type': 'clinic_chat_message',
+                    'clinic_id': str(clinic.id),
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                }
+                if chat_room:
+                    payload['firebase_chat_id'] = chat_room.firebase_chat_id
+                    payload['chat_room_id'] = str(chat_room.id)
+                payload = attach_push_targets(payload, 'clinic_chat_message')
 
-            delivered = _send_push_notification(user, title, message_body, payload)
-            if delivered:
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CLINIC_CHAT_MESSAGE_PUSH,
+                    object_id=notification.id,
+                    dedupe_key=f"clinic_chat_push:{base_message.id}:{notification.id}",
+                    payload={
+                        'title': title,
+                        'message': message_body,
+                        'push_payload': payload,
+                    },
+                )
                 push_sent += 1
-                notification.extra_data['delivered'] = True
-                notification.save(update_fields=['extra_data'])
 
-            if chat_room:
-                chat_room.updated_at = timezone.now()
-                chat_room.save(update_fields=['updated_at'])
+                if chat_room:
+                    chat_room.updated_at = timezone.now()
+                    chat_room.save(update_fields=['updated_at'])
 
-            results.append({
-                'user_id': user.id,
-                'delivered': bool(delivered),
-                'notification_id': notification.id,
-                'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
-            })
+                results.append({
+                    'user_id': user.id,
+                    'delivered': True,
+                    'notification_id': notification.id,
+                    'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
+                })
 
         base_message.status = 'in_progress'
         base_message.save(update_fields=['status', 'updated_at'])
@@ -1744,54 +1793,63 @@ class ClinicBroadcastView(ClinicContextMixin, APIView):
         skipped = []
         results = []
 
-        for patient in patients:
-            user = patient.linked_user
-            if not user:
-                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
-                continue
+        for start in range(0, len(patients), NOTIFICATION_PUSH_BATCH_SIZE):
+            batch = patients[start:start + NOTIFICATION_PUSH_BATCH_SIZE]
+            for patient in batch:
+                user = patient.linked_user
+                if not user:
+                    skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
+                    continue
 
-            token = (user.fcm_token or '').strip()
-            if not token:
-                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
-                continue
+                token = (user.fcm_token or '').strip()
+                if not token:
+                    skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
+                    continue
 
-            targeted += 1
-            pet_name = patient.name or 'Pet'
-            payload = attach_push_targets({
-                'type': 'clinic_broadcast',
-                'clinic_id': str(clinic.id),
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-            }, 'clinic_broadcast')
-            extra_data = {
-                'clinic_id': str(clinic.id),
-                'clinic_name': clinic.name,
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-                'delivered': False,
-            }
+                targeted += 1
+                pet_name = patient.name or 'Pet'
+                payload = attach_push_targets({
+                    'type': 'clinic_broadcast',
+                    'clinic_id': str(clinic.id),
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                }, 'clinic_broadcast')
+                extra_data = {
+                    'type': 'clinic_broadcast',
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                    'delivered': False,
+                }
 
-            notification = create_notification(
-                user=user,
-                notification_type='clinic_broadcast',
-                title=title,
-                message=message,
-                extra_data=extra_data,
-            )
+                notification = create_notification(
+                    user=user,
+                    notification_type='clinic_broadcast',
+                    title=title,
+                    message=message,
+                    extra_data=extra_data,
+                )
 
-            delivered = _send_push_notification(user, title, message, payload)
-            if delivered:
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CLINIC_BROADCAST_PUSH,
+                    object_id=notification.id,
+                    dedupe_key=f"clinic_broadcast_push:{clinic.id}:{notification.id}",
+                    payload={
+                        'title': title,
+                        'message': message,
+                        'push_payload': payload,
+                    },
+                )
                 push_sent += 1
-                notification.extra_data['delivered'] = True
-                notification.save(update_fields=['extra_data'])
 
-            results.append({
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-                'user_id': user.id,
-                'delivered': bool(delivered),
-                'notification_id': notification.id,
-            })
+                results.append({
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                    'user_id': user.id,
+                    'delivered': True,
+                    'notification_id': notification.id,
+                })
 
         if targeted == 0:
             return Response({

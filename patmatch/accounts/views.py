@@ -461,8 +461,8 @@ def verify_firebase_phone(request):
 
 def send_firebase_sms(phone_number, otp_code):
     """إرسال رسالة SMS عبر Firebase (للاستخدام في الإنتاج)"""
-    # للتطوير: طباعة الكود
-    print(f"🔥 Firebase SMS to {phone_number}: كود التحقق الخاص بك هو: {otp_code}")
+    # للتطوير: تسجيل الكود في الـ debug log فقط
+    logger.debug("Firebase SMS OTP generated for %s", phone_number)
     
     # للإنتاج: استخدم Firebase Admin SDK
     try:
@@ -550,7 +550,7 @@ def send_password_reset_otp(request):
 
         except Exception as e:
             logger.error(f"Failed to send password reset email to {email}: {str(e)}")
-            print(f"🔑 Password Reset OTP for {email}: {password_reset_otp.otp_code}")
+            logger.debug("Password reset OTP generated for %s", email)
 
             return Response({
                 'success': True,
@@ -937,6 +937,12 @@ def get_app_config(request):
             'clinic_home_enabled': config.clinic_home_enabled,
             'clinic_map_enabled': config.clinic_map_enabled,
             'server_map_clustering_enabled': config.server_map_clustering_enabled,
+            'android_min_supported_version': config.android_min_supported_version,
+            'ios_min_supported_version': config.ios_min_supported_version,
+            'android_recommended_version': config.android_recommended_version,
+            'ios_recommended_version': config.ios_recommended_version,
+            'android_store_url': config.android_store_url,
+            'ios_store_url': config.ios_store_url,
             'updated_at': config.updated_at.isoformat() if config.updated_at else None,
         })
     except Exception as e:

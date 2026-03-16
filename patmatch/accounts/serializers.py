@@ -2,13 +2,36 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.gis.geos import Point
 import re
-from .models import AccountVerification
+from .models import AccountVerification, UserNotificationSettings
 
 User = get_user_model()
+
+
+class UserNotificationSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserNotificationSettings
+        fields = [
+            'enabled_global',
+            'allow_transactional',
+            'allow_chat',
+            'allow_breeding',
+            'allow_adoption',
+            'allow_clinic',
+            'allow_discovery',
+            'allow_reminders',
+            'quiet_hours_start',
+            'quiet_hours_end',
+            'timezone',
+            'max_push_per_day',
+            'max_discovery_per_day',
+            'min_minutes_between_non_transactional',
+        ]
+
 
 class UserProfileSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source='get_full_name', read_only=True)
     pets_count = serializers.SerializerMethodField()
+    notification_settings = serializers.SerializerMethodField()
     
     class Meta:
         model = User
@@ -16,12 +39,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'email', 'first_name', 'last_name', 'full_name',
             'phone', 'is_phone_verified', 'address', 'latitude', 'longitude', 'profile_picture', 'is_verified',
             'user_type', 'pets_count', 'date_joined', 'fcm_token',
-            'notify_breeding_requests', 'notify_adoption_pets'
+            'notify_breeding_requests', 'notify_adoption_pets',
+            'notification_settings',
         ]
         read_only_fields = ['id', 'email', 'is_verified', 'is_phone_verified', 'date_joined', 'fcm_token', 'user_type']
     
     def get_pets_count(self, obj):
         return obj.pets.count()
+
+    def get_notification_settings(self, obj):
+        settings_obj, _ = UserNotificationSettings.objects.get_or_create(user=obj)
+        settings_obj.sync_from_legacy_user_fields()
+        return UserNotificationSettingsSerializer(settings_obj).data
 
     def _point_from_coordinates(self, latitude, longitude):
         if latitude in (None, '') or longitude in (None, ''):
@@ -36,6 +65,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return Point(lng, lat, srid=4326)
 
     def update(self, instance, validated_data):
+        notification_settings_payload = None
+        request = self.context.get('request')
+        if request and hasattr(request, 'data'):
+            raw = request.data.get('notification_settings')
+            if isinstance(raw, dict):
+                notification_settings_payload = raw
+
         location_point = validated_data.get('location_point')
         if location_point is not None:
             validated_data['latitude'] = location_point.y
@@ -45,7 +81,32 @@ class UserProfileSerializer(serializers.ModelSerializer):
             lng_value = validated_data.get('longitude', instance.longitude)
             validated_data['location_point'] = self._point_from_coordinates(lat_value, lng_value)
 
-        return super().update(instance, validated_data)
+        updated_user = super().update(instance, validated_data)
+
+        settings_obj, _ = UserNotificationSettings.objects.get_or_create(user=updated_user)
+
+        # Legacy fields remain writable and mirrored into new granular settings.
+        sync_updates = {}
+        if 'notify_breeding_requests' in validated_data:
+            sync_updates['allow_breeding'] = bool(updated_user.notify_breeding_requests)
+        if 'notify_adoption_pets' in validated_data:
+            sync_updates['allow_adoption'] = bool(updated_user.notify_adoption_pets)
+        if sync_updates:
+            for field, value in sync_updates.items():
+                setattr(settings_obj, field, value)
+            settings_obj.save(update_fields=[*sync_updates.keys(), 'updated_at'])
+
+        if notification_settings_payload:
+            serializer = UserNotificationSettingsSerializer(
+                settings_obj,
+                data=notification_settings_payload,
+                partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            settings_obj = serializer.save()
+            settings_obj.sync_to_legacy_user_fields()
+
+        return updated_user
 
 class UserSerializer(serializers.ModelSerializer):
     """مُسلسل مبسط للمستخدم"""

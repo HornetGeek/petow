@@ -10,7 +10,9 @@ from django.db.models import Q
 from django.utils import timezone
 
 from accounts.models import User
-from pets.notifications import create_notification, _send_push_notification
+from pets.models import NotificationOutbox
+from pets.notifications import create_notification
+from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
 
 from .models import ClinicInvite, ClinicPatientRecord
@@ -267,6 +269,7 @@ def _ensure_invite_notification(invite: ClinicInvite) -> None:
         "اضغط للموافقة وربط حيوانك بحسابك."
     )
     extra = {
+        'type': 'clinic_invite',
         'invite_token': str(invite.token),
         'clinic_id': str(invite.clinic_id),
         'clinic_name': invite.clinic.name,
@@ -280,10 +283,20 @@ def _ensure_invite_notification(invite: ClinicInvite) -> None:
         message=message,
         extra_data=extra,
     )
-    _send_push_notification(user, title, message, attach_push_targets({
+    push_payload = attach_push_targets({
         'type': 'clinic_invite',
         **extra,
-    }, 'clinic_invite'))
+    }, 'clinic_invite')
+    enqueue_notification_event(
+        event_type=NotificationOutbox.EVENT_CLINIC_INVITE_PUSH,
+        object_id=notification.id,
+        dedupe_key=f"clinic_invite_push:{notification.id}",
+        payload={
+            'title': title,
+            'message': message,
+            'push_payload': push_payload,
+        },
+    )
     return None
 
 
