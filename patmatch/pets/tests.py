@@ -4,14 +4,15 @@ from unittest.mock import patch
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models.signals import post_save
 from django.test import SimpleTestCase, TestCase
-from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.models import User
 from clinics.signals import claim_invites_when_user_updates
 
-from .models import AdoptionRequest, Breed, Notification, NotificationOutbox, Pet
+from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, Notification, NotificationOutbox, Pet
 from .notification_events import enqueue_notification_event
 from .notifications import notify_new_pet_added
+from .serializers import ChatContextSerializer, ChatRoomListSerializer
 from .tasks import process_notification_outbox_event
 from .views import PetMapMarkersView
 
@@ -191,3 +192,103 @@ class NotificationOutboxTests(TestCase):
         self.assertEqual(Notification.objects.filter(event_key=expected_event_key).count(), 1)
         self.assertEqual(mock_send_email.call_count, 1)
         self.assertEqual(mock_send_push.call_count, 1)
+
+
+class ChatOtherPetDisplayTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        post_save.disconnect(receiver=claim_invites_when_user_updates, sender=User)
+
+    @classmethod
+    def tearDownClass(cls):
+        post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.user_a = User.objects.create_user(
+            username='requester1',
+            email='requester@example.com',
+            password='testpass123',
+            phone='1000000000',
+            first_name='Requester',
+            last_name='User',
+        )
+        self.user_b = User.objects.create_user(
+            username='receiver1',
+            email='receiver@example.com',
+            password='testpass123',
+            phone='2000000000',
+            first_name='Receiver',
+            last_name='User',
+        )
+        self.breed = Breed.objects.create(name='Chat Breed', pet_type='cats')
+
+        self.pet_a = Pet.objects.create(
+            owner=self.user_a,
+            name='Pet A',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=12,
+            gender='M',
+            description='Pet A desc',
+            main_image=self._test_image('pet_a.jpg'),
+            status='available',
+            location='Riyadh',
+            is_free=True,
+        )
+        self.pet_b = Pet.objects.create(
+            owner=self.user_b,
+            name='Pet B',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=10,
+            gender='F',
+            description='Pet B desc',
+            main_image=self._test_image('pet_b.jpg'),
+            status='available',
+            location='Riyadh',
+            is_free=True,
+        )
+
+        self.breeding_request = BreedingRequest.objects.create(
+            target_pet=self.pet_b,
+            requester_pet=self.pet_a,
+            requester=self.user_a,
+            receiver=self.user_b,
+            contact_phone='1234567890',
+            status='approved',
+        )
+        self.chat_room = ChatRoom.objects.create(breeding_request=self.breeding_request)
+
+    def _test_image(self, name: str):
+        return SimpleUploadedFile(name, b'\xff\xd8\xff', content_type='image/jpeg')
+
+    def _serialize_list(self, user: User):
+        request = self.factory.get('/api/pets/chat/rooms/')
+        force_authenticate(request, user=user)
+        return ChatRoomListSerializer(self.chat_room, context={'request': request}).data
+
+    def _serialize_context(self, user: User):
+        request = self.factory.get(f'/api/pets/chat/rooms/{self.chat_room.id}/context/')
+        force_authenticate(request, user=user)
+        return ChatContextSerializer(self.chat_room, context={'request': request}).data['chat_context']
+
+    def test_requester_sees_target_pet_as_other_pet(self):
+        data = self._serialize_list(self.user_a)
+        self.assertEqual(data['pet_name'], self.pet_b.name)
+        self.assertEqual(data['pet_image'], self.pet_b.main_image.url)
+
+        ctx = self._serialize_context(self.user_a)
+        self.assertEqual(ctx['pet']['id'], self.pet_b.id)
+        self.assertEqual(ctx['pet']['main_image'], self.pet_b.main_image.url)
+
+    def test_target_owner_sees_requester_pet_as_other_pet(self):
+        data = self._serialize_list(self.user_b)
+        self.assertEqual(data['pet_name'], self.pet_a.name)
+        self.assertEqual(data['pet_image'], self.pet_a.main_image.url)
+
+        ctx = self._serialize_context(self.user_b)
+        self.assertEqual(ctx['pet']['id'], self.pet_a.id)
+        self.assertEqual(ctx['pet']['main_image'], self.pet_a.main_image.url)

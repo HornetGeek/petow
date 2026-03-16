@@ -9,7 +9,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .google_maps_service import GoogleMapsServiceError
-from .models import User
+from .models import MobileAppConfig, User
 
 
 def build_rest_framework_override(scope_rates):
@@ -173,3 +173,56 @@ class MapsGeocodeThrottleTests(BaseMapsProxyTestCase):
 
         self.assertEqual(first.status_code, status.HTTP_200_OK)
         self.assertEqual(second.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class MobileAppConfigTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('accounts:app_config')
+
+    def test_app_config_returns_force_update_fields(self):
+        config = MobileAppConfig.get_solo()
+        config.android_min_supported_version = '1.0.16'
+        config.ios_min_supported_version = '1.1.0'
+        config.android_recommended_version = '1.0.18'
+        config.ios_recommended_version = '1.1.2'
+        config.android_store_url = 'https://play.google.com/store/apps/details?id=com.petmatchmobile'
+        config.ios_store_url = 'https://apps.apple.com/app/id1234567890'
+        config.save()
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['android_min_supported_version'], '1.0.16')
+        self.assertEqual(response.data['ios_min_supported_version'], '1.1.0')
+        self.assertEqual(response.data['android_recommended_version'], '1.0.18')
+        self.assertEqual(response.data['ios_recommended_version'], '1.1.2')
+        self.assertEqual(
+            response.data['android_store_url'],
+            'https://play.google.com/store/apps/details?id=com.petmatchmobile',
+        )
+        self.assertEqual(
+            response.data['ios_store_url'],
+            'https://apps.apple.com/app/id1234567890',
+        )
+
+    def test_app_config_defaults_keep_force_update_fields_empty(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['android_min_supported_version'], '')
+        self.assertEqual(response.data['ios_min_supported_version'], '')
+        self.assertEqual(response.data['android_recommended_version'], '')
+        self.assertEqual(response.data['ios_recommended_version'], '')
+        self.assertEqual(response.data['android_store_url'], '')
+        self.assertEqual(response.data['ios_store_url'], '')
+
+    def test_mobile_app_config_get_solo_uses_non_breaking_defaults(self):
+        config = MobileAppConfig.get_solo()
+
+        self.assertEqual(config.key, 'default')
+        self.assertEqual(config.android_min_supported_version, '')
+        self.assertEqual(config.ios_min_supported_version, '')
+        self.assertEqual(config.android_recommended_version, '')
+        self.assertEqual(config.ios_recommended_version, '')
+        self.assertEqual(config.android_store_url, '')
+        self.assertEqual(config.ios_store_url, '')

@@ -140,5 +140,37 @@ class AccountVerificationAdmin(admin.ModelAdmin):
 
 @admin.register(MobileAppConfig)
 class MobileAppConfigAdmin(admin.ModelAdmin):
-    list_display = ('key', 'clinic_home_enabled', 'clinic_map_enabled', 'updated_at')
+    list_display = (
+        'key',
+        'clinic_home_enabled',
+        'clinic_map_enabled',
+        'android_min_supported_version',
+        'ios_min_supported_version',
+        'updated_at',
+    )
     readonly_fields = ('created_at', 'updated_at')
+    fieldsets = (
+        (None, {
+            'fields': ('key',),
+        }),
+        ('Feature Flags', {
+            'fields': (
+                'clinic_home_enabled',
+                'clinic_map_enabled',
+                'server_map_clustering_enabled',
+            ),
+        }),
+        ('Force Update', {
+            'fields': (
+                'android_min_supported_version',
+                'ios_min_supported_version',
+                'android_recommended_version',
+                'ios_recommended_version',
+                'android_store_url',
+                'ios_store_url',
+            ),
+        }),
+        ('Metadata', {
+            'fields': ('created_at', 'updated_at'),
+        }),
+    )

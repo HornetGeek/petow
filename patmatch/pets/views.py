@@ -4,6 +4,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
+from django.conf import settings
+from django.core.cache import cache
 from django.db.models import Q
 from django.db import transaction
 from django.contrib.gis.db import models as gis_models
@@ -24,14 +26,17 @@ from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, PetMapPointSerializer,
     BreedingRequestSerializer, FavoriteSerializer, VeterinaryClinicSerializer,
     NotificationSerializer, ChatRoomSerializer, ChatRoomListSerializer,
+    NotificationPreferencesSerializer, NotificationInteractionEventCreateSerializer,
     ChatContextSerializer, ChatStatusSerializer, ChatCreationSerializer,
     AdoptionRequestSerializer, AdoptionRequestCreateSerializer, 
     AdoptionRequestListSerializer, AdoptionRequestResponseSerializer
 )
 from .notification_events import enqueue_notification_event
+from accounts.models import UserNotificationSettings
 from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
 import logging
 import time
+import hashlib
 from django.db import models
 from django.db.models import F, Value, FloatField, ExpressionWrapper, Count, Avg, Min, Max, IntegerField, Func
 from django.db.models.functions import Coalesce, Cast, Floor
@@ -57,6 +62,40 @@ def reverse_geocode_address(lat: float, lng: float) -> str:
 MAP_DEFAULT_POINT_LIMIT = 300
 MAP_MAX_POINT_LIMIT = 1000
 MAP_CLUSTER_ZOOM_THRESHOLD = 13
+MAP_LOW_ZOOM_POINT_LIMIT = 200
+
+CHAT_ROOM_DEFAULT_LIMIT = 20
+CHAT_ROOM_MAX_LIMIT = 100
+
+BREEDING_REQUEST_SELECT_RELATED_FIELDS = (
+    'target_pet__breed',
+    'target_pet__owner',
+    'requester_pet__breed',
+    'requester_pet__owner',
+    'requester',
+    'receiver',
+    'veterinary_clinic',
+)
+
+ADOPTION_REQUEST_SELECT_RELATED_FIELDS = (
+    'adopter',
+    'pet__breed',
+    'pet__owner',
+)
+
+CHAT_ROOM_SELECT_RELATED_FIELDS = (
+    'breeding_request__requester',
+    'breeding_request__target_pet__owner',
+    'breeding_request__target_pet',
+    'breeding_request__requester_pet',
+    'breeding_request__requester_pet__owner',
+    'adoption_request__adopter',
+    'adoption_request__pet__owner',
+    'adoption_request__pet',
+    'clinic_patient__clinic',
+    'clinic_patient__owner',
+    'clinic_patient__linked_user',
+)
 
 
 def _parse_bool_param(raw_value, default=True):
@@ -119,9 +158,71 @@ def _parse_point_limit(raw_limit):
     return min(parsed, MAP_MAX_POINT_LIMIT)
 
 
+def _cap_limit_points_for_zoom(limit_points, zoom):
+    if zoom <= 8:
+        return min(limit_points, MAP_LOW_ZOOM_POINT_LIMIT)
+    return limit_points
+
+
 def _cell_size_meters_for_zoom(zoom):
     meters_per_pixel = 40075016.686 / (256 * (2 ** max(zoom, 1)))
     return max(meters_per_pixel * 64, 25.0)
+
+
+def _parse_int_param(raw_value, default, minimum=None, maximum=None):
+    if raw_value in (None, ''):
+        return default
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and parsed < minimum:
+        return minimum
+    if maximum is not None and parsed > maximum:
+        return maximum
+    return parsed
+
+
+def _build_offset_pagination_links(request, offset, limit, total_count):
+    query_params = request.query_params.copy()
+    query_params['limit'] = limit
+
+    next_url = None
+    next_offset = offset + limit
+    if next_offset < total_count:
+        query_params['offset'] = next_offset
+        next_url = request.build_absolute_uri(f"{request.path}?{query_params.urlencode()}")
+
+    previous_url = None
+    if offset > 0:
+        query_params['offset'] = max(0, offset - limit)
+        previous_url = request.build_absolute_uri(f"{request.path}?{query_params.urlencode()}")
+
+    return next_url, previous_url
+
+
+def _paginate_queryset(request, queryset, default_limit=CHAT_ROOM_DEFAULT_LIMIT, max_limit=CHAT_ROOM_MAX_LIMIT):
+    limit = _parse_int_param(
+        request.query_params.get('limit'),
+        default=default_limit,
+        minimum=1,
+        maximum=max_limit,
+    )
+    offset = _parse_int_param(
+        request.query_params.get('offset'),
+        default=0,
+        minimum=0,
+    )
+    total_count = queryset.count()
+    page_queryset = queryset[offset:offset + limit]
+    next_url, previous_url = _build_offset_pagination_links(request, offset, limit, total_count)
+    return page_queryset, limit, offset, total_count, next_url, previous_url
+
+
+def _build_map_cache_key(prefix, params):
+    parts = [f"{key}={params.get(key, '')}" for key in sorted(params.keys())]
+    digest = hashlib.md5("&".join(parts).encode('utf-8')).hexdigest()
+    return f"{prefix}:{digest}"
 
 
 class PetMapMarkersView(APIView):
@@ -134,7 +235,10 @@ class PetMapMarkersView(APIView):
             min_lng, min_lat, max_lng, max_lat = _parse_bbox_param(request.query_params.get('bbox'))
             zoom = _parse_zoom_param(request.query_params.get('zoom'))
             cluster_enabled = _parse_bool_param(request.query_params.get('cluster'), default=True)
-            limit_points = _parse_point_limit(request.query_params.get('limit_points'))
+            limit_points = _cap_limit_points_for_zoom(
+                _parse_point_limit(request.query_params.get('limit_points')),
+                zoom,
+            )
 
             user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
             user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
@@ -154,6 +258,28 @@ class PetMapMarkersView(APIView):
         gender = request.query_params.get('gender')
         min_age_months = request.query_params.get('min_age_months')
         max_age_months = request.query_params.get('max_age_months')
+
+        cache_key = _build_map_cache_key(
+            'pets_map_markers',
+            {
+                'bbox': request.query_params.get('bbox'),
+                'zoom': zoom,
+                'cluster': cluster_enabled,
+                'limit_points': limit_points,
+                'user_lat': user_lat,
+                'user_lng': user_lng,
+                'status': status_param,
+                'exclude_status': exclude_status_param,
+                'search': search_term,
+                'pet_type': pet_type,
+                'gender': gender,
+                'min_age_months': min_age_months,
+                'max_age_months': max_age_months,
+            },
+        )
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
 
         effective_point_field = gis_models.PointField(geography=True, srid=4326)
         bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
@@ -308,7 +434,7 @@ class PetMapMarkersView(APIView):
             duration_ms,
         )
 
-        return Response({
+        payload = {
             'clusters': clusters_payload,
             'points': points_payload,
             'meta': {
@@ -324,7 +450,9 @@ class PetMapMarkersView(APIView):
                 'returned_points': len(points_payload),
                 'truncated': bool(truncated),
             }
-        })
+        }
+        cache.set(cache_key, payload, timeout=max(1, int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30))))
+        return Response(payload)
 
 class BreedListView(generics.ListAPIView):
     """قائمة السلالات"""
@@ -341,35 +469,12 @@ class PetListCreateView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         """Allow read access without authentication, require auth for create"""
-        print(f"🔐 Django: get_permissions called for method: {self.request.method}")
-        print(f"🔐 Django: User: {self.request.user}")
-        print(f"🔐 Django: Is authenticated: {self.request.user.is_authenticated}")
-        print(f"🔐 Django: User ID: {getattr(self.request.user, 'id', 'NO_ID')}")
-        print(f"🔐 Django: User email: {getattr(self.request.user, 'email', 'NO_EMAIL')}")
-        print(f"🔐 Django: Request headers: {dict(self.request.headers)}")
-        print(f"🔐 Django: Authorization header: {self.request.headers.get('Authorization', 'NOT_FOUND')}")
-        print(f"🔐 Django: All headers keys: {list(self.request.headers.keys())}")
-        
         if self.request.method == 'GET':
-            print(f"🔐 Django: GET request - no permissions required")
             return []
-        
-        print(f"🔐 Django: POST request - requiring IsAuthenticated")
         return [IsAuthenticated()]
     
     def create(self, request, *args, **kwargs):
         """Override create to add detailed logging"""
-        print(f"🆕 Django: Create request from user: {request.user}")
-        print(f"🆕 Django: User ID: {request.user.id if request.user.is_authenticated else 'Anonymous'}")
-        print(f"🆕 Django: User email: {request.user.email if request.user.is_authenticated else 'Anonymous'}")
-        print(f"🆕 Django: Is authenticated: {request.user.is_authenticated}")
-        print(f"🆕 Django: Request data keys: {list(request.data.keys())}")
-        print(f"🆕 Django: Request headers: {dict(request.headers)}")
-        print(f"🆕 Django: Authorization header: {request.headers.get('Authorization', 'NOT_FOUND')}")
-        print(f"🆕 Django: Request method: {request.method}")
-        print(f"🆕 Django: Request user: {request.user}")
-        print(f"🆕 Django: Request user backend: {getattr(request.user, 'backend', 'NO_BACKEND')}")
-        
         try:
             with transaction.atomic():
                 response = super().create(request, *args, **kwargs)
@@ -381,9 +486,11 @@ class PetListCreateView(generics.ListCreateAPIView):
                         object_id=pet_id,
                         dedupe_key=f"pet_created:{pet_id}",
                     )
-        except Exception as e:
-            print(f"❌ Django: Create error: {str(e)}")
-            print(f"❌ Django: Error type: {type(e)}")
+        except Exception:
+            logger.exception(
+                "Pet create failed for user_id=%s",
+                request.user.id if request.user.is_authenticated else None,
+            )
             raise
 
         return response
@@ -546,37 +653,21 @@ class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
     
     def update(self, request, *args, **kwargs):
         """Override update to add detailed error logging"""
-        print(f"🔄 Django: Update request data: {request.data}")
         try:
             return super().update(request, *args, **kwargs)
-        except Exception as e:
-            print(f"❌ Django: Update error: {str(e)}")
-            print(f"❌ Django: Error type: {type(e)}")
+        except Exception:
+            logger.exception(
+                "Pet update failed for user_id=%s pet_id=%s",
+                request.user.id if request.user.is_authenticated else None,
+                kwargs.get('pk'),
+            )
             raise
     
     def get_queryset(self):
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
             # المالك فقط يمكنه التعديل أو الحذف
-            print(f"🔍 Django: Checking ownership for user: {self.request.user}")
-            print(f"🔍 Django: User ID: {self.request.user.id}")
-            print(f"🔍 Django: User email: {self.request.user.email}")
-            print(f"🔍 Django: Is authenticated: {self.request.user.is_authenticated}")
-            
-            # Get the pet being requested
-            pet_id = self.kwargs.get('pk')
-            try:
-                pet = Pet.objects.get(pk=pet_id)
-                print(f"🐾 Django: Pet owner: {pet.owner}")
-                print(f"🐾 Django: Pet owner ID: {pet.owner.id}")
-                print(f"🐾 Django: Pet owner email: {pet.owner.email}")
-                print(f"🔍 Django: Ownership match: {pet.owner == self.request.user}")
-            except Pet.DoesNotExist:
-                print(f"❌ Django: Pet with ID {pet_id} not found")
-            
-            queryset = Pet.objects.filter(owner=self.request.user)
-            print(f"🔍 Django: Filtered queryset count: {queryset.count()}")
-            return queryset
-        return Pet.objects.all()
+            return Pet.objects.filter(owner=self.request.user).select_related('breed', 'owner')
+        return Pet.objects.select_related('breed', 'owner')
 
 class MyPetsView(generics.ListAPIView):
     """حيواناتي الأليفة"""
@@ -585,74 +676,6 @@ class MyPetsView(generics.ListAPIView):
     
     def get_queryset(self):
         return Pet.objects.filter(owner=self.request.user).select_related('breed')
-
-class BreedingRequestListCreateView(generics.ListCreateAPIView):
-    """قائمة طلبات التزاوج وإنشاء طلب جديد"""
-    serializer_class = BreedingRequestSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['status']
-    ordering = ['-created_at']
-    
-    def get_queryset(self):
-        # عرض الطلبات المرسلة والمستقبلة
-        return BreedingRequest.objects.filter(
-            Q(requester=self.request.user) | Q(receiver=self.request.user)
-        ).select_related('male_pet', 'female_pet', 'requester', 'receiver')
-
-class BreedingRequestDetailView(generics.RetrieveUpdateAPIView):
-    """تفاصيل طلب التزاوج"""
-    serializer_class = BreedingRequestSerializer
-    permission_classes = [IsAuthenticated]
-    
-    def get_queryset(self):
-        return BreedingRequest.objects.filter(
-            Q(requester=self.request.user) | Q(receiver=self.request.user)
-        )
-    
-    def get_permissions(self):
-        # فقط المستقبل يمكنه تحديث الطلب (الموافقة/الرفض)
-        if self.request.method in ['PUT', 'PATCH']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated()]
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def respond_to_breeding_request(request, pk):
-    """الرد على طلب التزاوج"""
-    try:
-        breeding_request = BreedingRequest.objects.get(
-            pk=pk, receiver=request.user
-        )
-    except BreedingRequest.DoesNotExist:
-        return Response(
-            {'error': 'طلب التزاوج غير موجود'}, 
-            status=status.HTTP_404_NOT_FOUND
-        )
-    
-    action = request.data.get('action')  # 'approve' or 'reject'
-    response_message = request.data.get('response_message', '')
-    
-    if action == 'approve':
-        breeding_request.status = 'approved'
-        # تحديث حالة الحيوانات إلى "في عملية التزاوج"
-        breeding_request.male_pet.status = 'mating'
-        breeding_request.female_pet.status = 'mating'
-        breeding_request.male_pet.save()
-        breeding_request.female_pet.save()
-    elif action == 'reject':
-        breeding_request.status = 'rejected'
-    else:
-        return Response(
-            {'error': 'إجراء غير صحيح'}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    breeding_request.response_message = response_message
-    breeding_request.save()
-    
-    serializer = BreedingRequestSerializer(breeding_request)
-    return Response(serializer.data)
 
 class FavoriteListCreateView(generics.ListCreateAPIView):
     """قائمة المفضلات وإضافة للمفضلات"""
@@ -732,6 +755,8 @@ class BreedingRequestListCreateView(generics.ListCreateAPIView):
         # طلبات مرسلة أو واردة للمستخدم
         return BreedingRequest.objects.filter(
             Q(requester=user) | Q(receiver=user)
+        ).select_related(
+            *BREEDING_REQUEST_SELECT_RELATED_FIELDS
         ).order_by('-created_at')
     
     def create(self, request, *args, **kwargs):
@@ -759,6 +784,8 @@ class BreedingRequestDetailView(generics.RetrieveUpdateAPIView):
         user = self.request.user
         return BreedingRequest.objects.filter(
             Q(requester=user) | Q(receiver=user)
+        ).select_related(
+            *BREEDING_REQUEST_SELECT_RELATED_FIELDS
         )
 
 @api_view(['GET'])
@@ -766,7 +793,11 @@ class BreedingRequestDetailView(generics.RetrieveUpdateAPIView):
 def my_breeding_requests(request):
     """طلبات المقابلة المرسلة من المستخدم"""
     user = request.user
-    sent_requests = BreedingRequest.objects.filter(requester=user).order_by('-created_at')
+    sent_requests = BreedingRequest.objects.filter(
+        requester=user
+    ).select_related(
+        *BREEDING_REQUEST_SELECT_RELATED_FIELDS
+    ).order_by('-created_at')
     serializer = BreedingRequestSerializer(sent_requests, many=True)
     return Response(serializer.data)
 
@@ -775,7 +806,11 @@ def my_breeding_requests(request):
 def received_breeding_requests(request):
     """طلبات المقابلة الواردة للمستخدم"""
     user = request.user
-    received_requests = BreedingRequest.objects.filter(receiver=user).order_by('-created_at')
+    received_requests = BreedingRequest.objects.filter(
+        receiver=user
+    ).select_related(
+        *BREEDING_REQUEST_SELECT_RELATED_FIELDS
+    ).order_by('-created_at')
     serializer = BreedingRequestSerializer(received_requests, many=True)
     return Response(serializer.data)
 
@@ -834,6 +869,44 @@ class NotificationListView(generics.ListAPIView):
         return Notification.objects.filter(user=self.request.user).select_related(
             'related_pet', 'related_breeding_request', 'related_chat_room'
         )
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def notification_preferences(request):
+    """Granular notification preferences with legacy compatibility."""
+    settings_obj, _ = UserNotificationSettings.objects.get_or_create(user=request.user)
+    settings_obj.sync_from_legacy_user_fields()
+
+    if request.method == 'GET':
+        serializer = NotificationPreferencesSerializer(settings_obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    serializer = NotificationPreferencesSerializer(settings_obj, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_notification_interaction_event(request):
+    """Track notification engagement events from clients."""
+    serializer = NotificationInteractionEventCreateSerializer(
+        data=request.data,
+        context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    event = serializer.save()
+    return Response(
+        {
+            'id': event.id,
+            'event_type': event.event_type,
+            'source': event.source,
+            'created_at': event.created_at,
+        },
+        status=status.HTTP_201_CREATED,
+    )
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -928,7 +1001,13 @@ def send_chat_message_notification(request):
     """إرسال إشعار عند وصول رسالة جديدة"""
     try:
         chat_id = request.data.get('chat_id')
-        message_content = request.data.get('message', '')
+        message_content = (request.data.get('message') or '').strip()
+        message_id = (
+            request.data.get('message_id')
+            or request.data.get('firebase_message_id')
+            or request.data.get('client_message_id')
+        )
+        event_nonce = request.data.get('event_nonce') or str(int(time.time() * 1000))
         
         if not chat_id:
             return Response(
@@ -938,11 +1017,26 @@ def send_chat_message_notification(request):
         
         # البحث عن المحادثة
         try:
-            chat_room = ChatRoom.objects.get(firebase_chat_id=chat_id)
+            chat_room = ChatRoom.objects.select_related(
+                *CHAT_ROOM_SELECT_RELATED_FIELDS
+            ).get(firebase_chat_id=str(chat_id))
         except ChatRoom.DoesNotExist:
+            if str(chat_id).isdigit():
+                chat_room = ChatRoom.objects.select_related(
+                    *CHAT_ROOM_SELECT_RELATED_FIELDS
+                ).filter(id=int(chat_id)).first()
+            else:
+                chat_room = None
+            if not chat_room:
+                return Response(
+                    {'error': 'المحادثة غير موجودة'}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        if not chat_room.can_user_access(request.user):
             return Response(
-                {'error': 'المحادثة غير موجودة'}, 
-                status=status.HTTP_404_NOT_FOUND
+                {'error': 'غير مصرح لك بالوصول إلى هذه المحادثة'},
+                status=status.HTTP_403_FORBIDDEN
             )
         
         # تحديد المرسل والمستقبل
@@ -953,26 +1047,45 @@ def send_chat_message_notification(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # إرسال إشعار للمشارك الآخر
+        # إنشاء حدث outbox لإرسال الإشعار خارج request path
         sender = request.user
+        created_events = 0
         for participant in participants:
             if participant.id != sender.id:
-                notification = Notification.create_chat_message_notification(
-                    recipient_user=participant,
-                    sender_user=sender,
-                    chat_room=chat_room,
-                    message_content=message_content
+                dedupe_key = (
+                    f"chat_message_received:{chat_room.id}:{sender.id}:{participant.id}:"
+                    f"{message_id or event_nonce}"
                 )
-                break
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CHAT_MESSAGE_RECEIVED,
+                    object_id=chat_room.id,
+                    dedupe_key=dedupe_key,
+                    payload={
+                        'sender_id': sender.id,
+                        'recipient_id': participant.id,
+                        'message_content': message_content,
+                        'message_id': message_id,
+                        'event_nonce': event_nonce,
+                        'event_key': dedupe_key,
+                    },
+                )
+                created_events += 1
+
+        if created_events == 0:
+            return Response(
+                {'error': 'لم يتم العثور على مستقبل صالح للإشعار'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         return Response(
-            {'message': 'تم إرسال الإشعار بنجاح'}, 
+            {'message': 'تمت جدولة الإشعار بنجاح'}, 
             status=status.HTTP_201_CREATED
         )
         
-    except Exception as e:
+    except Exception as exc:
+        logger.exception("Error scheduling chat message notification")
         return Response(
-            {'error': f'خطأ في إرسال الإشعار: {str(e)}'}, 
+            {'error': f'خطأ في إرسال الإشعار: {str(exc)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -990,26 +1103,26 @@ def chat_rooms(request):
             Q(clinic_patient__linked_user_id=request.user.id),
             is_active=True
         ).select_related(
-            'breeding_request__requester',
-            'breeding_request__target_pet__owner',
-            'breeding_request__target_pet',
-            'adoption_request__adopter',
-            'adoption_request__pet__owner',
-            'adoption_request__pet',
-            'clinic_patient__clinic',
-            'clinic_patient__owner',
-            'clinic_patient__linked_user'
+            *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).order_by('-updated_at')
-        
+
+        paged_rooms, limit, offset, total_count, next_url, previous_url = _paginate_queryset(
+            request,
+            user_chat_rooms,
+        )
         serializer = ChatRoomListSerializer(
-            user_chat_rooms, 
+            paged_rooms,
             many=True, 
             context={'request': request}
         )
         
         return Response({
             'results': serializer.data,
-            'count': user_chat_rooms.count()
+            'count': total_count,
+            'next': next_url,
+            'previous': previous_url,
+            'limit': limit,
+            'offset': offset,
         })
         
     except Exception as e:
@@ -1026,15 +1139,7 @@ def chat_room_detail(request, chat_id):
     """تفاصيل محادثة محددة"""
     try:
         chat_room = ChatRoom.objects.select_related(
-            'breeding_request__requester',
-            'breeding_request__target_pet__owner',
-            'breeding_request__target_pet',
-            'adoption_request__adopter',
-            'adoption_request__pet__owner',
-            'adoption_request__pet',
-            'clinic_patient__clinic',
-            'clinic_patient__owner',
-            'clinic_patient__linked_user'
+            *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).get(
             id=chat_id,
             is_active=True
@@ -1069,15 +1174,7 @@ def chat_room_by_firebase_id(request, firebase_chat_id):
     """الحصول على غرفة محادثة بواسطة معرف Firebase"""
     try:
         chat_room = ChatRoom.objects.select_related(
-            'breeding_request__requester',
-            'breeding_request__target_pet__owner',
-            'breeding_request__target_pet',
-            'adoption_request__adopter',
-            'adoption_request__pet__owner',
-            'adoption_request__pet',
-            'clinic_patient__clinic',
-            'clinic_patient__owner',
-            'clinic_patient__linked_user'
+            *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).get(
             firebase_chat_id=firebase_chat_id,
             is_active=True
@@ -1111,7 +1208,13 @@ def chat_room_by_breeding_request(request, breeding_request_id):
     """الحصول على غرفة محادثة بواسطة معرف طلب التزاوج"""
     try:
         # التحقق من أن المستخدم مشارك في طلب التزاوج
-        breeding_request = BreedingRequest.objects.get(id=breeding_request_id)
+        breeding_request = BreedingRequest.objects.select_related(
+            'requester',
+            'target_pet__owner',
+            'target_pet',
+            'requester_pet__owner',
+            'requester_pet',
+        ).get(id=breeding_request_id)
         if request.user not in [breeding_request.requester, breeding_request.target_pet.owner]:
             return Response(
                 {'error': 'غير مخول لك بالوصول لهذا الطلب'}, 
@@ -1120,7 +1223,13 @@ def chat_room_by_breeding_request(request, breeding_request_id):
         
         # البحث عن غرفة المحادثة
         try:
-            chat_room = ChatRoom.objects.get(breeding_request=breeding_request)
+            chat_room = ChatRoom.objects.select_related(
+                'breeding_request__requester',
+                'breeding_request__target_pet__owner',
+                'breeding_request__target_pet',
+                'breeding_request__requester_pet',
+                'breeding_request__requester_pet__owner',
+            ).get(breeding_request=breeding_request)
             serializer = ChatRoomSerializer(chat_room, context={'request': request})
             return Response(serializer.data)
         except ChatRoom.DoesNotExist:
@@ -1147,7 +1256,11 @@ def chat_room_by_adoption_request(request, adoption_request_id):
     """الحصول على غرفة محادثة بواسطة معرف طلب التبني"""
     from .models import AdoptionRequest  # local import to avoid circular dependency at top
     try:
-        adoption_request = AdoptionRequest.objects.get(id=adoption_request_id)
+        adoption_request = AdoptionRequest.objects.select_related(
+            'adopter',
+            'pet__owner',
+            'pet',
+        ).get(id=adoption_request_id)
         participants = [adoption_request.adopter, getattr(adoption_request.pet, 'owner', None)]
         if request.user not in participants:
             return Response(
@@ -1156,7 +1269,11 @@ def chat_room_by_adoption_request(request, adoption_request_id):
             )
         
         try:
-            chat_room = ChatRoom.objects.get(adoption_request=adoption_request)
+            chat_room = ChatRoom.objects.select_related(
+                'adoption_request__adopter',
+                'adoption_request__pet__owner',
+                'adoption_request__pet',
+            ).get(adoption_request=adoption_request)
             serializer = ChatRoomSerializer(chat_room, context={'request': request})
             return Response(serializer.data)
         except ChatRoom.DoesNotExist:
@@ -1182,14 +1299,9 @@ def chat_room_by_adoption_request(request, adoption_request_id):
 def create_chat_room(request):
     """إنشاء غرفة محادثة جديدة لطلب تزاوج مقبول"""
     try:
-        # Debug logging
-        print(f"DEBUG: Request data: {request.data}")
-        print(f"DEBUG: Request user: {request.user}")
-        
         # استخدام السيريلايزر للتحقق من البيانات
         creation_serializer = ChatCreationSerializer(data=request.data, context={'request': request})
         if not creation_serializer.is_valid():
-            print(f"DEBUG: Serializer errors: {creation_serializer.errors}")
             return Response(
                 creation_serializer.errors, 
                 status=status.HTTP_400_BAD_REQUEST
@@ -1199,19 +1311,15 @@ def create_chat_room(request):
         adoption_request = creation_serializer.validated_data.get('adoption_request')
         
         if breeding_request:
-            print(f"DEBUG: Creating chat for breeding request ID: {breeding_request.id}")
             chat_room = ChatRoom.objects.create(breeding_request=breeding_request)
         elif adoption_request:
-            print(f"DEBUG: Creating chat for adoption request ID: {adoption_request.id}")
             chat_room = ChatRoom.objects.create(adoption_request=adoption_request)
         else:
             return Response(
                 {'error': 'بيانات الطلب غير صالحة'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        print(f"DEBUG: Chat room created with ID: {chat_room.id}")
-        
+
         # إرجاع بيانات المحادثة مع السياق الكامل
         context_serializer = ChatContextSerializer(chat_room, context={'request': request})
         
@@ -1221,9 +1329,8 @@ def create_chat_room(request):
             'message': 'تم إنشاء المحادثة بنجاح'
         }, status=status.HTTP_201_CREATED)
         
-    except Exception as e:
-        print(f"DEBUG: Exception occurred: {str(e)}")
-        logger.error(f"Error creating chat room: {str(e)}")
+    except Exception as exc:
+        logger.exception("Error creating chat room")
         return Response(
             {'error': 'خطأ في إنشاء المحادثة'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -1375,23 +1482,32 @@ def archived_chat_rooms(request):
         # الحصول على جميع المحادثات المؤرشفة للمستخدم
         user_archived_chats = ChatRoom.objects.filter(
             Q(breeding_request__requester_id=request.user.id) |
-            Q(breeding_request__target_pet__owner_id=request.user.id),
+            Q(breeding_request__target_pet__owner_id=request.user.id) |
+            Q(adoption_request__adopter_id=request.user.id) |
+            Q(adoption_request__pet__owner_id=request.user.id) |
+            Q(clinic_patient__linked_user_id=request.user.id),
             is_active=False
         ).select_related(
-            'breeding_request__requester',
-            'breeding_request__target_pet__owner',
-            'breeding_request__target_pet'
+            *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).order_by('-updated_at')
-        
+
+        paged_rooms, limit, offset, total_count, next_url, previous_url = _paginate_queryset(
+            request,
+            user_archived_chats,
+        )
         serializer = ChatRoomListSerializer(
-            user_archived_chats, 
+            paged_rooms,
             many=True, 
             context={'request': request}
         )
         
         return Response({
             'results': serializer.data,
-            'count': user_archived_chats.count()
+            'count': total_count,
+            'next': next_url,
+            'previous': previous_url,
+            'limit': limit,
+            'offset': offset,
         })
         
     except Exception as e:
@@ -1408,9 +1524,7 @@ def chat_room_context(request, chat_id):
     """الحصول على السياق الكامل لمحادثة محددة"""
     try:
         chat_room = ChatRoom.objects.select_related(
-            'breeding_request__requester',
-            'breeding_request__target_pet__owner',
-            'breeding_request__target_pet'
+            *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).get(id=chat_id)
         
         # التحقق من أن المستخدم مشارك في المحادثة
@@ -1483,10 +1597,7 @@ def reactivate_chat_room(request, chat_id):
 def upload_chat_image(request):
     """رفع صورة للمحادثة"""
     try:
-        # Log request details for debugging
-        logger.info(f"Upload request from user: {getattr(request, 'user', 'Anonymous')}")
-        logger.info(f"Request headers: {dict(request.headers)}")
-        logger.info(f"Request FILES: {list(request.FILES.keys())}")
+        logger.info("Upload chat image request user_id=%s", getattr(getattr(request, 'user', None), 'id', None))
         
         if 'image' not in request.FILES:
             logger.warning("No image file in request")
@@ -1496,7 +1607,12 @@ def upload_chat_image(request):
             )
         
         image_file = request.FILES['image']
-        logger.info(f"Image file: {image_file.name}, size: {image_file.size}, type: {image_file.content_type}")
+        logger.debug(
+            "Received chat image name=%s size=%s type=%s",
+            image_file.name,
+            image_file.size,
+            image_file.content_type,
+        )
         
         # التحقق من نوع الملف
         if not image_file.content_type.startswith('image/'):
@@ -1526,8 +1642,7 @@ def upload_chat_image(request):
         if image_url and not image_url.startswith('http') and not image_url.startswith('/'):
             image_url = f"/{image_url}"
         
-        logger.info(f"Image saved successfully: {saved_name}")
-        logger.info(f"Image URL generated: {image_url}")
+        logger.info("Chat image saved path=%s", saved_name)
         
         return Response({
             'success': True,
@@ -1550,7 +1665,11 @@ class AdoptionRequestListCreateView(generics.ListCreateAPIView):
     
     def get_queryset(self):
         """الحصول على طلبات التبني للمستخدم الحالي"""
-        return AdoptionRequest.objects.filter(adopter=self.request.user)
+        return AdoptionRequest.objects.filter(
+            adopter=self.request.user
+        ).select_related(
+            *ADOPTION_REQUEST_SELECT_RELATED_FIELDS
+        )
     
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -1580,7 +1699,11 @@ class AdoptionRequestDetailView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return AdoptionRequest.objects.filter(adopter=self.request.user)
+        return AdoptionRequest.objects.filter(
+            adopter=self.request.user
+        ).select_related(
+            *ADOPTION_REQUEST_SELECT_RELATED_FIELDS
+        )
 
 
 class MyAdoptionRequestsView(generics.ListAPIView):
@@ -1589,7 +1712,11 @@ class MyAdoptionRequestsView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return AdoptionRequest.objects.filter(adopter=self.request.user)
+        return AdoptionRequest.objects.filter(
+            adopter=self.request.user
+        ).select_related(
+            *ADOPTION_REQUEST_SELECT_RELATED_FIELDS
+        )
 
 
 class ReceivedAdoptionRequestsView(generics.ListAPIView):
@@ -1598,7 +1725,11 @@ class ReceivedAdoptionRequestsView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return AdoptionRequest.objects.filter(pet__owner=self.request.user)
+        return AdoptionRequest.objects.filter(
+            pet__owner=self.request.user
+        ).select_related(
+            *ADOPTION_REQUEST_SELECT_RELATED_FIELDS
+        )
 
 
 @api_view(['POST'])
@@ -1606,7 +1737,9 @@ class ReceivedAdoptionRequestsView(generics.ListAPIView):
 def respond_to_adoption_request(request, request_id):
     """الرد على طلب التبني (قبول/رفض/إكمال)"""
     try:
-        adoption_request = AdoptionRequest.objects.get(
+        adoption_request = AdoptionRequest.objects.select_related(
+            *ADOPTION_REQUEST_SELECT_RELATED_FIELDS
+        ).get(
             id=request_id,
             pet__owner=request.user
         )
@@ -1662,7 +1795,7 @@ def respond_to_adoption_request(request, request_id):
                         message += ' - تم إنشاء غرفة محادثة للتواصل'
                 except Exception as e:
                     # في حالة حدوث خطأ في إنشاء المحادثة، لا نوقف العملية
-                    print(f"Error creating chat room: {e}")
+                    logger.warning("Error creating adoption chat room for request %s: %s", adoption_request.id, e)
                     message += ' - حدث خطأ في إنشاء غرفة المحادثة'
             else:
                 return Response(
@@ -1694,65 +1827,84 @@ def respond_to_adoption_request(request, request_id):
 @permission_classes([IsAuthenticated])
 def adoption_pets(request):
     """الحيوانات المتاحة للتبني"""
-    pets = Pet.objects.filter(status='available_for_adoption')
-    
-    # تطبيق الفلاتر
+    pets = Pet.objects.filter(
+        status='available_for_adoption'
+    ).select_related(
+        'breed',
+        'owner',
+    )
+
     pet_type = request.GET.get('pet_type')
     if pet_type:
         pets = pets.filter(pet_type=pet_type)
-    
+
     breed_id = request.GET.get('breed')
     if breed_id:
         pets = pets.filter(breed_id=breed_id)
-    
+
     gender = request.GET.get('gender')
     if gender:
         pets = pets.filter(gender=gender)
-    
+
     location = request.GET.get('location')
     if location:
         pets = pets.filter(location__icontains=location)
-    
-    # الحصول على موقع المستخدم للترتيب حسب المسافة
-    user_lat = request.GET.get('user_lat')
-    user_lng = request.GET.get('user_lng')
-    
-    print(f"🔍 Django: user_lat={user_lat}, user_lng={user_lng}")
-    
-    # ترتيب النتائج
-    if user_lat and user_lng:
+
+    user_lat_raw = request.GET.get('user_lat')
+    user_lng_raw = request.GET.get('user_lng')
+    user_lat = None
+    user_lng = None
+
+    if user_lat_raw and user_lng_raw:
         try:
-            user_lat = float(user_lat)
-            user_lng = float(user_lng)
-            # ترتيب حسب المسافة (الأقرب أولاً)
-            pets = sorted(pets, key=lambda pet: pet.calculate_distance(user_lat, user_lng) or float('inf'))
-            print(f"🔍 Django: Sorted {len(pets)} pets by distance")
-        except (ValueError, TypeError) as e:
-            print(f"❌ Django: Error sorting by distance: {e}")
-            pass
-    
-    # ترتيب افتراضي: الأحدث أولاً
-    if not (user_lat and user_lng):
+            user_lat = float(user_lat_raw)
+            user_lng = float(user_lng_raw)
+            effective_point_field = gis_models.PointField(geography=True, srid=4326)
+            user_point = Point(user_lng, user_lat, srid=4326)
+            pets = pets.annotate(
+                effective_point=Coalesce(
+                    'location_point',
+                    'owner__location_point',
+                    output_field=effective_point_field,
+                )
+            ).annotate(
+                distance_m=Distance('effective_point', user_point),
+            ).order_by(
+                F('distance_m').asc(nulls_last=True),
+                '-created_at',
+            )
+        except (TypeError, ValueError):
+            user_lat = None
+            user_lng = None
+            pets = pets.order_by('-created_at')
+    else:
         pets = pets.order_by('-created_at')
-        print(f"🔍 Django: Sorted {len(pets)} pets by creation date")
-    
-    # إضافة موقع المستخدم للـ context
+
+    limit = _parse_int_param(request.GET.get('limit'), default=None, minimum=1, maximum=200)
+    offset = _parse_int_param(request.GET.get('offset'), default=0, minimum=0)
+    total_count = None
+    if limit is not None:
+        total_count = pets.count()
+        pets = pets[offset:offset + limit]
+
     context = {'request': request}
-    
-    # تمرير موقع المستخدم مباشرة للـ context
-    if user_lat and user_lng:
+    if user_lat is not None and user_lng is not None:
         context['user_lat'] = user_lat
         context['user_lng'] = user_lng
-        print(f"🔍 Django: Added location to context: lat={user_lat}, lng={user_lng}")
-    
+
     serializer = PetListSerializer(pets, many=True, context=context)
-    data = serializer.data
-    
-    # طباعة بيانات المسافة للتحقق
-    if user_lat and user_lng:
-        print(f"🔍 Django: First pet distance: {data[0].get('distance_display') if data else 'No pets'}")
-    
-    return Response(data)
+    if total_count is None:
+        return Response(serializer.data)
+
+    next_url, previous_url = _build_offset_pagination_links(request, offset, limit, total_count)
+    return Response({
+        'results': serializer.data,
+        'count': total_count,
+        'next': next_url,
+        'previous': previous_url,
+        'limit': limit,
+        'offset': offset,
+    })
 
 
 @api_view(['GET'])

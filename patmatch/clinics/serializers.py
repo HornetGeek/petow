@@ -122,7 +122,8 @@ class ClinicListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'email', 'website',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
-            'latitude', 'longitude', 'is_active', 'has_dashboard', 'service_categories'
+            'latitude', 'longitude', 'is_active', 'has_dashboard', 'service_categories',
+            'created_at', 'updated_at'
         ]
         read_only_fields = fields
 

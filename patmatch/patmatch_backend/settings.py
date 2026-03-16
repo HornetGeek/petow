@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+import logging
 import dj_database_url
 from decouple import config
 
@@ -26,9 +27,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-your-secret-key-here'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
+logger = logging.getLogger(__name__)
 
 
 # Application definition
@@ -102,8 +104,6 @@ default_engine = DATABASES['default'].get('ENGINE')
 if default_engine not in {'django.db.backends.postgresql', 'django.contrib.gis.db.backends.postgis'}:
     raise RuntimeError("DATABASE_URL must point to a PostgreSQL/PostGIS instance for staging/docker setups.")
 DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
-
-print(f"✅ Using PostgreSQL/PostGIS database: {DATABASES['default']['HOST']}:{DATABASES['default']['PORT']}")
 
 
 # Password validation
@@ -219,7 +219,11 @@ if USE_HETZNER_OBJECT_STORAGE:
         media_base_url = f"{HETZNER_S3_ENDPOINT_URL.rstrip('/')}/{HETZNER_MEDIA_BUCKET}/"
     MEDIA_URL = _ensure_trailing_slash(media_base_url)
 
-NOTIFICATIONS_DELIVERY_MODE = config('NOTIFICATIONS_DELIVERY_MODE', default='sync').strip().lower()
+default_notifications_delivery_mode = 'sync' if DEBUG else 'async'
+NOTIFICATIONS_DELIVERY_MODE = config(
+    'NOTIFICATIONS_DELIVERY_MODE',
+    default=default_notifications_delivery_mode,
+).strip().lower()
 if NOTIFICATIONS_DELIVERY_MODE not in {'sync', 'async'}:
     raise RuntimeError("NOTIFICATIONS_DELIVERY_MODE must be either 'sync' or 'async'")
 
@@ -233,6 +237,8 @@ CELERY_NOTIFICATION_RETRY_MAX_SECONDS = config('CELERY_NOTIFICATION_RETRY_MAX_SE
 CELERY_NOTIFICATION_STUCK_SECONDS = config('CELERY_NOTIFICATION_STUCK_SECONDS', default=900, cast=int)
 CELERY_NOTIFICATION_SWEEP_SECONDS = config('CELERY_NOTIFICATION_SWEEP_SECONDS', default=60, cast=int)
 CELERY_NOTIFICATION_SWEEP_LIMIT = config('CELERY_NOTIFICATION_SWEEP_LIMIT', default=200, cast=int)
+NOTIFICATION_EXPERIMENT_PHASE = config('NOTIFICATION_EXPERIMENT_PHASE', default=10, cast=int)
+NOTIFICATION_PUSH_BATCH_SIZE = config('NOTIFICATION_PUSH_BATCH_SIZE', default=500, cast=int)
 
 CELERY_TASK_DEFAULT_QUEUE = CELERY_NOTIFICATION_QUEUE
 CELERY_TASK_IGNORE_RESULT = True
@@ -251,6 +257,14 @@ CELERY_BEAT_SCHEDULE = {
         'kwargs': {'limit': CELERY_NOTIFICATION_SWEEP_LIMIT},
     },
 }
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'patmatch-cache',
+    }
+}
+MAP_MARKERS_CACHE_TTL_SECONDS = config('MAP_MARKERS_CACHE_TTL_SECONDS', default=30, cast=int)
 
 # Allow larger payloads so multi-image uploads don't fail (413 Payload Too Large)
 MAX_UPLOAD_SIZE_MB = 200
@@ -298,9 +312,6 @@ CORS_ALLOWED_ORIGINS = [
 if os.environ.get('CORS_ALLOWED_ORIGINS'):
     cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS').split(',')
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins]
-    print(f"DEBUG: CORS_ALLOWED_ORIGINS set from environment: {CORS_ALLOWED_ORIGINS}")
-else:
-    print(f"DEBUG: Using default CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
 
 # Ensure CORS is properly configured
 CORS_ALLOW_CREDENTIALS = True
@@ -361,9 +372,6 @@ CSRF_TRUSTED_ORIGINS = [
 if os.environ.get('CSRF_TRUSTED_ORIGINS'):
     csrf_origins = os.environ.get('CSRF_TRUSTED_ORIGINS').split(',')
     CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins]
-    print(f"DEBUG: CSRF_TRUSTED_ORIGINS set from environment: {CSRF_TRUSTED_ORIGINS}")
-else:
-    print(f"DEBUG: Using default CSRF_TRUSTED_ORIGINS: {CSRF_TRUSTED_ORIGINS}")
 
 # Additional CSRF settings
 CSRF_COOKIE_SECURE = False  # Allow HTTP for local development
@@ -405,11 +413,10 @@ if BREVO_API_KEY and BREVO_FROM_EMAIL:
     EMAIL_BACKEND = 'accounts.brevo_email_backend.BrevoEmailBackend'
     DEFAULT_FROM_EMAIL = BREVO_FROM_EMAIL
     SERVER_EMAIL = BREVO_SERVER_EMAIL
-    print("✅ Using Brevo API email backend")
 else:
     # Fallback to console backend for development
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-    print("WARNING: Brevo email credentials not found. Using console email backend.")
+    logger.warning("Brevo email credentials not found. Using console email backend.")
 
 # Brevo API Configuration (for advanced features like campaigns)
 BREVO_CONFIG = {

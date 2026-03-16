@@ -3,7 +3,6 @@ from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
 from accounts.models import User
-from .push_targets import attach_push_targets
 
 class Breed(models.Model):
     """نموذج السلالات"""
@@ -260,6 +259,9 @@ class Pet(models.Model):
         verbose_name = "حيوان أليف"
         verbose_name_plural = "الحيوانات الأليفة"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+        ]
 
 class PetImage(models.Model):
     """صور إضافية للحيوانات"""
@@ -340,6 +342,11 @@ class BreedingRequest(models.Model):
         verbose_name = "طلب مقابلة"
         verbose_name_plural = "طلبات المقابلة"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['requester', 'created_at']),
+            models.Index(fields=['receiver', 'created_at']),
+            models.Index(fields=['status', 'created_at']),
+        ]
 
     def create_chat_room(self):
         """إنشاء غرفة محادثة عند قبول الطلب"""
@@ -381,6 +388,7 @@ class Notification(models.Model):
         ('adoption_request_received', 'تم استلام طلب تبني جديد'),
         ('adoption_request_approved', 'تم قبول طلب التبني'),
         ('adoption_request_pending_reminder', 'تذكير بطلب تبني معلق'),
+        ('account_verification_approved', 'تم اعتماد التحقق من الحساب'),
     ]
     
     user = models.ForeignKey(
@@ -448,6 +456,9 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['user', 'is_read']),
+            models.Index(fields=['user', 'is_read', '-created_at']),
+            models.Index(fields=['user', 'type', '-created_at']),
+            models.Index(fields=['user', 'type', 'is_read', 'related_chat_room']),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -469,36 +480,112 @@ class Notification(models.Model):
     
     @classmethod
     def create_chat_message_notification(cls, recipient_user, sender_user, chat_room, message_content):
-        """إنشاء إشعار رسالة جديدة مع إرسال إشعار دفع."""
-        # لا نرسل إشعار للمرسل نفسه
-        if recipient_user.id == sender_user.id:
-            return None
-            
-        notification = cls.objects.create(
-            user=recipient_user,
-            type='chat_message_received',
-            title=f'رسالة جديدة من {sender_user.get_full_name()}',
-            message=f'{message_content[:100]}...' if len(message_content) > 100 else message_content,
-            related_chat_room=chat_room,
-            extra_data={
-                'sender_name': sender_user.get_full_name(),
-                'sender_id': sender_user.id,
-                'chat_id': chat_room.firebase_chat_id,
-                'message_preview': message_content[:50]
-            }
+        """إنشاء إشعار رسالة جديدة."""
+        from .notifications import notify_chat_message_received  # local import to avoid circular dependency
+        return notify_chat_message_received(
+            recipient_user=recipient_user,
+            sender_user=sender_user,
+            chat_room=chat_room,
+            message_content=message_content,
         )
 
-        from .notifications import _send_push_notification  # local import to avoid circular dependency
 
-        push_payload = attach_push_targets({
-            'type': 'chat_message_received',
-            'chat_id': chat_room.firebase_chat_id,
-            'sender_id': str(sender_user.id),
-            'sender_name': sender_user.get_full_name(),
-        }, 'chat_message_received')
-        _send_push_notification(recipient_user, notification.title, notification.message, push_payload)
+class NotificationInteractionEvent(models.Model):
+    EVENT_OPENED = 'opened'
+    EVENT_ACTIONED = 'actioned'
+    EVENT_DISMISSED = 'dismissed'
+    EVENT_TYPE_CHOICES = [
+        (EVENT_OPENED, 'Opened'),
+        (EVENT_ACTIONED, 'Actioned'),
+        (EVENT_DISMISSED, 'Dismissed'),
+    ]
 
-        return notification
+    SOURCE_MOBILE_PUSH = 'mobile_push'
+    SOURCE_WEB_PUSH = 'web_push'
+    SOURCE_IN_APP = 'in_app'
+    SOURCE_CHOICES = [
+        (SOURCE_MOBILE_PUSH, 'Mobile Push'),
+        (SOURCE_WEB_PUSH, 'Web Push'),
+        (SOURCE_IN_APP, 'In App'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='notification_interaction_events',
+    )
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name='interaction_events',
+        null=True,
+        blank=True,
+    )
+    event_type = models.CharField(max_length=16, choices=EVENT_TYPE_CHOICES)
+    source = models.CharField(max_length=24, choices=SOURCE_CHOICES)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حدث تفاعل إشعار"
+        verbose_name_plural = "أحداث تفاعل الإشعارات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'event_type', '-created_at']),
+            models.Index(fields=['notification', 'event_type']),
+        ]
+
+    def __str__(self):
+        return f"Interaction({self.user_id}, {self.event_type}, {self.source})"
+
+
+class NotificationDeliveryAttempt(models.Model):
+    CHANNEL_PUSH = 'push'
+    CHANNEL_IN_APP = 'in_app'
+    CHANNEL_EMAIL = 'email'
+    CHANNEL_CHOICES = [
+        (CHANNEL_PUSH, 'Push'),
+        (CHANNEL_IN_APP, 'In App'),
+        (CHANNEL_EMAIL, 'Email'),
+    ]
+
+    STATUS_QUEUED = 'queued'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_SUPPRESSED = 'suppressed'
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, 'Queued'),
+        (STATUS_SENT, 'Sent'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_SUPPRESSED, 'Suppressed'),
+    ]
+
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name='delivery_attempts',
+        null=True,
+        blank=True,
+    )
+    channel = models.CharField(max_length=16, choices=CHANNEL_CHOICES, default=CHANNEL_PUSH)
+    provider = models.CharField(max_length=32, default='fcm')
+    provider_message_id = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    error = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "محاولة تسليم إشعار"
+        verbose_name_plural = "محاولات تسليم الإشعارات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['channel', 'status', '-created_at']),
+            models.Index(fields=['notification', 'channel']),
+        ]
+
+    def __str__(self):
+        return f"DeliveryAttempt(notification={self.notification_id}, status={self.status})"
 
 
 class NotificationOutbox(models.Model):
@@ -508,6 +595,11 @@ class NotificationOutbox(models.Model):
     EVENT_BREEDING_REQUEST_REJECTED = 'breeding_request_rejected'
     EVENT_ADOPTION_REQUEST_RECEIVED = 'adoption_request_received'
     EVENT_ADOPTION_REQUEST_APPROVED = 'adoption_request_approved'
+    EVENT_CHAT_MESSAGE_RECEIVED = 'chat_message_received'
+    EVENT_CLINIC_INVITE_PUSH = 'clinic_invite_push'
+    EVENT_CLINIC_BROADCAST_PUSH = 'clinic_broadcast_push'
+    EVENT_CLINIC_CHAT_MESSAGE_PUSH = 'clinic_chat_message_push'
+    EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH = 'account_verification_approved_push'
 
     EVENT_TYPE_CHOICES = [
         (EVENT_PET_CREATED, 'Pet created'),
@@ -516,6 +608,11 @@ class NotificationOutbox(models.Model):
         (EVENT_BREEDING_REQUEST_REJECTED, 'Breeding request rejected'),
         (EVENT_ADOPTION_REQUEST_RECEIVED, 'Adoption request received'),
         (EVENT_ADOPTION_REQUEST_APPROVED, 'Adoption request approved'),
+        (EVENT_CHAT_MESSAGE_RECEIVED, 'Chat message received'),
+        (EVENT_CLINIC_INVITE_PUSH, 'Clinic invite push'),
+        (EVENT_CLINIC_BROADCAST_PUSH, 'Clinic broadcast push'),
+        (EVENT_CLINIC_CHAT_MESSAGE_PUSH, 'Clinic chat message push'),
+        (EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH, 'Account verification approved push'),
     ]
 
     STATUS_PENDING = 'pending'
@@ -849,6 +946,8 @@ class ChatRoom(models.Model):
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
             'breeding_request__target_pet',
+            'breeding_request__requester_pet',
+            'breeding_request__requester_pet__owner',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
             'adoption_request__pet',
@@ -871,6 +970,8 @@ class ChatRoom(models.Model):
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
             'breeding_request__target_pet',
+            'breeding_request__requester_pet',
+            'breeding_request__requester_pet__owner',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
             'adoption_request__pet',
@@ -883,6 +984,9 @@ class ChatRoom(models.Model):
         verbose_name = "غرفة محادثة"
         verbose_name_plural = "غرف المحادثة"
         ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['is_active', 'updated_at']),
+        ]
 
 
 class AdoptionRequest(models.Model):
@@ -1038,3 +1142,7 @@ class AdoptionRequest(models.Model):
         verbose_name_plural = "طلبات التبني"
         ordering = ['-created_at']
         unique_together = ['adopter', 'pet', 'status']  # منع الطلبات المكررة
+        indexes = [
+            models.Index(fields=['adopter', 'created_at']),
+            models.Index(fields=['pet', 'status', 'created_at']),
+        ]
