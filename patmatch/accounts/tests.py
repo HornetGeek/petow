@@ -1,13 +1,18 @@
 from copy import deepcopy
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from django.conf import settings
 from django.core.cache import cache
-from django.test import override_settings
+from django.core.mail import EmailMultiAlternatives
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .brevo_email_backend import BrevoEmailBackend, BrevoSendError
+from .email_delivery import EMAIL_CATEGORY_REMINDER, send_email_payload
+from .email_notifications import send_password_reset_email, send_welcome_email
 from .google_maps_service import GoogleMapsServiceError
 from .models import MobileAppConfig, User
 
@@ -226,3 +231,154 @@ class MobileAppConfigTests(APITestCase):
         self.assertEqual(config.ios_recommended_version, '')
         self.assertEqual(config.android_store_url, '')
         self.assertEqual(config.ios_store_url, '')
+
+
+@override_settings(DEBUG=False)
+class PasswordResetOtpSecurityTests(APITestCase):
+    def setUp(self):
+        self.url = reverse('accounts:send_password_reset_otp')
+        self.user = User.objects.create_user(
+            username='reset-user',
+            email='reset@example.com',
+            password='testpass123',
+            first_name='Reset',
+            last_name='User',
+            phone='1234567890',
+        )
+
+    def test_response_is_generic_for_existing_email_even_when_send_fails(self):
+        with patch('accounts.views.send_password_reset_email', side_effect=RuntimeError('smtp failed')):
+            response = self.client.post(self.url, {'email': self.user.email}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get('success'))
+        self.assertEqual(
+            response.data.get('message'),
+            'إذا كان البريد الإلكتروني موجود، ستصلك رسالة بكود التحقق',
+        )
+        self.assertNotIn('debug_otp', response.data)
+
+    def test_response_is_generic_for_unknown_email(self):
+        response = self.client.post(self.url, {'email': 'unknown@example.com'}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get('success'))
+        self.assertEqual(
+            response.data.get('message'),
+            'إذا كان البريد الإلكتروني موجود، ستصلك رسالة بكود التحقق',
+        )
+        self.assertNotIn('debug_otp', response.data)
+
+    def test_otp_value_is_not_logged(self):
+        fake_otp = SimpleNamespace(otp_code='987654')
+        with patch('accounts.views.PasswordResetOTP.generate_otp', return_value=fake_otp), patch(
+            'accounts.views.send_password_reset_email',
+            side_effect=RuntimeError('smtp failed'),
+        ), self.assertLogs('accounts.views', level='ERROR') as logs:
+            response = self.client.post(self.url, {'email': self.user.email}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('987654', '\n'.join(logs.output))
+
+
+@override_settings(
+    BREVO_API_KEY='test-api-key',
+    BREVO_FROM_EMAIL='noreply@petow.app',
+    BREVO_FROM_NAME='Petow',
+    BREVO_REQUEST_TIMEOUT_SECONDS=5.0,
+    BREVO_MAX_RETRIES=2,
+    BREVO_RETRY_BACKOFF_SECONDS=0.1,
+)
+class BrevoEmailBackendTests(SimpleTestCase):
+    def _email(self):
+        return EmailMultiAlternatives(
+            subject='Test Subject',
+            body='Test Body',
+            from_email='noreply@petow.app',
+            to=['user@example.com'],
+        )
+
+    def _response(self, status_code, payload):
+        response = Mock()
+        response.status_code = status_code
+        response.json.return_value = payload
+        return response
+
+    def test_transient_failure_retries_and_sets_message_id(self):
+        backend = BrevoEmailBackend(fail_silently=False)
+        email = self._email()
+        transient = self._response(503, {'message': 'temporary outage'})
+        success = self._response(201, {'messageId': 'brevo-msg-123'})
+
+        with patch.object(backend._session, 'post', side_effect=[transient, success]) as post_mock, patch(
+            'accounts.brevo_email_backend.time.sleep'
+        ) as sleep_mock:
+            sent = backend.send_messages([email])
+
+        self.assertEqual(sent, 1)
+        self.assertEqual(post_mock.call_count, 2)
+        sleep_mock.assert_called_once()
+        self.assertEqual(getattr(email, 'brevo_message_id', ''), 'brevo-msg-123')
+
+    def test_invalid_payload_does_not_retry(self):
+        backend = BrevoEmailBackend(fail_silently=False)
+        email = self._email()
+        invalid = self._response(400, {'message': 'invalid payload', 'code': 'invalid_parameter'})
+
+        with patch.object(backend._session, 'post', return_value=invalid) as post_mock, patch(
+            'accounts.brevo_email_backend.time.sleep'
+        ) as sleep_mock:
+            with self.assertRaises(BrevoSendError) as exc_context:
+                backend.send_messages([email])
+
+        self.assertEqual(post_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+        self.assertEqual(exc_context.exception.classification, 'invalid_payload')
+
+
+class EmailRenderingTests(SimpleTestCase):
+    def _user_stub(self):
+        return SimpleNamespace(
+            id=501,
+            email='render@example.com',
+            first_name='Render',
+            get_full_name=lambda: 'Render User',
+        )
+
+    @patch('accounts.email_notifications.send_email_payload', return_value=True)
+    def test_welcome_email_contains_petow_brand_and_html(self, mocked_send_payload):
+        send_welcome_email(self._user_stub())
+
+        self.assertEqual(mocked_send_payload.call_count, 1)
+        kwargs = mocked_send_payload.call_args.kwargs
+        self.assertIn('Petow', kwargs['text_body'])
+        self.assertIn('Petow', kwargs['html_body'])
+        self.assertTrue(kwargs['html_body'])
+
+    @patch('accounts.email_notifications.send_email_payload', return_value=True)
+    def test_password_reset_email_contains_text_and_html(self, mocked_send_payload):
+        send_password_reset_email(self._user_stub(), otp_code='123456')
+
+        self.assertEqual(mocked_send_payload.call_count, 1)
+        kwargs = mocked_send_payload.call_args.kwargs
+        self.assertIn('123456', kwargs['text_body'])
+        self.assertIn('123456', kwargs['html_body'])
+        self.assertIn('Petow', kwargs['text_body'])
+
+    @override_settings(DEFAULT_FROM_EMAIL='noreply@petow.app')
+    @patch('accounts.email_delivery.EmailMultiAlternatives')
+    def test_reminder_email_includes_list_unsubscribe_header(self, mocked_email_cls):
+        mocked_email_instance = Mock()
+        mocked_email_cls.return_value = mocked_email_instance
+
+        send_email_payload(
+            to_email='recipient@example.com',
+            subject='Reminder',
+            text_body='Reminder body',
+            html_body='<p>Reminder body</p>',
+            category=EMAIL_CATEGORY_REMINDER,
+        )
+
+        headers = mocked_email_instance.extra_headers
+        self.assertIn('List-Unsubscribe', headers)
+        self.assertIn('mailto:', headers['List-Unsubscribe'])

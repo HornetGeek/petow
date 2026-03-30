@@ -17,8 +17,6 @@ import logging
 import os
 import re
 
-from .email_notifications import send_welcome_email
-
 logger = logging.getLogger(__name__)
 
 
@@ -532,45 +530,35 @@ def send_password_reset_otp(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
+    generic_response = {
+        'success': True,
+        'message': 'إذا كان البريد الإلكتروني موجود، ستصلك رسالة بكود التحقق'
+    }
+
     try:
-        # البحث عن المستخدم
-        user = User.objects.get(email=email)
-        
-        # إنشاء كود OTP
+        user = User.objects.filter(email=email).first()
+        if not user:
+            # لا نكشف وجود/عدم وجود البريد الإلكتروني.
+            return Response(generic_response, status=status.HTTP_200_OK)
+
         password_reset_otp = PasswordResetOTP.generate_otp(user)
-        
         try:
             send_password_reset_email(user, password_reset_otp.otp_code)
-            logger.info(f"Password reset OTP sent to {email}: {password_reset_otp.otp_code}")
+        except Exception as exc:
+            logger.error(
+                "Failed to deliver password reset email for user_id=%s email=%s: %s",
+                user.id,
+                email,
+                exc,
+            )
 
-            return Response({
-                'success': True,
-                'message': 'تم إرسال كود التحقق إلى بريدك الإلكتروني'
-            })
+        # استجابة موحدة دائماً لتجنب كشف حالة الحساب أو حالة مزود البريد.
+        return Response(generic_response, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            logger.error(f"Failed to send password reset email to {email}: {str(e)}")
-            logger.debug("Password reset OTP generated for %s", email)
-
-            return Response({
-                'success': True,
-                'message': 'تم إنشاء كود التحقق (تحقق من Django Console للحصول على الكود)',
-                'debug_otp': password_reset_otp.otp_code
-            })
-            
-    except User.DoesNotExist:
-        # لا نكشف أن الإيميل غير موجود لأسباب أمنية
-        return Response({
-            'success': True,
-            'message': 'إذا كان البريد الإلكتروني موجود، ستصلك رسالة بكود التحقق'
-        })
-    
-    except Exception as e:
-        logger.error(f"Error in send_password_reset_otp: {str(e)}")
-        return Response(
-            {'error': 'حدث خطأ في إرسال كود التحقق'}, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+    except Exception as exc:
+        logger.error("Error in send_password_reset_otp for email=%s: %s", email, exc)
+        # نحافظ على استجابة موحدة حتى في حالات الفشل الداخلية.
+        return Response(generic_response, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])

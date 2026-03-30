@@ -15,6 +15,7 @@ import os
 import logging
 import dj_database_url
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -246,15 +247,31 @@ CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ROUTES = {
     'pets.tasks.process_notification_outbox_event': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.sweep_notification_outbox': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.run_lifecycle_engagement_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.run_auto_manage_requests': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.run_daily_unread_email_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
 }
 CELERY_BEAT_SCHEDULE = {
     'notification-outbox-sweep': {
         'task': 'pets.tasks.sweep_notification_outbox',
         'schedule': CELERY_NOTIFICATION_SWEEP_SECONDS,
         'kwargs': {'limit': CELERY_NOTIFICATION_SWEEP_LIMIT},
+    },
+    'lifecycle-engagement-reminders-hourly': {
+        'task': 'pets.tasks.run_lifecycle_engagement_reminders',
+        'schedule': crontab(minute=5),
+    },
+    'auto-manage-requests-hourly': {
+        'task': 'pets.tasks.run_auto_manage_requests',
+        'schedule': crontab(minute=10),
+    },
+    'daily-unread-email-reminders': {
+        'task': 'pets.tasks.run_daily_unread_email_reminders',
+        'schedule': crontab(hour=23, minute=30),
     },
 }
 
@@ -405,8 +422,20 @@ FIREBASE_CLIENT_X509_CERT_URL = config('FIREBASE_CLIENT_X509_CERT_URL', default=
 BREVO_API_KEY = config('BREVO_API_KEY', default='')
 BREVO_SMTP_USER = config('BREVO_SMTP_USER', default='')
 BREVO_FROM_EMAIL = config('BREVO_FROM_EMAIL', default='')
-BREVO_FROM_NAME = config('BREVO_FROM_NAME', default='PetMatch')
+BREVO_FROM_NAME = config('BREVO_FROM_NAME', default='Petow')
 BREVO_SERVER_EMAIL = config('BREVO_SERVER_EMAIL', default='')
+BREVO_REQUEST_TIMEOUT_SECONDS = config('BREVO_REQUEST_TIMEOUT_SECONDS', default=10, cast=float)
+BREVO_MAX_RETRIES = config('BREVO_MAX_RETRIES', default=2, cast=int)
+BREVO_RETRY_BACKOFF_SECONDS = config('BREVO_RETRY_BACKOFF_SECONDS', default=0.75, cast=float)
+EMAIL_REMINDER_UNSUBSCRIBE_URL = config(
+    'EMAIL_REMINDER_UNSUBSCRIBE_URL',
+    default='https://petow.app/profile/notifications',
+)
+EMAIL_REMINDER_FAILURE_ALERT_THRESHOLD = config(
+    'EMAIL_REMINDER_FAILURE_ALERT_THRESHOLD',
+    default=0.4,
+    cast=float,
+)
 
 # Email Configuration using Brevo API (more reliable than SMTP)
 if BREVO_API_KEY and BREVO_FROM_EMAIL:
@@ -422,6 +451,9 @@ else:
 BREVO_CONFIG = {
     'api_key': BREVO_API_KEY,
     'base_url': 'https://api.brevo.com/v3',
+    'request_timeout_seconds': BREVO_REQUEST_TIMEOUT_SECONDS,
+    'max_retries': BREVO_MAX_RETRIES,
+    'retry_backoff_seconds': BREVO_RETRY_BACKOFF_SECONDS,
 }
 
 # Infobip SMS configuration
