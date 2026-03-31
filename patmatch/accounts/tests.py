@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -13,6 +14,7 @@ from rest_framework.test import APITestCase
 from .brevo_email_backend import BrevoEmailBackend, BrevoSendError
 from .email_delivery import EMAIL_CATEGORY_REMINDER, send_email_payload
 from .email_notifications import send_password_reset_email, send_welcome_email
+from .firebase_service import FirebaseService
 from .google_maps_service import GoogleMapsServiceError
 from .models import MobileAppConfig, User
 
@@ -23,6 +25,98 @@ def build_rest_framework_override(scope_rates):
     merged_rates.update(scope_rates)
     rest_framework_settings['DEFAULT_THROTTLE_RATES'] = merged_rates
     return rest_framework_settings
+
+
+class FirebasePayloadNormalizationTests(SimpleTestCase):
+    def setUp(self):
+        with patch('accounts.firebase_service.FirebaseService._initialize_firebase'):
+            self.service = FirebaseService()
+        self.service.is_initialized = True
+
+    def test_send_notification_normalizes_mixed_payload_types(self):
+        payload = {
+            'as_string': 'value',
+            'as_float': 1.5,
+            'as_int': 7,
+            'as_bool': True,
+            'as_none': None,
+            'as_dict': {'pet_id': 9, 'is_free': False},
+            'as_list': ['a', 2, False],
+        }
+
+        with patch('accounts.firebase_service.messaging.Message') as message_mock, patch(
+            'accounts.firebase_service.messaging.send',
+            return_value='firebase-message-id',
+        ):
+            sent = self.service.send_notification(
+                fcm_token='token-1',
+                title='Title',
+                body='Body',
+                data=payload,
+            )
+
+        self.assertTrue(sent)
+        normalized = message_mock.call_args.kwargs['data']
+        self.assertEqual(normalized['as_string'], 'value')
+        self.assertEqual(normalized['as_float'], '1.5')
+        self.assertEqual(normalized['as_int'], '7')
+        self.assertEqual(normalized['as_bool'], 'true')
+        self.assertNotIn('as_none', normalized)
+        self.assertEqual(json.loads(normalized['as_dict']), {'pet_id': 9, 'is_free': False})
+        self.assertEqual(json.loads(normalized['as_list']), ['a', 2, False])
+
+    def test_send_multicast_notification_normalizes_payload(self):
+        payload = {
+            'distance_km': 3.2,
+            'allow_contact': False,
+            'extra': {'kind': 'adoption'},
+            'skip_me': None,
+        }
+
+        response = SimpleNamespace(success_count=1, failure_count=0)
+        with patch('accounts.firebase_service.messaging.MulticastMessage') as multicast_message_mock, patch(
+            'accounts.firebase_service.messaging.send_multicast',
+            return_value=response,
+        ):
+            sent = self.service.send_multicast_notification(
+                fcm_tokens=['token-1', 'token-2'],
+                title='Title',
+                body='Body',
+                data=payload,
+            )
+
+        self.assertTrue(sent)
+        normalized = multicast_message_mock.call_args.kwargs['data']
+        self.assertEqual(normalized['distance_km'], '3.2')
+        self.assertEqual(normalized['allow_contact'], 'false')
+        self.assertEqual(json.loads(normalized['extra']), {'kind': 'adoption'})
+        self.assertNotIn('skip_me', normalized)
+
+    def test_send_topic_notification_normalizes_payload(self):
+        payload = {
+            'count': 2,
+            'is_urgent': False,
+            'meta': ('a', 1),
+            'drop_none': None,
+        }
+
+        with patch('accounts.firebase_service.messaging.Message') as message_mock, patch(
+            'accounts.firebase_service.messaging.send',
+            return_value='firebase-topic-id',
+        ):
+            sent = self.service.send_topic_notification(
+                topic='pet-updates',
+                title='Topic',
+                body='Body',
+                data=payload,
+            )
+
+        self.assertTrue(sent)
+        normalized = message_mock.call_args.kwargs['data']
+        self.assertEqual(normalized['count'], '2')
+        self.assertEqual(normalized['is_urgent'], 'false')
+        self.assertEqual(json.loads(normalized['meta']), ['a', 1])
+        self.assertNotIn('drop_none', normalized)
 
 
 class BaseMapsProxyTestCase(APITestCase):

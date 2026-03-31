@@ -14,9 +14,9 @@ from accounts.models import User, UserNotificationSettings
 from clinics.signals import claim_invites_when_user_updates
 
 from .email_notifications import send_adoption_request_email, send_daily_unread_messages_reminder
-from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, EmailReminderDispatch, Notification, NotificationOutbox, Pet
+from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, EmailReminderDispatch, Notification, NotificationDeliveryAttempt, NotificationOutbox, Pet
 from .notification_events import enqueue_notification_event
-from .notifications import notify_new_pet_added
+from .notifications import notify_new_adoption_pet, notify_new_pet_added
 from .serializers import ChatContextSerializer, ChatRoomListSerializer
 from .tasks import (
     process_notification_outbox_event,
@@ -74,6 +74,84 @@ class NotifyNewPetAddedTests(TestCase):
 
         self.assertEqual(result, [])
         self.assertEqual(Notification.objects.count(), 0)
+
+
+class AdoptionPushPayloadRegressionTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        post_save.disconnect(receiver=claim_invites_when_user_updates, sender=User)
+
+    @classmethod
+    def tearDownClass(cls):
+        post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='adoption-owner',
+            email='adoption-owner@example.com',
+            password='testpass123',
+            phone='1231231234',
+            first_name='Owner',
+            last_name='Adoption',
+        )
+        self.recipient = User.objects.create_user(
+            username='adoption-recipient',
+            email='adoption-recipient@example.com',
+            password='testpass123',
+            phone='1231239999',
+            first_name='Recipient',
+            last_name='Nearby',
+            latitude=Decimal('24.7136'),
+            longitude=Decimal('46.6753'),
+            fcm_token='recipient-token',
+        )
+        self.breed = Breed.objects.create(name='Adoption Push Breed', pet_type='cats')
+
+    @staticmethod
+    def _test_image():
+        return SimpleUploadedFile('adoption_push.jpg', b'\xff\xd8\xff', content_type='image/jpeg')
+
+    def test_notify_new_adoption_pet_sends_string_safe_payload(self):
+        pet = Pet.objects.create(
+            owner=self.owner,
+            name='Nearby Adoption Cat',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=12,
+            gender='F',
+            description='Adopt me',
+            hosting_preference='flexible',
+            main_image=self._test_image(),
+            status='available_for_adoption',
+            location='Riyadh',
+            latitude=Decimal('24.7136'),
+            longitude=Decimal('46.6753'),
+            is_free=True,
+        )
+
+        with patch('pets.notifications.is_user_in_variant_cohort', return_value=False), patch(
+            'pets.notifications.firebase_service.is_initialized',
+            True,
+        ), patch('accounts.firebase_service.messaging.Message') as message_mock, patch(
+            'accounts.firebase_service.messaging.send',
+            return_value='firebase-message-id',
+        ):
+            notifications = notify_new_adoption_pet(
+                pet,
+                radius_km=10,
+                event_key_prefix=f"adoption_pet_nearby:{pet.id}",
+            )
+
+        self.assertEqual(len(notifications), 1)
+        normalized_data = message_mock.call_args.kwargs['data']
+        self.assertIn('distance_km', normalized_data)
+        self.assertTrue(all(isinstance(value, str) for value in normalized_data.values()))
+
+        attempt = NotificationDeliveryAttempt.objects.filter(notification=notifications[0]).order_by('-created_at').first()
+        self.assertIsNotNone(attempt)
+        self.assertEqual(attempt.status, NotificationDeliveryAttempt.STATUS_SENT)
 
 
 class PetMapMarkersValidationTests(SimpleTestCase):
