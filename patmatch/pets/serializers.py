@@ -622,6 +622,7 @@ class NotificationPreferencesSerializer(serializers.ModelSerializer):
             'allow_clinic',
             'allow_discovery',
             'allow_reminders',
+            'allow_reminder_email',
             'quiet_hours_start',
             'quiet_hours_end',
             'timezone',

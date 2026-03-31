@@ -35,6 +35,11 @@ class User(AbstractUser):
     # Notification preferences
     notify_breeding_requests = models.BooleanField(default=True, help_text="إرسال إشعارات طلبات التزاوج")
     notify_adoption_pets = models.BooleanField(default=True, help_text="إرسال إشعارات الحيوانات المتاحة للتبني")
+    first_pet_created_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="تاريخ إنشاء أول حيوان للمستخدم (لاستخدامه في حملات onboarding)",
+    )
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -71,6 +76,7 @@ class UserNotificationSettings(models.Model):
     allow_clinic = models.BooleanField(default=True)
     allow_discovery = models.BooleanField(default=True)
     allow_reminders = models.BooleanField(default=True)
+    allow_reminder_email = models.BooleanField(default=True)
 
     quiet_hours_start = models.TimeField(default=dt_time(22, 0))
     quiet_hours_end = models.TimeField(default=dt_time(8, 0))

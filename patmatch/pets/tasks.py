@@ -3,6 +3,7 @@ import random
 from datetime import timedelta
 
 from celery import shared_task
+from django.core.management import call_command
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -145,3 +146,17 @@ def sweep_notification_outbox(limit=200):
         'queued': len(pending_event_ids),
     }
 
+
+@shared_task(ignore_result=True, name='pets.tasks.run_lifecycle_engagement_reminders')
+def run_lifecycle_engagement_reminders():
+    call_command('send_lifecycle_engagement_reminders')
+
+
+@shared_task(ignore_result=True, name='pets.tasks.run_auto_manage_requests')
+def run_auto_manage_requests():
+    call_command('auto_manage_requests')
+
+
+@shared_task(ignore_result=True, name='pets.tasks.run_daily_unread_email_reminders')
+def run_daily_unread_email_reminders():
+    call_command('send_daily_reminders')

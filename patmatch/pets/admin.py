@@ -8,6 +8,7 @@ from .models import (
     VeterinaryClinic,
     Notification,
     NotificationOutbox,
+    EmailReminderDispatch,
     ChatRoom,
     AdoptionRequest,
 )
@@ -116,6 +117,14 @@ class NotificationOutboxAdmin(admin.ModelAdmin):
     list_filter = ['status', 'event_type', 'created_at']
     search_fields = ['dedupe_key', 'last_error']
     readonly_fields = ['created_at', 'updated_at', 'processed_at']
+
+
+@admin.register(EmailReminderDispatch)
+class EmailReminderDispatchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'reminder_key', 'target_date', 'status', 'attempts', 'sent_at', 'updated_at']
+    list_filter = ['reminder_key', 'status', 'target_date']
+    search_fields = ['user__email', 'recipient_email', 'last_error']
+    readonly_fields = ['created_at', 'updated_at', 'sent_at']
 
 
 @admin.register(Favorite)

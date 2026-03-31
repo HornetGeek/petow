@@ -588,6 +588,62 @@ class NotificationDeliveryAttempt(models.Model):
         return f"DeliveryAttempt(notification={self.notification_id}, status={self.status})"
 
 
+class EmailReminderDispatch(models.Model):
+    REMINDER_DAILY_UNREAD_MESSAGES = 'daily_unread_messages'
+    REMINDER_CHOICES = [
+        (REMINDER_DAILY_UNREAD_MESSAGES, 'Daily unread messages'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROCESSING = 'processing'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROCESSING, 'Processing'),
+        (STATUS_SENT, 'Sent'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='email_reminder_dispatches',
+    )
+    reminder_key = models.CharField(
+        max_length=64,
+        choices=REMINDER_CHOICES,
+        default=REMINDER_DAILY_UNREAD_MESSAGES,
+    )
+    target_date = models.DateField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    recipient_email = models.EmailField(blank=True, default='')
+    last_error = models.TextField(blank=True, default='')
+    sent_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "سجل إرسال تذكير بريدي"
+        verbose_name_plural = "سجلات إرسال التذكيرات البريدية"
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'reminder_key', 'target_date'],
+                name='pets_email_reminder_user_key_date_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['reminder_key', 'target_date', 'status'], name='pets_email_reminder_key_date_status_idx'),
+            models.Index(fields=['user', 'target_date'], name='pets_email_reminder_user_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"EmailReminderDispatch(user={self.user_id}, key={self.reminder_key}, date={self.target_date}, status={self.status})"
+
+
 class NotificationOutbox(models.Model):
     EVENT_PET_CREATED = 'pet_created'
     EVENT_BREEDING_REQUEST_RECEIVED = 'breeding_request_received'
