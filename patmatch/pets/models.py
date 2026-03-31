@@ -260,7 +260,7 @@ class Pet(models.Model):
         verbose_name_plural = "الحيوانات الأليفة"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['status', 'created_at'], name='pets_pet_status_5ce6d5_idx'),
         ]
 
 class PetImage(models.Model):
@@ -343,9 +343,9 @@ class BreedingRequest(models.Model):
         verbose_name_plural = "طلبات المقابلة"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['requester', 'created_at']),
-            models.Index(fields=['receiver', 'created_at']),
-            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['requester', 'created_at'], name='pets_breedi_request_55bc14_idx'),
+            models.Index(fields=['receiver', 'created_at'], name='pets_breedi_receive_f0df09_idx'),
+            models.Index(fields=['status', 'created_at'], name='pets_breedi_status_2c575a_idx'),
         ]
 
     def create_chat_room(self):
@@ -456,9 +456,9 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['user', 'is_read']),
-            models.Index(fields=['user', 'is_read', '-created_at']),
-            models.Index(fields=['user', 'type', '-created_at']),
-            models.Index(fields=['user', 'type', 'is_read', 'related_chat_room']),
+            models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notif_user_read_created_idx'),
+            models.Index(fields=['user', 'type', '-created_at'], name='pets_notif_user_type_created_idx'),
+            models.Index(fields=['user', 'type', 'is_read', 'related_chat_room'], name='pets_notifi_user_id_a8a6dd_idx'),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -531,8 +531,8 @@ class NotificationInteractionEvent(models.Model):
         verbose_name_plural = "أحداث تفاعل الإشعارات"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['user', 'event_type', '-created_at']),
-            models.Index(fields=['notification', 'event_type']),
+            models.Index(fields=['user', 'event_type', '-created_at'], name='pets_interact_user_event_created_idx'),
+            models.Index(fields=['notification', 'event_type'], name='pets_interact_notification_event_idx'),
         ]
 
     def __str__(self):
@@ -580,8 +580,8 @@ class NotificationDeliveryAttempt(models.Model):
         verbose_name_plural = "محاولات تسليم الإشعارات"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['channel', 'status', '-created_at']),
-            models.Index(fields=['notification', 'channel']),
+            models.Index(fields=['channel', 'status', '-created_at'], name='pets_delivery_channel_status_idx'),
+            models.Index(fields=['notification', 'channel'], name='pets_delivery_notification_channel_idx'),
         ]
 
     def __str__(self):
@@ -701,8 +701,8 @@ class NotificationOutbox(models.Model):
         verbose_name_plural = "Notification Outbox Events"
         ordering = ['created_at']
         indexes = [
-            models.Index(fields=['status', 'next_attempt_at']),
-            models.Index(fields=['event_type', 'status']),
+            models.Index(fields=['status', 'next_attempt_at'], name='pets_notifi_status_d39f19_idx'),
+            models.Index(fields=['event_type', 'status'], name='pets_notifi_event_t_629f6d_idx'),
         ]
 
     def __str__(self):
@@ -1041,7 +1041,7 @@ class ChatRoom(models.Model):
         verbose_name_plural = "غرف المحادثة"
         ordering = ['-updated_at']
         indexes = [
-            models.Index(fields=['is_active', 'updated_at']),
+            models.Index(fields=['is_active', 'updated_at'], name='pets_chatro_is_acti_6cab74_idx'),
         ]
 
 
@@ -1199,6 +1199,6 @@ class AdoptionRequest(models.Model):
         ordering = ['-created_at']
         unique_together = ['adopter', 'pet', 'status']  # منع الطلبات المكررة
         indexes = [
-            models.Index(fields=['adopter', 'created_at']),
-            models.Index(fields=['pet', 'status', 'created_at']),
+            models.Index(fields=['adopter', 'created_at'], name='pets_adopti_adopter_e507df_idx'),
+            models.Index(fields=['pet', 'status', 'created_at'], name='pets_adopti_pet_id_5cc999_idx'),
         ]
