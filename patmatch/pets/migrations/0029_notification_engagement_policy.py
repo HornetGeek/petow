@@ -40,11 +40,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name='notification',
-            index=models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notif_user_read_created_idx'),
+            index=models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notifi_user_id_82b9a5_idx'),
         ),
         migrations.AddIndex(
             model_name='notification',
-            index=models.Index(fields=['user', 'type', '-created_at'], name='pets_notif_user_type_created_idx'),
+            index=models.Index(fields=['user', 'type', '-created_at'], name='pets_notifi_user_id_8d5d81_idx'),
         ),
         migrations.CreateModel(
             name='NotificationDeliveryAttempt',
@@ -84,19 +84,19 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name='notificationdeliveryattempt',
-            index=models.Index(fields=['channel', 'status', '-created_at'], name='pets_delivery_channel_status_idx'),
+            index=models.Index(fields=['channel', 'status', '-created_at'], name='pets_notifi_channel_5bc52d_idx'),
         ),
         migrations.AddIndex(
             model_name='notificationdeliveryattempt',
-            index=models.Index(fields=['notification', 'channel'], name='pets_delivery_notification_channel_idx'),
+            index=models.Index(fields=['notification', 'channel'], name='pets_notifi_notific_c59c19_idx'),
         ),
         migrations.AddIndex(
             model_name='notificationinteractionevent',
-            index=models.Index(fields=['user', 'event_type', '-created_at'], name='pets_interact_user_event_created_idx'),
+            index=models.Index(fields=['user', 'event_type', '-created_at'], name='pets_notifi_user_id_7e1b2e_idx'),
         ),
         migrations.AddIndex(
             model_name='notificationinteractionevent',
-            index=models.Index(fields=['notification', 'event_type'], name='pets_interact_notification_event_idx'),
+            index=models.Index(fields=['notification', 'event_type'], name='pets_notifi_notific_b252b3_idx'),
         ),
         migrations.AlterField(
             model_name='notificationoutbox',

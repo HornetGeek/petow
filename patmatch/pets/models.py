@@ -456,8 +456,8 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['user', 'is_read']),
-            models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notif_user_read_created_idx'),
-            models.Index(fields=['user', 'type', '-created_at'], name='pets_notif_user_type_created_idx'),
+            models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notifi_user_id_82b9a5_idx'),
+            models.Index(fields=['user', 'type', '-created_at'], name='pets_notifi_user_id_8d5d81_idx'),
             models.Index(fields=['user', 'type', 'is_read', 'related_chat_room'], name='pets_notifi_user_id_a8a6dd_idx'),
         ]
         constraints = [
@@ -531,8 +531,8 @@ class NotificationInteractionEvent(models.Model):
         verbose_name_plural = "أحداث تفاعل الإشعارات"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['user', 'event_type', '-created_at'], name='pets_interact_user_event_created_idx'),
-            models.Index(fields=['notification', 'event_type'], name='pets_interact_notification_event_idx'),
+            models.Index(fields=['user', 'event_type', '-created_at'], name='pets_notifi_user_id_7e1b2e_idx'),
+            models.Index(fields=['notification', 'event_type'], name='pets_notifi_notific_b252b3_idx'),
         ]
 
     def __str__(self):
@@ -580,8 +580,8 @@ class NotificationDeliveryAttempt(models.Model):
         verbose_name_plural = "محاولات تسليم الإشعارات"
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['channel', 'status', '-created_at'], name='pets_delivery_channel_status_idx'),
-            models.Index(fields=['notification', 'channel'], name='pets_delivery_notification_channel_idx'),
+            models.Index(fields=['channel', 'status', '-created_at'], name='pets_notifi_channel_5bc52d_idx'),
+            models.Index(fields=['notification', 'channel'], name='pets_notifi_notific_c59c19_idx'),
         ]
 
     def __str__(self):
