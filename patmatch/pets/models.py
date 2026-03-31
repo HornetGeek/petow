@@ -636,8 +636,8 @@ class EmailReminderDispatch(models.Model):
             ),
         ]
         indexes = [
-            models.Index(fields=['reminder_key', 'target_date', 'status'], name='pets_email_reminder_key_date_status_idx'),
-            models.Index(fields=['user', 'target_date'], name='pets_email_reminder_user_date_idx'),
+            models.Index(fields=['reminder_key', 'target_date', 'status'], name='pets_eml_rem_key_dt_st_idx'),
+            models.Index(fields=['user', 'target_date'], name='pets_eml_rem_usr_dt_idx'),
         ]
 
     def __str__(self):
