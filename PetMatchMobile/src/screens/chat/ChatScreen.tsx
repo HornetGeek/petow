@@ -33,6 +33,7 @@ import { deriveChatPhase } from '../../utils/chatPhase';
 import ChatStatusBanner from './components/ChatStatusBanner';
 import OwnerActionBar from './components/OwnerActionBar';
 import VerificationFormSheet from './components/VerificationFormSheet';
+import RequestSystemCard from './components/RequestSystemCard';
 
 interface ChatScreenProps {
   firebaseChatId: string;
@@ -661,6 +662,43 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     return false;  // pending / approved_pending_kyc / approved_kyc_pending_review / approved_kyc_rejected / rejected
   }, [requestChatV2Enabled, phase]);
 
+  // Build the pinned RequestSystemCard payload from chatContext.
+  // NOTE: backend `get_chat_context` only exposes minimal fields on
+  // adoption_request/breeding_request (id, status, created_at, plus
+  // adopter_name or message). The richer fields (housing_type, plans,
+  // requester_pet, meeting_date, notes, has_experience/experience_text)
+  // aren't currently in the chat context payload, so we still wire
+  // optional accessors below — RequestSystemCard hides undefined rows,
+  // so the card degrades gracefully and gains detail when/if the
+  // backend expands the payload later.
+  const requestCardPayload = useMemo(() => {
+    if (!requestChatV2Enabled) return null;
+    const adoption = (chatContext as any)?.adoption_request;
+    const breeding = (chatContext as any)?.breeding_request;
+    if (adoption) {
+      return {
+        kind: 'adoption' as const,
+        housingType: adoption.housing_type,
+        hasExperience: adoption.has_experience,
+        experienceText: adoption.experience_text,
+        notes: adoption.notes,
+        feedingPlan: adoption.feeding_plan,
+        exercisePlan: adoption.exercise_plan,
+        vetCarePlan: adoption.vet_care_plan,
+        emergencyPlan: adoption.emergency_plan,
+      };
+    }
+    if (breeding) {
+      return {
+        kind: 'breeding' as const,
+        myPetName: breeding.requester_pet?.name,
+        meetingDate: breeding.meeting_date,
+        notes: breeding.notes ?? breeding.message,
+      };
+    }
+    return null;
+  }, [chatContext, requestChatV2Enabled]);
+
   const otherParticipantVerified = (() => {
     if (chatRoom?.other_participant?.is_verified) {
       return true;
@@ -753,6 +791,13 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           rejectionReason={
             phase === 'approved_kyc_rejected' ? verificationAdminNotes : undefined
           }
+        />
+      ) : null}
+
+      {requestChatV2Enabled && requestCardPayload ? (
+        <RequestSystemCard
+          payload={requestCardPayload}
+          defaultCollapsed={phase === 'approved'}
         />
       ) : null}
 
