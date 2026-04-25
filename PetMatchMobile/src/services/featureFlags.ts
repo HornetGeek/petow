@@ -5,12 +5,14 @@ export type FeatureFlags = {
   clinicHomeEnabled: boolean;
   clinicMapEnabled: boolean;
   serverMapClusteringEnabled: boolean;
+  requestChatV2Enabled: boolean;
 };
 
 const mapAppConfigToFeatureFlags = (config: AppConfig): FeatureFlags => ({
   clinicHomeEnabled: config.clinicHomeEnabled,
   clinicMapEnabled: config.clinicMapEnabled,
   serverMapClusteringEnabled: config.serverMapClusteringEnabled,
+  requestChatV2Enabled: config.requestChatV2Enabled,
 });
 
 const getDefaultFlags = (): FeatureFlags => (

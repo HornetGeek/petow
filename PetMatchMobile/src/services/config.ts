@@ -13,9 +13,11 @@ export const LOCAL_FEATURE_OVERRIDES: Partial<{
   clinicHomeEnabled: boolean;
   clinicMapEnabled: boolean;
   serverMapClusteringEnabled: boolean;
+  requestChatV2Enabled: boolean;
 }> = {
   clinicHomeEnabled: true,
   clinicMapEnabled: true,
+  // requestChatV2Enabled: true,  // uncomment in dev to see the new flow
 };
 
 // Canonical domains
