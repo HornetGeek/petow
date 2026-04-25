@@ -585,58 +585,16 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     );
   };
 
-  if (loading) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backButton} onPress={onClose}>
-            <Text style={styles.backButtonText}>‹</Text>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>المحادثة</Text>
-          <View style={styles.placeholder} />
-        </View>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#02B7B4" />
-          <Text style={styles.loadingText}>جاري تحميل المحادثة...</Text>
-        </View>
-      </View>
-    );
-  }
-
-  if (error && !chatRoom) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backButton} onPress={onClose}>
-            <Text style={styles.backButtonText}>‹</Text>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>المحادثة</Text>
-          <View style={styles.placeholder} />
-        </View>
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorIcon}>⚠️</Text>
-          <Text style={styles.errorTitle}>خطأ في تحميل المحادثة</Text>
-          <Text style={styles.errorMessage}>{error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={loadChatRoom}>
-            <Text style={styles.retryButtonText}>إعادة المحاولة</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
-  const petInfo = chatContext?.pet || null;
-  const otherParticipantName = chatRoom?.other_participant?.name
-    || chatContext?.clinic?.name
-    || 'فريق العيادة';
-  const currentUserId = user?.id;
-
-  // Adapted from spec: ChatRoom has no `requester` / `adoption_request` / `breeding_request`
-  // fields directly. Those live on ChatContext. Perspective is derived from pet ownership:
-  // current user is "owner" if their name matches the pet owner's name, else "requester".
-  const ownerName = chatContext?.pet?.owner_name || null;
-  const userFullName = user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
-  const isRequester = !!ownerName && !!userFullName ? ownerName !== userFullName : true;
+  // ────────────────────────────────────────────────────────────────────
+  // chat-v2 derivations. MUST be declared above the loading/error early
+  // returns below so the hook-call order is identical across renders
+  // (React's Rules of Hooks).
+  // ────────────────────────────────────────────────────────────────────
+  const ownerNameForPhase = chatContext?.pet?.owner_name || null;
+  const userFullNameForPhase = user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
+  const isRequester = !!ownerNameForPhase && !!userFullNameForPhase
+    ? ownerNameForPhase !== userFullNameForPhase
+    : true;
   const perspective: 'requester' | 'owner' = isRequester ? 'requester' : 'owner';
 
   // TODO(chat-v2 stage 2): once backend exposes a unified `chat_status`
@@ -696,12 +654,58 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       return {
         kind: 'breeding' as const,
         myPetName: breeding.requester_pet?.name,
-        meetingDate: breeding.meeting_date,
+        meetingDate: breeding.meeting_date ?? breeding.message,
         notes: breeding.notes ?? breeding.message,
       };
     }
     return null;
   }, [chatContext, requestChatV2Enabled]);
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backButton} onPress={onClose}>
+            <Text style={styles.backButtonText}>‹</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>المحادثة</Text>
+          <View style={styles.placeholder} />
+        </View>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#02B7B4" />
+          <Text style={styles.loadingText}>جاري تحميل المحادثة...</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (error && !chatRoom) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backButton} onPress={onClose}>
+            <Text style={styles.backButtonText}>‹</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>المحادثة</Text>
+          <View style={styles.placeholder} />
+        </View>
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorIcon}>⚠️</Text>
+          <Text style={styles.errorTitle}>خطأ في تحميل المحادثة</Text>
+          <Text style={styles.errorMessage}>{error}</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={loadChatRoom}>
+            <Text style={styles.retryButtonText}>إعادة المحاولة</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  const petInfo = chatContext?.pet || null;
+  const otherParticipantName = chatRoom?.other_participant?.name
+    || chatContext?.clinic?.name
+    || 'فريق العيادة';
+  const currentUserId = user?.id;
 
   const otherParticipantVerified = (() => {
     if (chatRoom?.other_participant?.is_verified) {
