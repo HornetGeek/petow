@@ -8,6 +8,7 @@ import notifee, {
   type Notification as NotifeeNotification,
 } from '@notifee/react-native';
 import { apiService } from './api';
+import { fetchFeatureFlags } from './featureFlags';
 
 const FCM_TOKEN_KEY = 'fcmToken';
 const NOTIFICATION_PERMISSION_ASKED_KEY = 'notificationPermissionAsked';
@@ -178,13 +179,28 @@ function withQuery(baseUrl: string, key: string, rawValue?: string | number | nu
   return `${baseUrl}?${key}=${encodeURIComponent(String(rawValue))}`;
 }
 
-function buildDeepLinkFromPayload(data: Record<string, any>): string {
+async function buildDeepLinkFromPayload(data: Record<string, any>): Promise<string> {
   const payloadDeepLink = getDataValueAsString(data, ['deep_link', 'deeplink']);
   if (payloadDeepLink) {
     return payloadDeepLink;
   }
 
   const type = getTypeFromAny({ data }).toLowerCase();
+  const firebaseChatId = getDataValueAsString(data, ['firebase_chat_id', 'chat_id', 'chat_room_id']);
+
+  // Stage 1 + flag-on: route *_received pushes to the chat thread directly.
+  if (firebaseChatId &&
+      (type === 'breeding_request_received' || type === 'adoption_request_received')) {
+    try {
+      const flags = await fetchFeatureFlags(false);
+      if (flags.requestChatV2Enabled) {
+        return withQuery('petow://clinic-chat', 'firebase_chat_id', firebaseChatId);
+      }
+    } catch {
+      // fall through to legacy inbox deeplink
+    }
+  }
+
   if (BREEDING_NOTIFICATION_TYPES.has(type)) {
     const requestId = getDataValueAsString(data, ['breeding_request_id', 'request_id']);
     return withQuery('petow://breeding-requests', 'breeding_request_id', requestId);
@@ -304,7 +320,7 @@ async function handleNotificationNavigationFromData(data?: Record<string, any> |
     return;
   }
 
-  const deepLink = buildDeepLinkFromPayload(data);
+  const deepLink = await buildDeepLinkFromPayload(data);
   const signature = buildNavigationSignature(data, deepLink);
   if (shouldSkipNavigation(signature)) {
     console.log('Notifications: duplicate notification tap ignored', signature);
