@@ -24,7 +24,7 @@ import AppIcon from '../../components/icons/AppIcon';
 interface AdoptionRequestScreenProps {
   petId: number;
   onClose: () => void;
-  onSuccess?: () => void;
+  onSuccess?: (firebaseChatId?: string) => void;
   onRequireVerification?: (message?: string) => void;
 }
 
@@ -229,6 +229,20 @@ const AdoptionRequestScreen: React.FC<AdoptionRequestScreenProps> = ({
       console.log('createAdoptionRequest response:', response);
       
       if (response.success) {
+        let firebaseChatId: string | undefined;
+        const requestId = response.data?.id ?? response.data?.request?.id;
+        if (requestId) {
+          // Stage 2 will return chat_room inline; Stage 1 waits for backend lazy-create.
+          // Try direct lookup first; if missing, attempt explicit create.
+          const lookup = await apiService.getChatRoomByAdoptionRequest(requestId);
+          if (lookup.success && lookup.data?.firebase_chat_id) {
+            firebaseChatId = lookup.data.firebase_chat_id;
+          } else {
+            const created = await apiService.createAdoptionChatRoom(requestId);
+            firebaseChatId = created.success ? created.data?.chat_room?.firebase_chat_id : undefined;
+          }
+        }
+
         Alert.alert(
           'تم الإرسال بنجاح',
           'تم إرسال طلب التبني بنجاح. سيتم مراجعته من قبل صاحب الحيوان.',
@@ -236,7 +250,7 @@ const AdoptionRequestScreen: React.FC<AdoptionRequestScreenProps> = ({
             {
               text: 'حسناً',
               onPress: () => {
-                if (onSuccess) onSuccess();
+                if (onSuccess) onSuccess(firebaseChatId);
                 onClose();
               },
             },
