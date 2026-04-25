@@ -32,6 +32,7 @@ import { useFeatureFlags } from '../../services/featureFlags';
 import { deriveChatPhase } from '../../utils/chatPhase';
 import ChatStatusBanner from './components/ChatStatusBanner';
 import OwnerActionBar from './components/OwnerActionBar';
+import VerificationFormSheet from './components/VerificationFormSheet';
 
 interface ChatScreenProps {
   firebaseChatId: string;
@@ -68,6 +69,8 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const { requestChatV2Enabled } = useFeatureFlags();
   const [verificationStatus, setVerificationStatus] = useState<'pending' | 'approved' | 'rejected' | undefined>(undefined);
+  const [verificationAdminNotes, setVerificationAdminNotes] = useState<string | undefined>(undefined);
+  const [showKycSheet, setShowKycSheet] = useState(false);
 
   const messagesEndRef = useRef<ScrollView>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -100,6 +103,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       if (cancelled) return;
       if (res.success && res.data?.verification?.status) {
         setVerificationStatus(res.data.verification.status as any);
+        setVerificationAdminNotes(res.data.verification.admin_notes);
       }
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -741,7 +745,15 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       )}
 
       {requestChatV2Enabled ? (
-        <ChatStatusBanner phase={phase} perspective={perspective} />
+        <ChatStatusBanner
+          phase={phase}
+          perspective={perspective}
+          onStartKyc={() => setShowKycSheet(true)}
+          onRetryKyc={() => setShowKycSheet(true)}
+          rejectionReason={
+            phase === 'approved_kyc_rejected' ? verificationAdminNotes : undefined
+          }
+        />
       ) : null}
 
       {/* Chat Messages */}
@@ -966,6 +978,22 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           noticeMessage={verificationNotice}
         />
       )}
+
+      {/* KYC Verification Sheet (request-as-chat v2) */}
+      {requestChatV2Enabled ? (
+        <VerificationFormSheet
+          visible={showKycSheet}
+          onClose={() => setShowKycSheet(false)}
+          onSubmitted={async () => {
+            // Refresh verification status so phase advances to kyc_pending_review.
+            const res = await apiService.getVerificationStatus();
+            if (res.success && res.data?.verification?.status) {
+              setVerificationStatus(res.data.verification.status as any);
+              setVerificationAdminNotes(res.data.verification.admin_notes);
+            }
+          }}
+        />
+      ) : null}
 
       {/* Pet Details Modal */}
       {showPetDetails && chatContext?.pet?.id && (
