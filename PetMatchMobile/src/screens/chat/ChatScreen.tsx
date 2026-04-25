@@ -639,6 +639,10 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
   const isRequester = !!ownerName && !!userFullName ? ownerName !== userFullName : true;
   const perspective: 'requester' | 'owner' = isRequester ? 'requester' : 'owner';
 
+  // TODO(chat-v2 stage 2): once backend exposes a unified `chat_status`
+  // field on the chat-room payload (or via a new endpoint), prefer it
+  // over the local derivation below. Drop deriveChatPhase + the
+  // verificationStatus fetch when that lands.
   const phase: ChatPhase = useMemo(() => {
     const requestStatus = (
       chatContext?.adoption_request?.status ||
