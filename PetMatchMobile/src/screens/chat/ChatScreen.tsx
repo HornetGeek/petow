@@ -31,6 +31,7 @@ import { getFloatingTabBarContentPadding } from '../../utils/tabBarLayout';
 import { useFeatureFlags } from '../../services/featureFlags';
 import { deriveChatPhase } from '../../utils/chatPhase';
 import ChatStatusBanner from './components/ChatStatusBanner';
+import OwnerActionBar from './components/OwnerActionBar';
 
 interface ChatScreenProps {
   firebaseChatId: string;
@@ -354,6 +355,21 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       setError('خطأ في تحميل المحادثة');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const reloadChatContext = async () => {
+    try {
+      const chatRoomData = await apiService.getChatRoomByFirebaseId(firebaseChatId);
+      if (chatRoomData.success && chatRoomData.data) {
+        setChatRoom(chatRoomData.data);
+        const contextData = await apiService.getChatRoomContext(chatRoomData.data.id);
+        if (contextData.success && contextData.data) {
+          setChatContext(contextData.data.chat_context);
+        }
+      }
+    } catch (reloadError) {
+      console.log('⚠️ reloadChatContext failed (non-fatal)', reloadError);
     }
   };
 
@@ -760,6 +776,56 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       </ScrollView>
 
       {/* Message Input */}
+      {requestChatV2Enabled && phase === 'pending' && perspective === 'owner' ? (
+        <OwnerActionBar
+          onApprove={async () => {
+            const adoptionId = chatContext?.adoption_request?.id;
+            const breedingId = chatContext?.breeding_request?.id;
+            try {
+              if (adoptionId) {
+                const res = await apiService.respondToAdoptionRequest(adoptionId, 'approve');
+                if (!res.success) {
+                  console.log('respondToAdoptionRequest approve failed', res.error);
+                }
+              } else if (breedingId) {
+                const res = await apiService.respondToBreedingRequest(breedingId, 'approve');
+                if (!res.success) {
+                  console.log('respondToBreedingRequest approve failed', res.error);
+                }
+              }
+            } catch (approveErr) {
+              console.log('approve failed (non-fatal)', approveErr);
+            }
+            await reloadChatContext();
+          }}
+          onReject={async () => {
+            const adoptionId = chatContext?.adoption_request?.id;
+            const breedingId = chatContext?.breeding_request?.id;
+            try {
+              if (adoptionId) {
+                const res = await apiService.respondToAdoptionRequest(adoptionId, 'reject');
+                if (!res.success) {
+                  console.log('respondToAdoptionRequest reject failed', res.error);
+                }
+              } else if (breedingId) {
+                const res = await apiService.respondToBreedingRequest(breedingId, 'reject');
+                if (!res.success) {
+                  console.log('respondToBreedingRequest reject failed', res.error);
+                }
+              }
+              if (chatRoom?.id) {
+                const archiveRes = await apiService.archiveChatRoom(chatRoom.id);
+                if (!archiveRes.success) {
+                  console.log('archiveChatRoom failed', archiveRes.error);
+                }
+              }
+            } catch (rejectErr) {
+              console.log('reject failed (non-fatal)', rejectErr);
+            }
+            await reloadChatContext();
+          }}
+        />
+      ) : (
       <View
         style={[
           styles.inputContainer,
@@ -818,6 +884,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           </TouchableOpacity>
         </View>
       </View>
+      )}
 
       {/* Image Modal */}
       {selectedImageForModal && (
