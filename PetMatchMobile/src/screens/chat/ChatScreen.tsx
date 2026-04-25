@@ -650,6 +650,13 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       verificationStatus,
     });
   }, [chatRoom, chatContext, user, isRequester, verificationStatus]);
+
+  const inputEnabled = useMemo(() => {
+    if (!requestChatV2Enabled) return true;  // legacy behavior — flag off, input always shown
+    if (phase === 'approved') return true;
+    return false;  // pending / approved_pending_kyc / approved_kyc_pending_review / approved_kyc_rejected / rejected
+  }, [requestChatV2Enabled, phase]);
+
   const otherParticipantVerified = (() => {
     if (chatRoom?.other_participant?.is_verified) {
       return true;
@@ -825,6 +832,10 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             await reloadChatContext();
           }}
         />
+      ) : requestChatV2Enabled && phase === 'rejected' ? null : requestChatV2Enabled && perspective === 'requester' && !inputEnabled ? (
+        <View style={styles.lockedInputBar}>
+          <Text style={styles.lockedInputText}>🔒 لا يمكن إرسال رسائل قبل قبول الطلب</Text>
+        </View>
       ) : (
       <View
         style={[
@@ -1231,6 +1242,17 @@ const styles = StyleSheet.create({
   },
   inputContainerRaised: {
     marginBottom: 8,
+  },
+  lockedInputBar: {
+    padding: 14,
+    backgroundColor: '#F9FAFB',
+    borderTopWidth: 1,
+    borderColor: '#E5E7EB',
+    alignItems: 'center',
+  },
+  lockedInputText: {
+    color: '#6B7280',
+    fontSize: 13,
   },
   errorBanner: {
     backgroundColor: '#f8d7da',
