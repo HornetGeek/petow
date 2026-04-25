@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import AppIcon from '../../components/icons/AppIcon';
 import { apiService, ChatRoom, ChatContext } from '../../services/api';
+import type { ChatPhase } from '../../services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Linking, Share } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
@@ -27,6 +28,9 @@ import { Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { resolveMediaUrl } from '../../utils/mediaUrl';
 import { getFloatingTabBarContentPadding } from '../../utils/tabBarLayout';
+import { useFeatureFlags } from '../../services/featureFlags';
+import { deriveChatPhase } from '../../utils/chatPhase';
+import ChatStatusBanner from './components/ChatStatusBanner';
 
 interface ChatScreenProps {
   firebaseChatId: string;
@@ -61,6 +65,8 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
   const [verificationNotice, setVerificationNotice] = useState<string | undefined>(undefined);
   const [showPetDetails, setShowPetDetails] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const { requestChatV2Enabled } = useFeatureFlags();
+  const [verificationStatus, setVerificationStatus] = useState<'pending' | 'approved' | 'rejected' | undefined>(undefined);
 
   const messagesEndRef = useRef<ScrollView>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -85,6 +91,18 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       hideSub.remove();
     };
   }, []);
+
+  useEffect(() => {
+    if (!requestChatV2Enabled) return;
+    let cancelled = false;
+    apiService.getVerificationStatus().then((res) => {
+      if (cancelled) return;
+      if (res.success && res.data?.verification?.status) {
+        setVerificationStatus(res.data.verification.status as any);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [requestChatV2Enabled]);
 
   useEffect(() => {
     scrollToBottom();
@@ -591,6 +609,31 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     || chatContext?.clinic?.name
     || 'فريق العيادة';
   const currentUserId = user?.id;
+
+  // Adapted from spec: ChatRoom has no `requester` / `adoption_request` / `breeding_request`
+  // fields directly. Those live on ChatContext. Perspective is derived from pet ownership:
+  // current user is "owner" if their name matches the pet owner's name, else "requester".
+  const ownerName = chatContext?.pet?.owner_name || null;
+  const userFullName = user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
+  const isRequester = !!ownerName && !!userFullName ? ownerName !== userFullName : true;
+  const perspective: 'requester' | 'owner' = isRequester ? 'requester' : 'owner';
+
+  const phase: ChatPhase = useMemo(() => {
+    const requestStatus = (
+      chatContext?.adoption_request?.status ||
+      chatContext?.breeding_request?.status ||
+      'pending'
+    ) as 'pending' | 'approved' | 'rejected';
+    const requestKind: 'adoption' | 'breeding' = chatContext?.adoption_request ? 'adoption' : 'breeding';
+    return deriveChatPhase({
+      requestKind,
+      requestStatus,
+      isActive: chatRoom?.is_active ?? true,
+      isRequester,
+      isRequesterVerified: isRequester ? !!user?.is_verified : false,
+      verificationStatus,
+    });
+  }, [chatRoom, chatContext, user, isRequester, verificationStatus]);
   const otherParticipantVerified = (() => {
     if (chatRoom?.other_participant?.is_verified) {
       return true;
@@ -673,6 +716,10 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           </Text>
         </View>
       )}
+
+      {requestChatV2Enabled ? (
+        <ChatStatusBanner phase={phase} perspective={perspective} />
+      ) : null}
 
       {/* Chat Messages */}
       <ScrollView
