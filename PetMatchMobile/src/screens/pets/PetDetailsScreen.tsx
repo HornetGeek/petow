@@ -90,9 +90,10 @@ interface PetDetailsScreenProps {
   petId: number;
   onClose: () => void;
   onAddPet?: () => void;
+  onOpenChat?: (firebaseChatId: string) => void;
 }
 
-const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose, onAddPet }) => {
+const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose, onAddPet, onOpenChat }) => {
   const [pet, setPet] = useState<Pet | null>(null);
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
@@ -290,20 +291,33 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose, onA
 
   if (showBreedingRequest) {
     return (
-      <BreedingRequestScreen 
-        petId={petId} 
+      <BreedingRequestScreen
+        petId={petId}
         onClose={hideBreedingRequest}
         onAddPet={onAddPet}
+        onSuccess={(firebaseChatId) => {
+          hideBreedingRequest();
+          if (firebaseChatId && onOpenChat) {
+            onClose();
+            onOpenChat(firebaseChatId);
+          }
+        }}
       />
     );
   }
 
   if (showAdoptionRequest) {
     return (
-      <AdoptionRequestScreen 
-        petId={petId} 
+      <AdoptionRequestScreen
+        petId={petId}
         onClose={hideAdoptionRequest}
-        onSuccess={hideAdoptionRequest}
+        onSuccess={(firebaseChatId) => {
+          hideAdoptionRequest();
+          if (firebaseChatId && onOpenChat) {
+            onClose();
+            onOpenChat(firebaseChatId);
+          }
+        }}
       />
     );
   }
