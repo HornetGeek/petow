@@ -349,6 +349,14 @@ export interface ChatContext {
   };
 }
 
+export type ChatPhase =
+  | 'pending'
+  | 'approved'
+  | 'approved_pending_kyc'
+  | 'approved_kyc_pending_review'
+  | 'approved_kyc_rejected'
+  | 'rejected';
+
 export interface ChatStatus {
   id: number;
   firebase_chat_id: string;
@@ -357,6 +365,8 @@ export interface ChatStatus {
   updated_at: string;
   breeding_request_status: string;
   participants_count: number;
+  // Stage 2: backend will populate this. Stage 1: undefined → derive client-side.
+  chat_status?: ChatPhase;
 }
 
 export interface UserChatStatus {
