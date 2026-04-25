@@ -310,6 +310,7 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
   onOpenChat,
   onOpenPetDetails,
 }) => {
+  const { requestChatV2Enabled } = useFeatureFlags();
   const renderRequestCard = (
     request: BreedingRequestPreview,
     owner: RequestOwner,
@@ -379,7 +380,7 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
           </View>
         ) : null}
 
-        {owner === 'received' && status === 'pending' ? (
+        {owner === 'received' && status === 'pending' && !requestChatV2Enabled ? (
           <View style={styles.requestActionsRow}>
             <TouchableOpacity
               style={[styles.requestActionButton, styles.rejectButton]}
@@ -392,6 +393,18 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
               onPress={() => onRespond(request, 'approve')}
             >
               <Text style={[styles.requestActionText, styles.acceptButtonText]}>قبول</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {/* In v2: pending received requests get a chat pointer instead of approve/reject */}
+        {owner === 'received' && status === 'pending' && requestChatV2Enabled ? (
+          <View style={styles.requestActionsRow}>
+            <TouchableOpacity
+              style={[styles.requestActionButton, styles.chatButton]}
+              onPress={() => onOpenChat(request)}
+            >
+              <Text style={[styles.requestActionText, styles.chatButtonText]}>افتح المحادثة للرد</Text>
             </TouchableOpacity>
           </View>
         ) : null}
@@ -1123,20 +1136,27 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       iconColor: '#02B7B4',
       onPress: showAddPetScreen,
     },
-    {
-      key: 'breeding',
-      label: 'طلبات التزاوج',
-      icon: 'calendar' as AppIconName,
-      iconColor: '#3B82F6',
-      onPress: openBreedingOverview,
-    },
-    {
-      key: 'adoption_requests',
-      label: 'طلبات التبني',
-      icon: 'envelope' as AppIconName,
-      iconColor: '#8B5CF6',
-      onPress: openAdoptionRequests,
-    },
+    // Inbox tiles are hidden when v2 is on — chat list is the primary inbox.
+    // Push deeplinks to BreedingRequestsOverview / AdoptionRequestsScreen still work
+    // (the screen-mode renders below remain reachable via triggerBreedingOverview /
+    // triggerAdoptionRequests). For history scans, AdoptionRequestsScreen stays
+    // accessible via Profile → "طلبات التبني".
+    ...(!requestChatV2Enabled ? [
+      {
+        key: 'breeding',
+        label: 'طلبات التزاوج',
+        icon: 'calendar' as AppIconName,
+        iconColor: '#3B82F6',
+        onPress: openBreedingOverview,
+      },
+      {
+        key: 'adoption_requests',
+        label: 'طلبات التبني',
+        icon: 'envelope' as AppIconName,
+        iconColor: '#8B5CF6',
+        onPress: openAdoptionRequests,
+      },
+    ] : []),
     ...(shouldShowClinicsAction ? [{
       key: 'clinics',
       label: 'الخدمات',
@@ -1146,7 +1166,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     }] : []),
     // Removed species filters from main nav per UX request
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [onOpenAdoption, onOpenMatches, shouldShowClinicsAction]);
+  ], [onOpenAdoption, onOpenMatches, shouldShowClinicsAction, requestChatV2Enabled]);
 
   if (selectedPetId) {
     return (

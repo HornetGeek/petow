@@ -320,8 +320,9 @@ const AdoptionRequestsScreen: React.FC<AdoptionRequestsScreenProps> = ({ onClose
               )
             )}
 
-            {/* Action Buttons for Received Pending Requests */}
-            {!isSent && request.status === 'pending' && (
+            {/* Action Buttons for Received Pending Requests — only when v2 is OFF.
+                In v2 the owner approves/rejects from inside the chat (OwnerActionBar). */}
+            {!isSent && request.status === 'pending' && !requestChatV2Enabled && (
               <View style={styles.actionButtons}>
                 <TouchableOpacity
                   style={[styles.actionButton, styles.acceptButton]}
@@ -347,6 +348,16 @@ const AdoptionRequestsScreen: React.FC<AdoptionRequestsScreenProps> = ({ onClose
                   )}
                 </TouchableOpacity>
               </View>
+            )}
+
+            {/* In v2: pending received requests get a chat pointer instead. */}
+            {!isSent && request.status === 'pending' && requestChatV2Enabled && (
+              <TouchableOpacity
+                style={styles.chatButton}
+                onPress={() => onOpenChatList?.()}
+              >
+                <Text style={styles.chatButtonText}>افتح المحادثة للموافقة أو الرفض</Text>
+              </TouchableOpacity>
             )}
           </View>
         )}
