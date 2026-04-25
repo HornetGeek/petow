@@ -1,69 +1,177 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
-  ScrollView,
   StyleSheet,
   TouchableOpacity,
   TextInput,
   ActivityIndicator,
-  Image,
   Dimensions,
   Modal,
   BackHandler,
   LayoutChangeEvent,
+  FlatList,
+  ListRenderItemInfo,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+import FastImage from 'react-native-fast-image';
 
 import { apiService, Pet } from '../../services/api';
+import { resolveMediaUrl } from '../../utils/mediaUrl';
+import AppIcon from '../../components/icons/AppIcon';
 
 interface BreedingRequestScreenProps {
   petId: number;
   onClose: () => void;
   onOpenPetDetails?: (petId: number) => void;
+  onAddPet?: () => void;
 }
 
-const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, onClose, onOpenPetDetails }) => {
+const DEFAULT_PET_IMAGE =
+  'https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&q=80';
+
+const getImageUrl = (url?: string) => resolveMediaUrl(url, DEFAULT_PET_IMAGE);
+
+// Hoisted out of the screen component so the component type is stable across
+// renders (re-creating this inline was dropping image load state per render).
+// FastImage caches remote URIs so navigating back into this screen doesn't
+// re-download or re-decode the same images.
+const PetImage = memo<{ uri?: string; style?: any }>(({ uri, style }) => {
+  const [src, setSrc] = useState<string>(getImageUrl(uri));
+  useEffect(() => {
+    setSrc(getImageUrl(uri));
+  }, [uri]);
+  return (
+    <FastImage
+      source={{ uri: src, priority: FastImage.priority.normal }}
+      style={style}
+      resizeMode={FastImage.resizeMode.cover}
+      onError={() => setSrc(DEFAULT_PET_IMAGE)}
+    />
+  );
+});
+PetImage.displayName = 'PetImage';
+
+const ARABIC_MONTHS = [
+  'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
+  'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر',
+];
+
+const MONTH_OPTIONS = ARABIC_MONTHS.map((name, index) => ({ value: index + 1, label: name }));
+
+const getDaysInMonth = (month: number, year: number) => new Date(year, month, 0).getDate();
+
+interface BreedingPetOptionProps {
+  pet: Pet;
+  selected: boolean;
+  onSelect: (petId: string) => void;
+}
+
+const BreedingPetOption = memo<BreedingPetOptionProps>(({ pet, selected, onSelect }) => {
+  const handlePress = useCallback(() => onSelect(pet.id.toString()), [pet.id, onSelect]);
+  return (
+    <TouchableOpacity
+      style={[styles.petOption, selected && styles.petOptionSelected]}
+      onPress={handlePress}
+    >
+      <View style={styles.petOptionImageContainer}>
+        <PetImage uri={pet.main_image} style={styles.petOptionImage} />
+        {selected && (
+          <View style={styles.selectedOverlay}>
+            <Text style={styles.selectedIcon}>✓</Text>
+          </View>
+        )}
+      </View>
+      <View style={styles.petOptionDetails}>
+        <Text style={styles.petOptionName}>{pet.name}</Text>
+        <View style={styles.petOptionMeta}>
+          <Text style={styles.petOptionMetaText}>{pet.gender_display}</Text>
+          <Text style={styles.petOptionMetaText}>{pet.age_display}</Text>
+        </View>
+        <Text style={styles.petOptionBreed}>{pet.breed_name}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+});
+BreedingPetOption.displayName = 'BreedingPetOption';
+
+// Fixed row height (pickerItem height 40 + marginVertical 2*2) drives
+// getItemLayout and snapToInterval so scroll offsets are O(1) to compute.
+const PICKER_ROW_HEIGHT = 44;
+
+type PickerRow = { value: number; label: string };
+
+interface PickerColumnProps {
+  title: string;
+  rows: PickerRow[];
+  selected: number;
+  onSelect: (value: number) => void;
+}
+
+// Virtualized picker column: replaces a plain ScrollView that was rendering
+// every day/month/year up front. FlatList virtualization + getItemLayout make
+// snap scrolling smooth even with long lists, and initialScrollIndex opens
+// the column at the currently selected value.
+const PickerColumn = memo<PickerColumnProps>(({ title, rows, selected, onSelect }) => {
+  const getItemLayout = useCallback(
+    (_: ArrayLike<PickerRow> | null | undefined, index: number) => ({
+      length: PICKER_ROW_HEIGHT,
+      offset: PICKER_ROW_HEIGHT * index,
+      index,
+    }),
+    [],
+  );
+  const initialScrollIndex = useMemo(() => {
+    const idx = rows.findIndex(r => r.value === selected);
+    return idx >= 0 ? idx : 0;
+  }, [rows, selected]);
+  const renderItem = useCallback(
+    ({ item }: ListRenderItemInfo<PickerRow>) => {
+      const isSelected = item.value === selected;
+      return (
+        <TouchableOpacity
+          style={[styles.pickerItem, isSelected && styles.pickerItemSelected]}
+          onPress={() => onSelect(item.value)}
+        >
+          <Text style={[styles.pickerItemText, isSelected && styles.pickerItemTextSelected]}>
+            {item.label}
+          </Text>
+        </TouchableOpacity>
+      );
+    },
+    [selected, onSelect],
+  );
+
+  return (
+    <View style={styles.pickerColumn}>
+      <Text style={styles.pickerLabel}>{title}</Text>
+      <FlatList
+        data={rows}
+        keyExtractor={row => String(row.value)}
+        renderItem={renderItem}
+        style={styles.pickerScrollView}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={PICKER_ROW_HEIGHT}
+        decelerationRate="fast"
+        getItemLayout={getItemLayout}
+        initialScrollIndex={initialScrollIndex}
+        extraData={selected}
+        initialNumToRender={8}
+        maxToRenderPerBatch={8}
+        windowSize={5}
+      />
+    </View>
+  );
+});
+PickerColumn.displayName = 'PickerColumn';
+
+const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, onClose, onOpenPetDetails, onAddPet }) => {
   const [targetPet, setTargetPet] = useState<Pet | null>(null);
   const [myPets, setMyPets] = useState<Pet[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<{[key: string]: string}>({});
   const [success, setSuccess] = useState('');
-  const getImageUrl = (url?: string) => {
-    if (!url || typeof url !== 'string' || !url.trim()) {
-      return 'https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&q=80';
-    }
-    let normalized = url.trim();
-    normalized = normalized.replace('http://', 'https://');
-    if (normalized.startsWith('https:/') && !normalized.startsWith('https://')) {
-      normalized = normalized.replace('https:/', 'https://');
-    }
-    if (normalized.includes('https:/.petow.app')) {
-      normalized = normalized.replace(/https:\/\/.?petow\.app/g, 'https://api.petow.app');
-    }
-    if (!/^https?:\/\//i.test(normalized)) {
-      normalized = `https://api.petow.app${normalized.startsWith('/') ? '' : '/'}${normalized}`;
-    }
-    if (normalized.includes('/api/media/')) {
-      normalized = normalized.replace('/api/media/', '/media/');
-    }
-    return normalized;
-  };
-
-  const PetImage: React.FC<{ uri?: string; style?: any; alt?: string }> = ({ uri, style }) => {
-    const [src, setSrc] = useState<string>(getImageUrl(uri));
-    useEffect(() => {
-      setSrc(getImageUrl(uri));
-    }, [uri]);
-    return (
-      <Image
-        source={{ uri: src }}
-        style={style}
-        onError={() => setSrc('https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&q=80')}
-      />
-    );
-  };
-
 
   // Date picker state
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
@@ -79,21 +187,37 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
     agreedToTerms: false
   });
 
-  const scrollViewRef = useRef<ScrollView | null>(null);
+  const scrollViewRef = useRef<any>(null);
   const sectionPositions = useRef<Record<string, number>>({});
+  // Track pending retries so scrollToSection doesn't fire after unmount.
+  const pendingScrollTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const onSectionLayout = (key: string) => (event: LayoutChangeEvent) => {
     sectionPositions.current[key] = event.nativeEvent.layout.y;
   };
 
-  const scrollToSection = (key: string, attempt = 0) => {
+  const scrollToSection = useCallback((key: string, attempt = 0) => {
     const y = sectionPositions.current[key];
     if (y !== undefined && scrollViewRef.current) {
-      scrollViewRef.current.scrollTo({ y: Math.max(y - 40, 0), animated: true });
+      const ref = scrollViewRef.current;
+      const targetY = Math.max(y - 40, 0);
+      if (typeof ref.scrollToPosition === 'function') {
+        ref.scrollToPosition(0, targetY, true);
+      } else if (typeof ref.scrollTo === 'function') {
+        ref.scrollTo({ y: targetY, animated: true });
+      }
     } else if (attempt < 5) {
-      setTimeout(() => scrollToSection(key, attempt + 1), 100);
+      const id = setTimeout(() => scrollToSection(key, attempt + 1), 100);
+      pendingScrollTimersRef.current.push(id);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      pendingScrollTimersRef.current.forEach(clearTimeout);
+      pendingScrollTimersRef.current = [];
+    };
+  }, []);
 
   const errorPriority = ['general', 'myPetId', 'contactPhone', 'agreedToTerms'];
 
@@ -209,8 +333,9 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
           const petName = targetPetData.data?.name || 'هذا الحيوان';
           const petTypeLabel = targetPetData.data?.pet_type_display || 'غير محدد';
           const petGenderLabel = targetPetData.data?.gender_display || 'غير محدد';
+          const oppositeGender = targetPetData.data?.gender === 'male' ? 'أنثى' : 'ذكر';
           setErrors({
-            general: `لا توجد حيوانات مناسبة للتزاوج مع ${petName}.\n\nالشروط المطلوبة:\n• نوع الحيوان: ${petTypeLabel}\n• جنس مختلف عن: ${petGenderLabel}\n• حالة الحيوان: متاح\n\nيرجى إضافة حيوان يحقق هذه الشروط أولاً.`
+            general: `لا يمكنك إرسال طلب تزاوج مع ${petName} لأنك لا تملك حيوان ${oppositeGender} متاح من نفس النوع.\n\nالشروط المطلوبة:\n• النوع: ${petTypeLabel}\n• الجنس: ${oppositeGender}\n• الحالة: متاح\n\nيرجى إضافة حيوان ${oppositeGender} متاح أولاً للمتابعة.`
           });
         }
       } else {
@@ -224,18 +349,22 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
     }
   };
 
-  const handleChange = (field: string, value: string | boolean) => {
+  const handleChange = useCallback((field: string, value: string | boolean) => {
     setRequestData(prev => ({
       ...prev,
-      [field]: value
+      [field]: value,
     }));
-    
-    
-    // Clear error when user makes changes
-    if (errors[field]) {
-      setErrors(prev => ({ ...prev, [field]: '' }));
-    }
-  };
+    // Functional setErrors keeps this callback stable (no errors dep) so child
+    // components wrapped in React.memo don't re-render on every parent change.
+    setErrors(prev => (prev[field] ? { ...prev, [field]: '' } : prev));
+  }, []);
+
+  const handleSelectMyPet = useCallback(
+    (petId: string) => {
+      handleChange('myPetId', petId);
+    },
+    [handleChange],
+  );
 
 
   const showDatePickerModal = () => {
@@ -258,28 +387,23 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
     setShowDatePicker(false);
   };
 
-  // Helper functions for date picker
-  const getDaysInMonth = (month: number, year: number) => {
-    return new Date(year, month, 0).getDate();
-  };
-
-  const generateDays = () => {
-    const daysInMonth = getDaysInMonth(tempMonth, tempYear);
-    return Array.from({ length: daysInMonth }, (_, i) => i + 1);
-  };
-
-  const generateMonths = () => {
-    const arabicMonths = [
-      'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
-      'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
-    ];
-    return arabicMonths.map((name, index) => ({ value: index + 1, label: name }));
-  };
-
-  const generateYears = () => {
+  // Date-picker option lists. Days change with the selected month/year only;
+  // months and years are stable for the lifetime of the screen.
+  const dayOptions = useMemo<PickerRow[]>(
+    () =>
+      Array.from({ length: getDaysInMonth(tempMonth, tempYear) }, (_, i) => ({
+        value: i + 1,
+        label: String(i + 1),
+      })),
+    [tempMonth, tempYear],
+  );
+  const yearOptions = useMemo<PickerRow[]>(() => {
     const currentYear = new Date().getFullYear();
-    return Array.from({ length: 5 }, (_, i) => currentYear + i);
-  };
+    return Array.from({ length: 5 }, (_, i) => ({
+      value: currentYear + i,
+      label: String(currentYear + i),
+    }));
+  }, []);
 
 
 
@@ -360,10 +484,13 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
   }
 
   return (
-    <ScrollView
+    <KeyboardAwareScrollView
       ref={scrollViewRef}
       style={styles.container}
       showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      enableOnAndroid
+      extraScrollHeight={20}
     >
       {/* Header */}
       <View style={styles.header}>
@@ -378,7 +505,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
         {/* Hero Card */}
         <View style={styles.heroCard}>
           <View style={styles.heroIcon}>
-            <Text style={styles.heroIconText}>💖</Text>
+            <AppIcon name="heart" size={32} color="#FF4D6D" filled />
           </View>
           <Text style={styles.heroTitle}>طلب مقابلة للتزاوج</Text>
           <Text style={styles.heroSubtitle}>
@@ -392,9 +519,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
           onPress={() => targetPet?.id && onOpenPetDetails?.(targetPet.id)}
           style={styles.targetPetCard}
         >
-          <Text style={styles.sectionTitle}>
-            🐾 الحيوان المطلوب للتزاوج
-          </Text>
+          <View style={{flexDirection:'row',alignItems:'center',marginBottom:8}}><AppIcon name="paw" size={18} color="#FF6B35"/><Text style={[styles.sectionTitle,{marginBottom:0,marginLeft:6}]}>الحيوان المطلوب للتزاوج</Text></View>
           
           <View style={styles.petInfoContainer}>
             <PetImage uri={targetPet.main_image} style={styles.targetPetImage} />
@@ -408,24 +533,24 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
                   <Text style={styles.attributeText}>{targetPet.gender_display}</Text>
                 </View>
                 <View style={styles.attribute}>
-                  <Text style={styles.attributeIcon}>🎂</Text>
+                  <AppIcon name="calendar" size={14} color="#F59E0B"/>
                   <Text style={styles.attributeText}>{targetPet.age_display}</Text>
                 </View>
               </View>
               
               <View style={styles.attributesContainer}>
                 <View style={styles.attribute}>
-                  <Text style={styles.attributeIcon}>🏷️</Text>
+                  <AppIcon name="paperclip" size={14} color="#3B82F6"/>
                   <Text style={styles.attributeText}>{targetPet.breed_name}</Text>
                 </View>
                 <View style={styles.attribute}>
-                  <Text style={styles.attributeIcon}>📍</Text>
+                  <AppIcon name="location" size={14} color="#64748B"/>
                   <Text style={styles.attributeText}>{targetPet.location}</Text>
                 </View>
               </View>
               
               <View style={styles.statusBadge}>
-                <Text style={styles.statusBadgeText}>💖 متاح للتزاوج مجاناً</Text>
+                <View style={{flexDirection:'row',alignItems:'center',gap:4}}><AppIcon name="heart" size={14} color="#FF4D6D" filled/><Text style={styles.statusBadgeText}>متاح للتزاوج مجاناً</Text></View>
               </View>
             </View>
           </View>
@@ -441,6 +566,17 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
             <View style={styles.messageContent}>
               <Text style={[styles.messageTitle, styles.errorMessageTitle]}>لا توجد حيوانات مناسبة</Text>
               <Text style={[styles.messageText, styles.errorMessageText]}>{errors.general}</Text>
+              {myPets.length === 0 && onAddPet && (
+                <TouchableOpacity
+                  style={styles.addPetButton}
+                  onPress={() => {
+                    onClose();
+                    onAddPet();
+                  }}
+                >
+                  <View style={{flexDirection:'row',alignItems:'center',gap:8}}><AppIcon name="plus" size={18} color="#02B7B4"/><Text style={styles.addPetButtonText}>إضافة حيوان جديد</Text></View>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         )}
@@ -463,41 +599,19 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
             style={styles.formCard}
             onLayout={onSectionLayout('myPetId')}
           >
-            <Text style={styles.sectionTitle}>
-              🐕 اختر حيوانك الأليف
-            </Text>
+            <View style={{flexDirection:'row',alignItems:'center',marginBottom:8}}><AppIcon name="paw" size={18} color="#FF6B35"/><Text style={[styles.sectionTitle,{marginBottom:0,marginLeft:6}]}>اختر حيوانك الأليف</Text></View>
             <Text style={styles.sectionDescription}>
               اختر الحيوان الذي تريد تزويجه مع {targetPet.name}
             </Text>
             
             <View style={styles.petsGrid}>
               {myPets.map(pet => (
-                <TouchableOpacity
+                <BreedingPetOption
                   key={pet.id}
-                  style={[
-                    styles.petOption,
-                    requestData.myPetId === pet.id.toString() && styles.petOptionSelected
-                  ]}
-                  onPress={() => handleChange('myPetId', pet.id.toString())}
-                >
-                  <View style={styles.petOptionImageContainer}>
-                    <PetImage uri={pet.main_image} style={styles.petOptionImage} />
-                    {requestData.myPetId === pet.id.toString() && (
-                      <View style={styles.selectedOverlay}>
-                        <Text style={styles.selectedIcon}>✓</Text>
-                      </View>
-                    )}
-                  </View>
-                  
-                  <View style={styles.petOptionDetails}>
-                    <Text style={styles.petOptionName}>{pet.name}</Text>
-                    <View style={styles.petOptionMeta}>
-                      <Text style={styles.petOptionMetaText}>{pet.gender_display}</Text>
-                      <Text style={styles.petOptionMetaText}>{pet.age_display}</Text>
-                    </View>
-                    <Text style={styles.petOptionBreed}>{pet.breed_name}</Text>
-                  </View>
-                </TouchableOpacity>
+                  pet={pet}
+                  selected={requestData.myPetId === pet.id.toString()}
+                  onSelect={handleSelectMyPet}
+                />
               ))}
             </View>
             
@@ -513,7 +627,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
         {/* Form Fields */}
         {myPets.length > 0 && (
           <View style={styles.formCard}>
-            <Text style={styles.sectionTitle}>📞 تفاصيل التواصل</Text>
+            <View style={{flexDirection:'row',alignItems:'center',marginBottom:8}}><AppIcon name="chat" size={18} color="#3B82F6"/><Text style={[styles.sectionTitle,{marginBottom:0,marginLeft:6}]}>تفاصيل التواصل</Text></View>
             
             {/* Contact Phone */}
             <View
@@ -535,7 +649,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
                   keyboardType="phone-pad"
                   maxLength={20}
                 />
-                <Text style={styles.inputIcon}>📞</Text>
+                <AppIcon name="chat" size={18} color="#3B82F6"/>
               </View>
               {errors.contactPhone && (
                 <View style={styles.fieldError}>
@@ -551,14 +665,12 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
         {/* Safety Guidelines */}
         {myPets.length > 0 && (
           <View style={styles.safetyCard}>
-            <Text style={styles.sectionTitle}>
-              🛡️ إرشادات السلامة
-            </Text>
+            <View style={{flexDirection:'row',alignItems:'center',marginBottom:8}}><AppIcon name="shield-check" size={18} color="#3B82F6"/><Text style={[styles.sectionTitle,{marginBottom:0,marginLeft:6}]}>إرشادات السلامة</Text></View>
             
             <View style={styles.safetyGrid}>
               <View style={styles.safetyItem}>
                 <View style={styles.safetyIconContainer}>
-                  <Text style={styles.safetyIcon}>📅</Text>
+                  <AppIcon name="calendar" size={22} color="#64748B"/>
                 </View>
                 <View style={styles.safetyContent}>
                   <Text style={styles.safetyTitle}>موعد محدد</Text>
@@ -567,10 +679,10 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
                   </Text>
                 </View>
               </View>
-              
+
               <View style={styles.safetyItem}>
                 <View style={styles.safetyIconContainer}>
-                  <Text style={styles.safetyIcon}>📍</Text>
+                  <AppIcon name="location" size={22} color="#64748B"/>
                 </View>
                 <View style={styles.safetyContent}>
                   <Text style={styles.safetyTitle}>مكان آمن</Text>
@@ -579,10 +691,10 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
                   </Text>
                 </View>
               </View>
-              
+
               <View style={styles.safetyItem}>
                 <View style={styles.safetyIconContainer}>
-                  <Text style={styles.safetyIcon}>👥</Text>
+                  <AppIcon name="user" size={22} color="#1e293b"/>
                 </View>
                 <View style={styles.safetyContent}>
                   <Text style={styles.safetyTitle}>مقابلة شخصية</Text>
@@ -591,10 +703,10 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
                   </Text>
                 </View>
               </View>
-              
+
               <View style={styles.safetyItem}>
                 <View style={styles.safetyIconContainer}>
-                  <Text style={styles.safetyIcon}>🩺</Text>
+                  <AppIcon name="shield-check" size={22} color="#14B8A6"/>
                 </View>
                 <View style={styles.safetyContent}>
                   <Text style={styles.safetyTitle}>فحص بيطري</Text>
@@ -606,7 +718,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
             </View>
             
             <View style={styles.safetyTip}>
-              <Text style={styles.safetyTipIcon}>💡</Text>
+              <AppIcon name="shield-check" size={18} color="#F59E0B"/>
               <Text style={styles.safetyTipText}>
                 <Text style={styles.safetyTipBold}>نصيحة:</Text> نوصي بإجراء فحص بيطري للحيوانين قبل التزاوج لضمان الصحة والسلامة
               </Text>
@@ -617,7 +729,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
         {/* Message */}
         {myPets.length > 0 && (
           <View style={styles.formCard}>
-            <Text style={styles.sectionTitle}>💬 رسالة شخصية</Text>
+            <View style={{flexDirection:'row',alignItems:'center',marginBottom:8}}><AppIcon name="chat" size={18} color="#3B82F6"/><Text style={[styles.sectionTitle,{marginBottom:0,marginLeft:6}]}>رسالة شخصية</Text></View>
             <View style={styles.inputGroup}>
               <Text style={styles.label}>رسالة تعريفية (اختيارية)</Text>
               <TextInput
@@ -676,7 +788,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
         {myPets.length > 0 && (
           <View style={styles.actionButtons}>
             <TouchableOpacity style={styles.secondaryButton} onPress={onClose}>
-              <Text style={styles.secondaryButtonText}>➡️ إلغاء</Text>
+              <Text style={styles.secondaryButtonText}>إلغاء</Text>
             </TouchableOpacity>
             
             <TouchableOpacity
@@ -690,7 +802,7 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
               {submitting ? (
                 <ActivityIndicator color="#fff" size="small" />
               ) : (
-                <Text style={styles.primaryButtonText}>💖 إرسال طلب المقابلة</Text>
+                <View style={{flexDirection:'row',alignItems:'center',gap:8}}><AppIcon name="heart" size={18} color="#fff" filled/><Text style={styles.primaryButtonText}>إرسال طلب المقابلة</Text></View>
               )}
             </TouchableOpacity>
           </View>
@@ -723,98 +835,30 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
             </View>
             
             <View style={styles.datePickerContainer}>
-              {/* Day Picker */}
-              <View style={styles.pickerColumn}>
-                <Text style={styles.pickerLabel}>اليوم</Text>
-                <ScrollView 
-                  style={styles.pickerScrollView}
-                  showsVerticalScrollIndicator={false}
-                  snapToInterval={40}
-                  decelerationRate="fast"
-                >
-                  {generateDays().map((day) => (
-                    <TouchableOpacity
-                      key={day}
-                      style={[
-                        styles.pickerItem,
-                        tempDay === day && styles.pickerItemSelected
-                      ]}
-                      onPress={() => setTempDay(day)}
-                    >
-                      <Text style={[
-                        styles.pickerItemText,
-                        tempDay === day && styles.pickerItemTextSelected
-                      ]}>
-                        {day}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-              </View>
-              
-              {/* Month Picker */}
-              <View style={styles.pickerColumn}>
-                <Text style={styles.pickerLabel}>الشهر</Text>
-                <ScrollView 
-                  style={styles.pickerScrollView}
-                  showsVerticalScrollIndicator={false}
-                  snapToInterval={40}
-                  decelerationRate="fast"
-                >
-                  {generateMonths().map((month) => (
-                    <TouchableOpacity
-                      key={month.value}
-                      style={[
-                        styles.pickerItem,
-                        tempMonth === month.value && styles.pickerItemSelected
-                      ]}
-                      onPress={() => setTempMonth(month.value)}
-                    >
-                      <Text style={[
-                        styles.pickerItemText,
-                        tempMonth === month.value && styles.pickerItemTextSelected
-                      ]}>
-                        {month.label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-              </View>
-              
-              {/* Year Picker */}
-              <View style={styles.pickerColumn}>
-                <Text style={styles.pickerLabel}>السنة</Text>
-                <ScrollView 
-                  style={styles.pickerScrollView}
-                  showsVerticalScrollIndicator={false}
-                  snapToInterval={40}
-                  decelerationRate="fast"
-                >
-                  {generateYears().map((year) => (
-                    <TouchableOpacity
-                      key={year}
-                      style={[
-                        styles.pickerItem,
-                        tempYear === year && styles.pickerItemSelected
-                      ]}
-                      onPress={() => setTempYear(year)}
-                    >
-                      <Text style={[
-                        styles.pickerItemText,
-                        tempYear === year && styles.pickerItemTextSelected
-                      ]}>
-                        {year}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-              </View>
+              <PickerColumn
+                title="اليوم"
+                rows={dayOptions}
+                selected={tempDay}
+                onSelect={setTempDay}
+              />
+              <PickerColumn
+                title="الشهر"
+                rows={MONTH_OPTIONS}
+                selected={tempMonth}
+                onSelect={setTempMonth}
+              />
+              <PickerColumn
+                title="السنة"
+                rows={yearOptions}
+                selected={tempYear}
+                onSelect={setTempYear}
+              />
             </View>
           </View>
         </View>
       </Modal>
 
-    </ScrollView>
+    </KeyboardAwareScrollView>
   );
 };
 
@@ -1093,6 +1137,24 @@ const styles = StyleSheet.create({
   },
   successMessageText: {
     color: '#14532d',
+  },
+  addPetButton: {
+    backgroundColor: '#667eea',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginTop: 12,
+    shadowColor: '#667eea',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  addPetButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: 'bold',
   },
 
   // Form Card

@@ -9,11 +9,14 @@ import {
   Image,
   RefreshControl,
 } from 'react-native';
+import AppIcon from '../../components/icons/AppIcon';
 import { apiService, ChatRoomList } from '../../services/api';
 import { MessageService } from '../../services/firebase/firebaseConfig';
 import ChatScreen from './ChatScreen';
+import VerificationScreen from '../profile/VerificationScreen';
 import { firestore } from '../../services/firebase/firebaseConfig';
 import { useAuth } from '../../contexts/AuthContext';
+import { resolveMediaUrl } from '../../utils/mediaUrl';
 
 interface ChatListScreenProps {
   onClose: () => void;
@@ -22,7 +25,7 @@ interface ChatListScreenProps {
 }
 
 const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebaseChatId = null, onChatOpened }) => {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [activeChats, setActiveChats] = useState<ChatRoomList[]>([]);
   const [archivedChats, setArchivedChats] = useState<ChatRoomList[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,8 +33,9 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
   const [activeTab, setActiveTab] = useState<'active' | 'archived'>('active');
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [firebaseConnected, setFirebaseConnected] = useState(false);
   const appliedInitialRef = useRef<string | null>(null);
+  const [showVerification, setShowVerification] = useState(false);
+  const [verificationNotice, setVerificationNotice] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     loadChatRooms();
@@ -58,7 +62,6 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
         if (response.success && response.data) {
           setActiveChats(response.data.results);
           setArchivedChats([]);
-          setFirebaseConnected(false);
           console.log('✅ Loaded chat rooms from API:', response.data.results.length);
           return;
         }
@@ -69,7 +72,6 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
       // Fallback to Firebase if API isn’t available
       try {
         await loadFromFirebase();
-        setFirebaseConnected(true);
         console.log('✅ Loaded chat rooms from Firebase');
         return;
       } catch (firebaseError) {
@@ -85,6 +87,7 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
             created_at: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
             updated_at: new Date(Date.now() - 3600000).toISOString(), // 1 hour ago
             other_participant: 'أحمد محمد',
+            other_participant_is_verified: true,
             pet_name: 'بسكويت',
             pet_image: 'https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80'
           },
@@ -94,6 +97,7 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
             created_at: new Date(Date.now() - 172800000).toISOString(), // 2 days ago
             updated_at: new Date(Date.now() - 7200000).toISOString(), // 2 hours ago
             other_participant: 'فاطمة علي',
+            other_participant_is_verified: false,
             pet_name: 'ميمي',
             pet_image: 'https://images.unsplash.com/photo-1574158622682-e40e69881006?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80'
           },
@@ -103,6 +107,7 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
             created_at: new Date(Date.now() - 259200000).toISOString(), // 3 days ago
             updated_at: new Date(Date.now() - 10800000).toISOString(), // 3 hours ago
             other_participant: 'محمد أحمد',
+            other_participant_is_verified: true,
             pet_name: 'ريكس',
             pet_image: 'https://images.unsplash.com/photo-1552053831-71594a27632d?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80'
           }
@@ -110,7 +115,6 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
         
         setActiveChats(sampleChats);
         setArchivedChats([]);
-        setFirebaseConnected(false);
         console.log('✅ Sample chats loaded');
       }, 1000);
       
@@ -168,6 +172,7 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
           created_at: data.createdAt?.toDate().toISOString() || new Date().toISOString(),
           updated_at: data.updatedAt?.toDate().toISOString() || new Date().toISOString(),
           other_participant: data.otherParticipantName || 'Unknown User',
+          other_participant_is_verified: Boolean(data.otherParticipantVerified),
           pet_name: data.petName || 'Unknown Pet',
           pet_image: data.petImage || null
         });
@@ -193,6 +198,9 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
                 return {
                   ...c,
                   other_participant: resp.data.other_participant?.name || c.other_participant,
+                  other_participant_is_verified: typeof resp.data.other_participant?.is_verified === 'boolean'
+                    ? resp.data.other_participant.is_verified
+                    : c.other_participant_is_verified,
                   pet_name: resp.data.pet_details?.name || c.pet_name,
                   pet_image: resp.data.pet_details?.main_image || c.pet_image,
                   // mark for drop if API indicates it's not mine
@@ -240,6 +248,27 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
     loadChatRooms();
   };
 
+  const openVerification = (notice?: string) => {
+    if (notice) {
+      setVerificationNotice(notice);
+    } else {
+      setVerificationNotice(undefined);
+    }
+    closeChat();
+    setShowVerification(true);
+  };
+
+  const closeVerificationScreen = () => {
+    setShowVerification(false);
+    setVerificationNotice(undefined);
+  };
+
+  const handleVerificationSubmitted = async () => {
+    await refreshUser();
+    closeVerificationScreen();
+    loadChatRooms();
+  };
+
   const handleCloseList = () => {
     appliedInitialRef.current = null;
     onClose();
@@ -276,29 +305,37 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
         <View style={styles.chatAvatar}>
           {chat.pet_image ? (
             <Image
-              source={{ uri: chat.pet_image.startsWith('http') ? chat.pet_image.replace('http://','https://') : `https://api.petow.app${chat.pet_image.startsWith('/') ? '' : '/'}${chat.pet_image}` }}
+              source={{ uri: resolveMediaUrl(chat.pet_image) }}
               style={styles.avatarImage}
             />
           ) : (
             <View style={styles.defaultAvatar}>
-              <Text style={styles.defaultAvatarText}>🐾</Text>
+              <AppIcon name="paw" size={24} color="#FF6B35" />
             </View>
           )}
         </View>
         
         <View style={styles.chatInfo}>
           <View style={styles.chatHeader}>
-            <Text style={styles.participantName}>{chat.other_participant}</Text>
+            <View style={styles.chatNameRow}>
+              <Text style={styles.participantName}>{chat.other_participant}</Text>
+              {chat.other_participant_is_verified && (
+                <View style={styles.trustedBadge}>
+                  <AppIcon name="shield-check" size={11} color="#1c7c5c" />
+                  <Text style={styles.trustedBadgeText}>موثوق</Text>
+                </View>
+              )}
+            </View>
             <Text style={styles.lastMessageTime}>
               {formatLastMessageTime(chat.updated_at)}
             </Text>
           </View>
           
           <View style={styles.chatDetails}>
-            <Text style={styles.petName}>🐾 {chat.pet_name}</Text>
-            <Text style={styles.lastMessage}>
-              {firebaseConnected ? 'متصل بـ Firebase' : 'محفوظ محلياً'}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <AppIcon name="paw" size={14} color="#FF6B35" />
+              <Text style={styles.petName}> {chat.pet_name}</Text>
+            </View>
           </View>
         </View>
         
@@ -324,11 +361,23 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
     </View>
   );
 
+  if (showVerification) {
+    return (
+      <VerificationScreen
+        onClose={closeVerificationScreen}
+        onVerificationSubmitted={handleVerificationSubmitted}
+        noticeMessage={verificationNotice}
+      />
+    );
+  }
+
   if (selectedChatId) {
     return (
       <ChatScreen 
         firebaseChatId={selectedChatId} 
         onClose={closeChat} 
+        onRequestVerification={openVerification}
+        reserveTabBarSpace={false}
       />
     );
   }
@@ -343,15 +392,6 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
         <Text style={styles.headerTitle}>المحادثات</Text>
         <View style={styles.placeholder} />
       </View>
-
-      {/* Connection Status */}
-      {!firebaseConnected && (
-        <View style={styles.connectionBanner}>
-          <Text style={styles.connectionBannerText}>
-            ⚠️ غير متصل بـ Firebase - البيانات محفوظة محلياً
-          </Text>
-        </View>
-      )}
 
       {/* Tabs */}
       <View style={styles.tabContainer}>
@@ -443,17 +483,6 @@ const styles = StyleSheet.create({
   },
   placeholder: {
     width: 40,
-  },
-  connectionBanner: {
-    backgroundColor: '#fff3cd',
-    padding: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#ffeaa7',
-  },
-  connectionBannerText: {
-    color: '#856404',
-    textAlign: 'center',
-    fontSize: 12,
   },
   tabContainer: {
     flexDirection: 'row',
@@ -559,10 +588,33 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 4,
   },
+  chatNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 1,
+  },
   participantName: {
     fontSize: 16,
     fontWeight: '600',
     color: '#2c3e50',
+    marginRight: 6,
+  },
+  trustedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#e8f8f5',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  trustedBadgeIcon: {
+    fontSize: 11,
+    marginRight: 3,
+  },
+  trustedBadgeText: {
+    fontSize: 11,
+    color: '#1c7c5c',
+    fontWeight: '600',
   },
   lastMessageTime: {
     fontSize: 12,
@@ -576,10 +628,6 @@ const styles = StyleSheet.create({
   petName: {
     fontSize: 14,
     color: '#7f8c8d',
-  },
-  lastMessage: {
-    fontSize: 12,
-    color: '#95a5a6',
   },
   chatArrow: {
     marginLeft: 10,

@@ -1,7 +1,69 @@
 rootProject.name = 'PetMatchMobile'
-println "[react-native] settings PATH=${System.getenv('PATH')}"
 
-apply from: file("../node_modules/react-native/node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesSettingsGradle(settings)
+def resolveNodeBinary() {
+    def envNode = System.getenv("NODE_BINARY")
+    if (envNode) {
+        def envNodeFile = new File(envNode)
+        if (envNodeFile.exists()) {
+            return envNodeFile.absolutePath
+        }
+    }
+
+    def nvmrc = file("../.nvmrc")
+    if (nvmrc.exists()) {
+        def requestedNodeVersion = nvmrc.text.trim()
+        if (requestedNodeVersion) {
+            def normalizedNodeVersion = requestedNodeVersion.startsWith("v")
+                ? requestedNodeVersion
+                : "v${requestedNodeVersion}"
+            def nodeBinary = new File(
+                System.getProperty("user.home"),
+                ".nvm/versions/node/${normalizedNodeVersion}/bin/node"
+            )
+            if (nodeBinary.exists()) {
+                return nodeBinary.absolutePath
+            }
+        }
+    }
+
+    return "node"
+}
+
+def patchNativeModulesGradle(File sourceFile, String nodeBinary) {
+    def patchedDir = new File(rootDir, ".gradle/react-native")
+    if (!patchedDir.exists()) {
+        patchedDir.mkdirs()
+    }
+
+    def patchedFile = new File(patchedDir, "native_modules.patched.gradle")
+    def content = sourceFile.getText("UTF-8")
+    def escapedNodeBinary = nodeBinary
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+    def nodeLiteral = "'${escapedNodeBinary}'"
+
+    content = content.replace(
+        'String[] nodeCommand = ["node", "-e", cliResolveScript]',
+        "String[] nodeCommand = [${nodeLiteral}, \"-e\", cliResolveScript]"
+    )
+    content = content.replace(
+        'String[] reactNativeConfigCommand = ["node", cliPath, "config"]',
+        "String[] reactNativeConfigCommand = [${nodeLiteral}, cliPath, \"config\"]"
+    )
+
+    patchedFile.setText(content, "UTF-8")
+    return patchedFile
+}
+
+def resolvedNodeBinary = resolveNodeBinary()
+println "[react-native] settings node=${resolvedNodeBinary}"
+
+def nativeModulesGradle = patchNativeModulesGradle(
+    file("../node_modules/react-native/node_modules/@react-native-community/cli-platform-android/native_modules.gradle"),
+    resolvedNodeBinary
+)
+
+apply from: nativeModulesGradle; applyNativeModulesSettingsGradle(settings)
 
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')
