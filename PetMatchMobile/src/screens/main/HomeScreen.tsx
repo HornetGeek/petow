@@ -473,7 +473,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onSetTabBarVisible,
 }) => {
   const { logout, shouldShowNotificationModal, setShouldShowNotificationModal } = useAuth();
-  const { clinicHomeEnabled, refreshFlags } = useFeatureFlags();
+  const { clinicHomeEnabled, requestChatV2Enabled, refreshFlags } = useFeatureFlags();
   const insets = useSafeAreaInsets();
   const [popularPets, setPopularPets] = useState<Pet[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1149,7 +1149,17 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   ], [onOpenAdoption, onOpenMatches, shouldShowClinicsAction]);
 
   if (selectedPetId) {
-    return <PetDetailsScreen petId={selectedPetId} onClose={hidePetDetails} onAddPet={showAddPetScreen} />;
+    return (
+      <PetDetailsScreen
+        petId={selectedPetId}
+        onClose={hidePetDetails}
+        onAddPet={showAddPetScreen}
+        onOpenChat={(firebaseChatId) => {
+          setInitialChatFirebaseId(firebaseChatId);
+          setShowChatList(true);
+        }}
+      />
+    );
   }
 
   if (showAddPet) {
@@ -1225,16 +1235,18 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   if (showBreedingOverview) {
     return (
       <>
-        <BreedingRequestsOverview
-          myRequests={myBreedingRequests}
-          receivedRequests={receivedBreedingRequests}
-          onClose={() => setShowBreedingOverview(false)}
-          onRefresh={loadDashboardData}
-          refreshing={dashboardLoading}
-          onRespond={handleRespondToRequest}
-          onOpenChat={handleOpenChatForRequest}
-          onOpenPetDetails={(pid) => showPetDetails(pid)}
-        />
+        {!requestChatV2Enabled ? (
+          <BreedingRequestsOverview
+            myRequests={myBreedingRequests}
+            receivedRequests={receivedBreedingRequests}
+            onClose={() => setShowBreedingOverview(false)}
+            onRefresh={loadDashboardData}
+            refreshing={dashboardLoading}
+            onRespond={handleRespondToRequest}
+            onOpenChat={handleOpenChatForRequest}
+            onOpenPetDetails={(pid) => showPetDetails(pid)}
+          />
+        ) : null}
         {responseDialog ? (
           <Modal
             transparent

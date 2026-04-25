@@ -9,6 +9,7 @@ export type AppConfig = {
   clinicHomeEnabled: boolean;
   clinicMapEnabled: boolean;
   serverMapClusteringEnabled: boolean;
+  requestChatV2Enabled: boolean;
   androidMinSupportedVersion: string;
   iosMinSupportedVersion: string;
   androidRecommendedVersion: string;
@@ -48,6 +49,7 @@ export const getDefaultAppConfig = (): AppConfig => ({
   clinicHomeEnabled: true,
   clinicMapEnabled: true,
   serverMapClusteringEnabled: true,
+  requestChatV2Enabled: false,
   androidMinSupportedVersion: '',
   iosMinSupportedVersion: '',
   androidRecommendedVersion: '',
@@ -71,6 +73,9 @@ const applyDevOverrides = (config: AppConfig): AppConfig => {
   if (typeof overrides.serverMapClusteringEnabled === 'boolean') {
     next.serverMapClusteringEnabled = overrides.serverMapClusteringEnabled;
   }
+  if (typeof overrides.requestChatV2Enabled === 'boolean') {
+    next.requestChatV2Enabled = overrides.requestChatV2Enabled;
+  }
   return next;
 };
 
@@ -88,6 +93,10 @@ export const parseAppConfig = (payload: any): AppConfig => {
     serverMapClusteringEnabled: normalizeBool(
       payload?.server_map_clustering_enabled,
       defaults.serverMapClusteringEnabled,
+    ),
+    requestChatV2Enabled: normalizeBool(
+      payload?.request_chat_v2_enabled,
+      defaults.requestChatV2Enabled,
     ),
     androidMinSupportedVersion: normalizeString(payload?.android_min_supported_version),
     iosMinSupportedVersion: normalizeString(payload?.ios_min_supported_version),
