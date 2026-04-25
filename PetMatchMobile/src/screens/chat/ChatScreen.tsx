@@ -625,14 +625,9 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
   }, [requestChatV2Enabled, phase]);
 
   // Build the pinned RequestSystemCard payload from chatContext.
-  // NOTE: backend `get_chat_context` only exposes minimal fields on
-  // adoption_request/breeding_request (id, status, created_at, plus
-  // adopter_name or message). The richer fields (housing_type, plans,
-  // requester_pet, meeting_date, notes, has_experience/experience_text)
-  // aren't currently in the chat context payload, so we still wire
-  // optional accessors below — RequestSystemCard hides undefined rows,
-  // so the card degrades gracefully and gains detail when/if the
-  // backend expands the payload later.
+  // Backend `get_chat_context` was extended (patmatch/pets/models.py:877+)
+  // to expose the full request payloads. Older app versions just ignore
+  // the extra keys — additive change.
   const requestCardPayload = useMemo(() => {
     if (!requestChatV2Enabled) return null;
     const adoption = (chatContext as any)?.adoption_request;
@@ -640,22 +635,38 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     if (adoption) {
       return {
         kind: 'adoption' as const,
+        adopterName: adoption.adopter_name,
+        adopterAge: adoption.adopter_age,
+        adopterPhone: adoption.adopter_phone,
         housingType: adoption.housing_type,
-        hasExperience: adoption.has_experience,
-        experienceText: adoption.experience_text,
-        notes: adoption.notes,
+        familyMembers: adoption.family_members,
+        experienceLevel: adoption.experience_level,
+        timeAvailability: adoption.time_availability,
+        reasonForAdoption: adoption.reason_for_adoption,
         feedingPlan: adoption.feeding_plan,
         exercisePlan: adoption.exercise_plan,
         vetCarePlan: adoption.vet_care_plan,
         emergencyPlan: adoption.emergency_plan,
+        notes: adoption.notes,
+        familyAgreement: adoption.family_agreement,
+        agreesToFollowUp: adoption.agrees_to_follow_up,
+        agreesToVetCare: adoption.agrees_to_vet_care,
+        agreesToTraining: adoption.agrees_to_training,
       };
     }
     if (breeding) {
+      const requesterPet = breeding.requester_pet;
       return {
         kind: 'breeding' as const,
-        myPetName: breeding.requester_pet?.name,
-        meetingDate: breeding.meeting_date ?? breeding.message,
-        notes: breeding.notes ?? breeding.message,
+        myPetName: requesterPet?.name,
+        myPetBreed: requesterPet?.breed_name,
+        myPetTypeDisplay: requesterPet?.pet_type_display,
+        meetingDate: breeding.meeting_date,
+        message: breeding.message,
+        contactPhone: breeding.contact_phone,
+        agreedFee: breeding.agreed_fee,
+        feePaidBy: breeding.fee_paid_by,
+        veterinaryClinicName: breeding.veterinary_clinic_name,
       };
     }
     return null;
