@@ -14,14 +14,17 @@ import { apiService, AdoptionRequest } from '../../services/api';
 import ChatListScreen from '../chat/ChatListScreen';
 import { resolveMediaUrl } from '../../utils/mediaUrl';
 import AppIcon from '../../components/icons/AppIcon';
+import { useFeatureFlags } from '../../services/featureFlags';
 
 interface AdoptionRequestsScreenProps {
   onClose: () => void;
+  onOpenChatList?: () => void;
 }
 
 type TabType = 'sent' | 'received';
 
-const AdoptionRequestsScreen: React.FC<AdoptionRequestsScreenProps> = ({ onClose }) => {
+const AdoptionRequestsScreen: React.FC<AdoptionRequestsScreenProps> = ({ onClose, onOpenChatList }) => {
+  const { requestChatV2Enabled } = useFeatureFlags();
   const [activeTab, setActiveTab] = useState<TabType>('received');
   const [sentRequests, setSentRequests] = useState<AdoptionRequest[]>([]);
   const [receivedRequests, setReceivedRequests] = useState<AdoptionRequest[]>([]);
@@ -295,17 +298,26 @@ const AdoptionRequestsScreen: React.FC<AdoptionRequestsScreenProps> = ({ onClose
             )}
 
             {(['approved', 'completed'].includes(request.status)) && (
-              <TouchableOpacity
-                style={styles.chatButton}
-                onPress={() => handleStartChat(request)}
-                disabled={chatLoadingId === request.id}
-              >
-                {chatLoadingId === request.id ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
-                  <Text style={styles.chatButtonText}>💬 بدء المحادثة</Text>
-                )}
-              </TouchableOpacity>
+              requestChatV2Enabled ? (
+                <TouchableOpacity
+                  style={styles.chatButton}
+                  onPress={() => onOpenChatList?.()}
+                >
+                  <Text style={styles.chatButtonText}>افتح المحادثة في القائمة</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={styles.chatButton}
+                  onPress={() => handleStartChat(request)}
+                  disabled={chatLoadingId === request.id}
+                >
+                  {chatLoadingId === request.id ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Text style={styles.chatButtonText}>💬 بدء المحادثة</Text>
+                  )}
+                </TouchableOpacity>
+              )
             )}
 
             {/* Action Buttons for Received Pending Requests */}
@@ -406,6 +418,15 @@ const AdoptionRequestsScreen: React.FC<AdoptionRequestsScreenProps> = ({ onClose
           <Text style={styles.closeButtonText}>✕</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Demote banner (flag-gated) */}
+      {requestChatV2Enabled ? (
+        <View style={{ backgroundColor: '#DBEAFE', padding: 12, marginHorizontal: 12, borderRadius: 8, marginTop: 8, marginBottom: 8 }}>
+          <Text style={{ fontSize: 13, color: '#1E3A8A', textAlign: 'right' }}>
+            جميع المحادثات الآن في تبويب الدردشة. هذه الصفحة سجل تاريخي لطلباتك.
+          </Text>
+        </View>
+      ) : null}
 
       {/* Tabs */}
       <View style={styles.tabs}>
