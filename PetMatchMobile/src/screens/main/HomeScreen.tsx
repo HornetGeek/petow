@@ -38,6 +38,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { buildMediaCandidates as buildResolvedMediaCandidates } from '../../utils/mediaUrl';
 import { getFloatingTabBarContentPadding } from '../../utils/tabBarLayout';
 import AppIcon, { AppIconName, IconSize } from '../../components/icons/AppIcon';
+import HomeContextModule from './components/HomeContextModule';
 
 type PetFilterType = 'all' | 'cats' | 'dogs';
 type RequestOwner = 'sent' | 'received';
@@ -98,6 +99,7 @@ interface QuickAction {
   onPress: () => void;
   isFilter?: boolean;
   filterType?: PetFilterType;
+  primary?: boolean;  // Visually emphasised tile (wider flex, stronger label).
 }
 
 type HomeScreenProps = {
@@ -1135,6 +1137,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       icon: 'plus' as AppIconName,
       iconColor: '#02B7B4',
       onPress: showAddPetScreen,
+      primary: true,  // Gets a wider tile (flex: 2) to anchor the grid.
     },
     // Inbox tiles are hidden when v2 is on — chat list is the primary inbox.
     // Push deeplinks to BreedingRequestsOverview / AdoptionRequestsScreen still work
@@ -1157,16 +1160,14 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         onPress: openAdoptionRequests,
       },
     ] : []),
-    ...(shouldShowClinicsAction ? [{
-      key: 'clinics',
-      label: 'الخدمات',
-      icon: 'shield-check' as AppIconName,
-      iconColor: '#14B8A6',
-      onPress: openClinics,
-    }] : []),
+    // The "Services" tile is intentionally omitted — the categorical
+    // services strip ("الخدمات البيطرية" with vaccination / dental /
+    // grooming / etc.) renders just below this grid and is a stronger
+    // entry point (one-tap drill into a specific category) than a
+    // generic Services tile that opens the same screen with no filter.
     // Removed species filters from main nav per UX request
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [onOpenAdoption, onOpenMatches, shouldShowClinicsAction, requestChatV2Enabled]);
+  ], [onOpenAdoption, onOpenMatches, requestChatV2Enabled]);
 
   if (selectedPetId) {
     return (
@@ -1393,6 +1394,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                 style={[
                   styles.navItem,
                   isActiveFilter && styles.navItemActive,
+                  action.primary && styles.navItemPrimary,
                 ]}
                 onPress={action.onPress}
                 activeOpacity={0.9}
@@ -1401,48 +1403,19 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                 <View style={styles.navIconWrap}>
                   <AppIcon name={action.icon} size={IconSize.lg} color={isActiveFilter ? '#02B7B4' : action.iconColor} filled={action.filled} accessibilityLabel={action.label} />
                 </View>
-                <Text style={[styles.navLabel, isActiveFilter && styles.navLabelActive]}>{action.label}</Text>
+                <Text style={[styles.navLabel, isActiveFilter && styles.navLabelActive, action.primary && styles.navLabelPrimary]}>{action.label}</Text>
               </TouchableOpacity>
             );
           })}
         </View>
       </View>
 
-      {unavailablePetsCount > 0 ? (
-        <View style={styles.section}>
-          <View style={styles.simpleUnavailableCard}>
-            <Text style={styles.simpleUnavailableTitle}>تذكير: لديك حيوانات غير متاحة</Text>
-            <Text style={styles.simpleUnavailableBody}>
-              يمكنك تعديل حالة الحيوان من الملف الشخصي ← حيواناتي.
-            </Text>
-            <View style={styles.simpleUnavailableList}>
-              {unavailablePets.slice(0, 3).map((p) => (
-                <View key={`unavail-${p.id}`} style={styles.simpleUnavailablePill}>
-                  <Text style={styles.simpleUnavailablePillText} numberOfLines={1}>
-                    {p.name || 'حيوان بدون اسم'}
-                  </Text>
-                </View>
-              ))}
-              {unavailablePetsCount > 3 ? (
-                <View style={styles.simpleUnavailablePillMore}>
-                  <Text style={styles.simpleUnavailablePillMoreText}>+{unavailablePetsCount - 3}</Text>
-                </View>
-              ) : null}
-            </View>
-            <View style={styles.simpleUnavailableActions}>
-              {/* Single CTA — the dedicated "إضافة حيوان" tile in the
-                  quick-actions grid covers that path; opening the profile
-                  lets the user manage existing pets directly. */}
-              <TouchableOpacity
-                style={styles.simpleActionPrimary}
-                onPress={() => onOpenProfileTab && onOpenProfileTab()}
-              >
-                <Text style={styles.simpleActionPrimaryText}>إدارة حيواناتي</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      ) : null}
+      <HomeContextModule
+        unreadCount={unreadMessagesCount}
+        userPetsCount={myPets.length}
+        onOpenChatList={() => openChatList()}
+        onOpenAddPet={showAddPetScreen}
+      />
 
       {shouldShowClinicsAction ? (
         <View style={styles.servicesStripSection}>
@@ -1471,28 +1444,38 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         </View>
       ) : null}
 
-      <TouchableOpacity
-        style={styles.adoptionPromo}
-        activeOpacity={0.85}
-        onPress={() => {
-          if (onOpenAdoption) {
-            onOpenAdoption();
-          }
-        }}
-      >
-        <View style={styles.adoptionPromoContent}>
-          <Text style={styles.adoptionPromoTitle}>ابحث عن صديق للتبني</Text>
-          <Text style={styles.adoptionPromoSubtitle}>
-            اكتشف الحيوانات التي تنتظر منزلاً الآن
-          </Text>
-          <View style={styles.adoptionPromoButton}>
-            <Text style={styles.adoptionPromoButtonText}>استكشف التبني</Text>
+      {unavailablePetsCount > 0 ? (
+        <View style={styles.section}>
+          <View style={styles.simpleUnavailableCard}>
+            <Text style={styles.simpleUnavailableTitle}>تذكير: لديك حيوانات غير متاحة</Text>
+            <Text style={styles.simpleUnavailableBody}>
+              يمكنك تعديل حالة الحيوان من الملف الشخصي ← حيواناتي.
+            </Text>
+            <View style={styles.simpleUnavailableList}>
+              {unavailablePets.slice(0, 3).map((p) => (
+                <View key={`unavail-${p.id}`} style={styles.simpleUnavailablePill}>
+                  <Text style={styles.simpleUnavailablePillText} numberOfLines={1}>
+                    {p.name || 'حيوان بدون اسم'}
+                  </Text>
+                </View>
+              ))}
+              {unavailablePetsCount > 3 ? (
+                <View style={styles.simpleUnavailablePillMore}>
+                  <Text style={styles.simpleUnavailablePillMoreText}>+{unavailablePetsCount - 3}</Text>
+                </View>
+              ) : null}
+            </View>
+            <View style={styles.simpleUnavailableActions}>
+              <TouchableOpacity
+                style={styles.simpleActionPrimary}
+                onPress={() => onOpenProfileTab && onOpenProfileTab()}
+              >
+                <Text style={styles.simpleActionPrimaryText}>إدارة حيواناتي</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
-        <View style={styles.adoptionPromoIcon}>
-          <AppIcon name="house-color" size={72} accessibilityLabel="تبني" />
-        </View>
-      </TouchableOpacity>
+      ) : null}
 
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
@@ -1902,6 +1885,17 @@ const styles = StyleSheet.create({
   navIconActive: {},
   navLabel: { fontSize: 12, color: '#243b53', fontWeight: '700' },
   navLabelActive: { color: '#0e7f7c' },
+  // "Primary" tile emphasis — same size as siblings (so legacy 5-tile
+  // layout still wraps cleanly) but a teal-tinted background and
+  // teal-accented border to draw the eye to Add Pet.
+  navItemPrimary: {
+    backgroundColor: '#E8FBFA',
+    borderColor: '#02B7B4',
+    borderWidth: 1.5,
+  },
+  navLabelPrimary: {
+    color: '#0e7f7c',
+  },
   servicesStripSection: {
     marginHorizontal: 20,
     marginTop: 4,
