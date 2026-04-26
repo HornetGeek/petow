@@ -1038,7 +1038,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
             </>
           )}
           <View style={styles.favBtn}>
-            <FavHeartIcon size={20} color="#ef6b8d" />
+            <FavHeartIcon size={19} />
           </View>
         </View>
         <View style={styles.petInfoGrid}>
@@ -1363,66 +1363,68 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       }}
       scrollEventThrottle={16}
     >
-      <View style={styles.headerCentered}>
-        <TouchableOpacity
-          style={styles.avatarTouch}
-          onPress={() => onOpenProfileTab && onOpenProfileTab()}
-          accessibilityLabel="الملف الشخصي"
-        >
-          <View style={styles.avatar}>
-            {user?.profile_picture ? (
-              <Image source={{ uri: user.profile_picture }} style={styles.avatarImage} />
-            ) : (
-              <HeroAvatarFace size={74} />
-            )}
-          </View>
-        </TouchableOpacity>
-        <Text style={styles.greeting}>{userGreeting}</Text>
+      <View style={styles.heroCard}>
+        <View style={styles.headerCentered}>
+          <TouchableOpacity
+            style={styles.avatarTouch}
+            onPress={() => onOpenProfileTab && onOpenProfileTab()}
+            accessibilityLabel="الملف الشخصي"
+          >
+            <View style={styles.avatar}>
+              {user?.profile_picture ? (
+                <Image source={{ uri: user.profile_picture }} style={styles.avatarImage} />
+              ) : (
+                <HeroAvatarFace size={74} />
+              )}
+            </View>
+          </TouchableOpacity>
+          <Text style={styles.greeting}>{userGreeting}</Text>
 
-        <View style={styles.searchCard}>
-          <TextInput
-            style={styles.searchInputCentered}
-            placeholder="ابحث عن سلالة أو خدمة..."
-            placeholderTextColor="#9c9c9c"
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            onSubmitEditing={executeSearch}
-            returnKeyType="search"
-          />
-          <TouchableOpacity onPress={executeSearch} accessibilityLabel="بحث">
-            <SlidersIcon size={28} color="#149995" />
+          <View style={styles.searchCard}>
+            <TextInput
+              style={styles.searchInputCentered}
+              placeholder="ابحث عن سلالة أو خدمة..."
+              placeholderTextColor="#a0a1a5"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmitEditing={executeSearch}
+              returnKeyType="search"
+            />
+            <TouchableOpacity onPress={executeSearch} accessibilityLabel="بحث">
+              <SlidersIcon size={26} color="#2d9e99" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.actionsInsideHero}>
+          <TouchableOpacity
+            style={[styles.actionCard, styles.actionPink]}
+            onPress={() => onOpenAdoption && onOpenAdoption()}
+            activeOpacity={0.85}
+            accessibilityLabel="تبنّ الآن"
+          >
+            <AdoptionIllustration size={62} />
+            <Text style={styles.actionTitle}>تبنّ الآن</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionCard, styles.actionBlue]}
+            onPress={() => onOpenMatches && onOpenMatches()}
+            activeOpacity={0.85}
+            accessibilityLabel="مطابقة التزاوج"
+          >
+            <MatchesIllustration size={62} />
+            <Text style={styles.actionTitle}>مطابقة التزاوج</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionCard, styles.actionMint]}
+            onPress={showAddPetScreen}
+            activeOpacity={0.85}
+            accessibilityLabel="إضافة حيوان"
+          >
+            <AddPetIllustration size={62} />
+            <Text style={styles.actionTitle}>إضافة حيوان</Text>
           </TouchableOpacity>
         </View>
-      </View>
-
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={[styles.actionCard, styles.actionPink]}
-          onPress={() => onOpenAdoption && onOpenAdoption()}
-          activeOpacity={0.85}
-          accessibilityLabel="تبنّ الآن"
-        >
-          <AdoptionIllustration size={54} />
-          <Text style={styles.actionTitle}>تبنّ الآن</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionCard, styles.actionBlue]}
-          onPress={() => onOpenMatches && onOpenMatches()}
-          activeOpacity={0.85}
-          accessibilityLabel="مطابقة التزاوج"
-        >
-          <MatchesIllustration size={54} />
-          <Text style={styles.actionTitle}>مطابقة التزاوج</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionCard, styles.actionMint]}
-          onPress={showAddPetScreen}
-          activeOpacity={0.85}
-          accessibilityLabel="إضافة حيوان"
-        >
-          <AddPetIllustration size={54} />
-          <Text style={styles.actionTitle}>إضافة حيوان</Text>
-        </TouchableOpacity>
       </View>
 
       <HomeContextModule
@@ -1582,13 +1584,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#eef5f5',
   },
   // ────────────────────────────────────────────────────────────────────
-  // Stitch home redesign — design tokens from the user's HTML/CSS:
-  // teal #19b4b0 / #149995 / #d7f6f2, pastels #ffe0e4 / #d9ecff /
-  // #cef4ef, text #1f1f1f, muted #8d959c.
+  // Stitch home redesign v2 — design tokens from the user's HTML/CSS:
+  // teal #1cb7b2 / #169c97 / #cff6f1, pastels #ffdce2 / #d8eaff /
+  // #cdf5ef, text #1b1f22, muted #8a949b. Hero card wraps avatar +
+  // greeting + search + 3 action cards in one rgba-translucent surface.
   // ────────────────────────────────────────────────────────────────────
+  heroCard: {
+    marginHorizontal: 4,
+    marginTop: 6,
+    paddingHorizontal: 14,
+    paddingTop: 18,
+    paddingBottom: 18,
+    borderRadius: 36,
+    backgroundColor: 'rgba(248, 252, 252, 0.72)',
+    shadowColor: '#185e63',
+    shadowOpacity: 0.08,
+    shadowRadius: 40,
+    shadowOffset: { width: 0, height: 20 },
+    elevation: 2,
+  },
   headerCentered: {
-    paddingHorizontal: 20,
-    paddingTop: 26,
+    paddingHorizontal: 6,
+    paddingTop: 6,
     alignItems: 'center',
   },
   avatarTouch: { borderRadius: 43 },
@@ -1609,11 +1626,12 @@ const styles = StyleSheet.create({
   },
   avatarImage: { width: 86, height: 86, borderRadius: 43 },
   greeting: {
-    fontSize: 26,
+    fontSize: 31,
     fontWeight: '800',
-    color: '#1f1f1f',
+    color: '#1b1f22',
     textAlign: 'center',
-    lineHeight: 32,
+    lineHeight: 36,
+    letterSpacing: -0.2,
   },
   searchCard: {
     marginTop: 18,
@@ -1636,42 +1654,43 @@ const styles = StyleSheet.create({
   searchInputCentered: {
     flex: 1,
     fontSize: 16,
-    color: '#1f1f1f',
+    fontWeight: '600',
+    color: '#1b1f22',
     textAlign: 'right',
     paddingHorizontal: 8,
   },
-  actions: {
+  // Lives inside the heroCard, so no horizontal page padding here.
+  actionsInsideHero: {
     flexDirection: 'row',
     gap: 14,
     marginTop: 22,
-    paddingHorizontal: 20,
   },
   actionCard: {
     flex: 1,
-    minHeight: 126,
+    minHeight: 128,
     borderRadius: 24,
-    paddingHorizontal: 10,
-    paddingTop: 16,
-    paddingBottom: 14,
+    paddingHorizontal: 8,
+    paddingTop: 14,
+    paddingBottom: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
+    shadowColor: '#185e63',
+    shadowOpacity: 0.08,
     shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
+    shadowOffset: { width: 0, height: 8 },
     elevation: 2,
   },
   actionTitle: {
     marginTop: 10,
     fontSize: 17,
     fontWeight: '800',
-    color: '#1f1f1f',
+    color: '#1b1f22',
     textAlign: 'center',
     lineHeight: 22,
   },
-  actionPink: { backgroundColor: '#ffe0e4' },
-  actionBlue: { backgroundColor: '#d9ecff' },
-  actionMint: { backgroundColor: '#cef4ef' },
+  actionPink: { backgroundColor: '#ffdce2' },
+  actionBlue: { backgroundColor: '#d8eaff' },
+  actionMint: { backgroundColor: '#cdf5ef' },
   sectionHead: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1679,12 +1698,12 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   sectionTitleNew: {
-    fontSize: 18,
+    fontSize: 21,
     fontWeight: '800',
-    color: '#1f1f1f',
+    color: '#1b1f22',
   },
   sectionLink: {
-    color: '#3f9e9a',
+    color: '#3d9f9b',
     fontWeight: '700',
     fontSize: 14,
   },
@@ -1694,17 +1713,17 @@ const styles = StyleSheet.create({
   },
   serviceCard: {
     flex: 1,
-    minHeight: 138,
-    borderRadius: 22,
+    minHeight: 142,
+    borderRadius: 24,
     paddingVertical: 18,
     paddingHorizontal: 10,
-    backgroundColor: 'rgba(255,255,255,0.88)',
+    backgroundColor: 'rgba(255,255,255,0.92)',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
+    shadowColor: '#185e63',
+    shadowOpacity: 0.08,
     shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
+    shadowOffset: { width: 0, height: 8 },
     elevation: 1,
   },
   serviceTitle: {
@@ -1744,16 +1763,16 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 12,
     left: 12,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'rgba(255,255,255,0.95)',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.96)',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.13,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 5 },
     elevation: 3,
   },
   petInfoGrid: {
