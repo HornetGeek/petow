@@ -24,6 +24,38 @@ interface ChatListScreenProps {
   onChatOpened?: () => void;
 }
 
+/**
+ * Reads firestore-only inbox fields (last_message, last_message_at,
+ * unread_count) from each chat doc and merges them into the API rows.
+ * Backend currently doesn't mirror these fields onto the Django ChatRoom
+ * model, so this is the single round-trip that keeps the badge + preview
+ * working for API-loaded chats.
+ */
+const enrichChatsFromFirestore = async (
+  rows: ChatRoomList[],
+  userId?: number,
+): Promise<ChatRoomList[]> => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const enriched = await Promise.all(rows.map(async (row) => {
+    if (!row.firebase_chat_id) return row;
+    try {
+      const doc = await firestore().collection('chats').doc(row.firebase_chat_id).get();
+      if (!doc.exists) return row;
+      const data = doc.data() as any;
+      const unreadByUser = data?.unreadCount && userId ? data.unreadCount[userId] : undefined;
+      return {
+        ...row,
+        last_message: typeof data?.lastMessage === 'string' ? data.lastMessage : row.last_message,
+        last_message_at: data?.lastMessageAt?.toDate?.()?.toISOString() ?? row.last_message_at,
+        unread_count: typeof unreadByUser === 'number' ? unreadByUser : row.unread_count,
+      };
+    } catch {
+      return row;
+    }
+  }));
+  return enriched;
+};
+
 const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebaseChatId = null, onChatOpened }) => {
   const { user, refreshUser } = useAuth();
   const [activeChats, setActiveChats] = useState<ChatRoomList[]>([]);
@@ -60,9 +92,15 @@ const ChatListScreen: React.FC<ChatListScreenProps> = ({ onClose, initialFirebas
       try {
         const response = await apiService.getChatRooms();
         if (response.success && response.data) {
-          setActiveChats(response.data.results);
+          // Enrich API rows with firestore-only inbox fields (last_message,
+          // unread_count, last_message_at). Backend doesn't currently
+          // mirror those into the ChatRoom model, so we read them straight
+          // from the chat documents in parallel. Failures are non-fatal —
+          // the row just falls back to API-only data.
+          const enriched = await enrichChatsFromFirestore(response.data.results, user?.id);
+          setActiveChats(enriched);
           setArchivedChats([]);
-          console.log('✅ Loaded chat rooms from API:', response.data.results.length);
+          console.log('✅ Loaded chat rooms from API:', enriched.length);
           return;
         }
       } catch (apiError) {

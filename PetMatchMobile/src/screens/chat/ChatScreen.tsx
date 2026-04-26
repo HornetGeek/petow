@@ -122,7 +122,11 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     lastMarkReadAtRef.current = now;
     apiService.markChatNotificationsAsRead(firebaseChatId)
       .catch((markErr) => console.log('markChatNotificationsAsRead failed (non-fatal)', markErr));
-  }, [messages, firebaseChatId, loading]);
+    // Reset firestore unread counter so ChatList badge clears.
+    if (user?.id) {
+      MessageService.markChatAsRead(firebaseChatId, user.id);
+    }
+  }, [messages, firebaseChatId, loading, user?.id]);
 
   // Trigger support nudge after threshold (3 messages) once per chat
   // Trigger support nudge after threshold (3 messages) once per chat
@@ -194,6 +198,9 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       const currentUserId = user?.id || 0;
       const currentUserName = (user?.full_name || `${user?.first_name || ''} ${user?.last_name || ''}` || 'أنا').trim();
       const imgClientId = `img_${Date.now()}`;
+      const recipientIds = chatRoom?.participants
+        ? Object.values(chatRoom.participants).map((p) => p?.id).filter((id): id is number => typeof id === 'number')
+        : [];
       const ok = await MessageService.sendMessage(
         firebaseChatId,
         {
@@ -203,7 +210,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           type: 'image',
           imageUrl: upload.data.image_url,
         },
-        { clientId: imgClientId }
+        { clientId: imgClientId, recipientIds }
       );
       if (!ok) {
         Alert.alert('تحذير', 'تعذر إرسال الصورة الآن، سيتم إرسالها لاحقاً');
@@ -476,6 +483,9 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
 
       // Try to send via Firebase
       if (firebaseConnected) {
+        const recipientIds = chatRoom?.participants
+          ? Object.values(chatRoom.participants).map((p) => p?.id).filter((id): id is number => typeof id === 'number')
+          : [];
         const ok = await MessageService.sendMessage(
           firebaseChatId,
           {
@@ -484,7 +494,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             senderName: currentUserName,
             type: 'text',
           },
-          { clientId }
+          { clientId, recipientIds }
         );
         if (!ok) {
           console.warn('⚠️ Firebase send returned false; keeping local optimistic message');
