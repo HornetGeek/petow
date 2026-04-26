@@ -1027,9 +1027,13 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
           )}
         </View>
         <View style={styles.petInfo}>
-          <Text style={styles.petName}>{pet.name || 'غير محدد'}</Text>
-          <Text style={styles.petBreed}>{pet.breed_name || 'غير محدد'}</Text>
-          <Text style={styles.petAge}>{pet.age_display || 'غير محدد'}</Text>
+          <View style={styles.petInfoTopRow}>
+            <Text style={styles.petName} numberOfLines={1}>{pet.name || 'غير محدد'}</Text>
+            <AppIcon name="heart" size={IconSize.sm} color="#E11D48" />
+          </View>
+          <Text style={styles.petBreed} numberOfLines={1}>
+            {pet.breed_name || pet.pet_type_display || 'غير محدد'}
+          </Text>
         </View>
       </TouchableOpacity>
     );
@@ -1392,8 +1396,8 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         </View>
 
         <View style={styles.heroSearchCard}>
-          <TouchableOpacity style={styles.heroSearchFilterBtn} onPress={() => { /* TODO filters */ }} accessibilityLabel="فلتر">
-            <AppIcon name="search" size={IconSize.sm} color="#0F766E" accessibilityLabel="فلتر" />
+          <TouchableOpacity style={styles.heroSearchFilterBtn} onPress={executeSearch} accessibilityLabel="بحث">
+            <AppIcon name="sliders" size={IconSize.sm} color="#0F766E" accessibilityLabel="فلتر" />
           </TouchableOpacity>
           <TextInput
             style={styles.heroSearchInput}
@@ -1417,17 +1421,14 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                 style={[
                   styles.navItem,
                   isActiveFilter && styles.navItemActive,
-                  action.primary && styles.navItemPrimary,
                   action.bgColor ? { backgroundColor: action.bgColor, borderColor: 'transparent' } : null,
                 ]}
                 onPress={action.onPress}
-                activeOpacity={0.9}
+                activeOpacity={0.85}
                 accessibilityLabel={action.label}
               >
-                <View style={styles.navIconWrap}>
-                  <AppIcon name={action.icon} size={IconSize.lg} color={isActiveFilter ? '#02B7B4' : action.iconColor} filled={action.filled} accessibilityLabel={action.label} />
-                </View>
-                <Text style={[styles.navLabel, isActiveFilter && styles.navLabelActive, action.primary && styles.navLabelPrimary]}>{action.label}</Text>
+                <AppIcon name={action.icon} size={IconSize.xl} color={isActiveFilter ? '#02B7B4' : action.iconColor} filled={action.filled} accessibilityLabel={action.label} />
+                <Text style={[styles.navLabel, isActiveFilter && styles.navLabelActive]}>{action.label}</Text>
               </TouchableOpacity>
             );
           })}
@@ -1988,20 +1989,40 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: '#5d6d7e',
   },
+  // Stitch v1 quick-action tile: rounded colored card with the icon
+  // sitting directly in the middle and the label centered below. No
+  // inner circle — the per-tile pastel bg is the chrome.
   navItem: {
     width: '31%',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderRadius: 14,
+    justifyContent: 'center',
+    paddingVertical: 22,
+    paddingHorizontal: 8,
+    borderRadius: 22,
     backgroundColor: '#f7fafb',
-    borderWidth: 1,
-    borderColor: '#e6eef0',
+    borderWidth: 0,
     marginBottom: 10,
+    gap: 10,
   },
   navItemActive: {
     backgroundColor: '#e8fbfa',
     borderColor: '#02B7B4',
   },
+  navIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(255,255,255,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  // Kept for any legacy callers; new tiles use navIconCircle.
   navIconWrap: {
     width: 44,
     height: 44,
@@ -2009,16 +2030,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
     marginBottom: 6,
   },
   navIcon: { fontSize: 22 },
   navIconActive: {},
-  navLabel: { fontSize: 12, color: '#243b53', fontWeight: '700' },
+  navLabel: { fontSize: 13, color: '#1F2937', fontWeight: '700', textAlign: 'center' },
   navLabelActive: { color: '#0e7f7c' },
   // "Primary" tile emphasis — same size as siblings (so legacy 5-tile
   // layout still wraps cleanly) but a teal-tinted background and
@@ -2160,21 +2176,28 @@ const styles = StyleSheet.create({
   petsContainer: {
     flexDirection: 'row',
   },
+  // Stitch v1 pet card: square image dominant, then a tight info row
+  // (name on the start, heart on the end) and a small breed/subtitle.
   petCard: {
-    width: 160,
-    marginRight: 15,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 12,
+    width: 150,
+    marginEnd: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
     overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
   petImageWrapper: {
     position: 'relative',
     width: '100%',
-    height: 120,
+    height: 150,
   },
   petImage: {
     width: '100%',
-    height: 120,
+    height: 150,
     backgroundColor: '#e1e8ed',
     borderRadius: 0,
   },
@@ -2204,17 +2227,27 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   petInfo: {
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  petInfoTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   petName: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#2c3e50',
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1F2937',
+    flex: 1,
+    marginEnd: 6,
+    textAlign: 'right',
   },
   petBreed: {
-    fontSize: 14,
-    color: '#7f8c8d',
+    fontSize: 11,
+    color: '#64748B',
     marginTop: 2,
+    textAlign: 'right',
   },
   petAge: {
     fontSize: 12,
