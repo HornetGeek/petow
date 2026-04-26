@@ -125,6 +125,14 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     // Reset firestore unread counter so ChatList badge clears.
     if (user?.id) {
       MessageService.markChatAsRead(firebaseChatId, user.id);
+      // Mark each visible message from the OTHER user as read so the
+      // sender's ✓ flips to ✓✓.
+      const unreadMessageIds = messages
+        .filter((m) => m.senderId !== user.id && !(m.readBy || []).includes(user.id))
+        .map((m) => m.id);
+      if (unreadMessageIds.length > 0) {
+        MessageService.markMessagesAsRead(firebaseChatId, unreadMessageIds, user.id);
+      }
     }
   }, [messages, firebaseChatId, loading, user?.id]);
 
@@ -549,9 +557,29 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     }
   };
 
+  // Other-participant IDs (everyone in the chat except the current user).
+  // Used to derive ✓✓ "read by all recipients" — when every otherId is
+  // present in a message's readBy array, the message has been seen.
+  const otherParticipantIds = useMemo(() => {
+    if (!chatRoom?.participants || !user?.id) return [];
+    return Object.values(chatRoom.participants)
+      .map((p) => p?.id)
+      .filter((id): id is number => typeof id === 'number' && id !== user.id);
+  }, [chatRoom?.participants, user?.id]);
+
   const renderMessage = (message: FirebaseMessage) => {
     const isCurrentUser = user?.id ? message.senderId === user.id : false;
     const isSystem = message.type === 'system';
+    // Read state: ✓✓ if every other participant has the message in
+    // their readBy; ✓ otherwise. When otherParticipantIds is empty
+    // (e.g. mock data, or solo room) we conservatively show ✓.
+    const readBy = message.readBy || [];
+    const seenByAllOthers =
+      otherParticipantIds.length > 0 &&
+      otherParticipantIds.every((id) => readBy.includes(id));
+    const deliveryGlyph = isCurrentUser && !isSystem
+      ? (seenByAllOthers ? '  ✓✓' : '  ✓')
+      : '';
 
     return (
       <View
@@ -589,13 +617,45 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             isCurrentUser && styles.sentMessageTime
           ]}>
             {formatMessageTime(message.timestamp)}
-            {/* Delivery status: ✓ = delivered (firestore confirmed),
-                ✓✓ = read by recipient. Read state requires backend
-                support; until then we only show ✓ for sent messages. */}
-            {isCurrentUser && !isSystem ? '  ✓' : ''}
+            {/* ✓ = delivered (firestore confirmed) ✓✓ = seen by recipient */}
+            {deliveryGlyph}
           </Text>
         </View>
       </View>
+    );
+  };
+
+  // Date-separator helper. Returns "اليوم" / "أمس" / "DD/MM/YYYY" given a
+  // timestamp. Comparisons are calendar-day based, not 24h-window.
+  const isSameCalendarDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  const formatDateSeparator = (date: Date): string => {
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (isSameCalendarDay(date, now)) return 'اليوم';
+    if (isSameCalendarDay(date, yesterday)) return 'أمس';
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  };
+
+  const renderMessageWithDate = (message: FirebaseMessage, idx: number) => {
+    const prev = idx > 0 ? messages[idx - 1] : null;
+    const showDate = !prev || !isSameCalendarDay(prev.timestamp, message.timestamp);
+    return (
+      <React.Fragment key={message.id}>
+        {showDate ? (
+          <View style={styles.dateSeparator}>
+            <Text style={styles.dateSeparatorText}>{formatDateSeparator(message.timestamp)}</Text>
+          </View>
+        ) : null}
+        {renderMessage(message)}
+      </React.Fragment>
     );
   };
 
@@ -868,7 +928,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             </Text>
           </View>
         ) : (
-          messages.map(renderMessage)
+          messages.map(renderMessageWithDate)
         )}
       </ScrollView>
 
@@ -1371,6 +1431,19 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     marginTop: 4,
+  },
+  dateSeparator: {
+    alignSelf: 'center',
+    backgroundColor: '#E5E7EB',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginVertical: 10,
+  },
+  dateSeparatorText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#374151',
   },
   errorBanner: {
     backgroundColor: '#f8d7da',

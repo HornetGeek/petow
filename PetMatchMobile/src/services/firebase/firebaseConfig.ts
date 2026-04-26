@@ -11,6 +11,13 @@ export interface FirebaseMessage {
   timestamp: Date;
   type: 'text' | 'image' | 'system';
   imageUrl?: string;
+  /**
+   * User IDs who have read this message. The sender is auto-added on send,
+   * so a message with `readBy.length > 1` (or contains a non-sender id)
+   * means the recipient(s) have seen it. Surfaced in chat as ✓ (delivered)
+   * vs ✓✓ (read).
+   */
+  readBy?: number[];
 }
 
 export class MessageService {
@@ -36,6 +43,9 @@ export class MessageService {
         // Use serverTimestamp when available; fallback to client timestamp
         timestamp: serverTimestamp,
         createdAt: new Date().toISOString(),
+        // Sender has obviously seen their own message; recipients add
+        // themselves via markMessagesAsRead when they view it.
+        readBy: [messageData.senderId],
       });
 
       // Update parent chat document so the inbox can show last-message
@@ -90,6 +100,36 @@ export class MessageService {
     }
   }
 
+  /**
+   * Adds `userId` to each message's `readBy` array so the sender can see
+   * a ✓✓ instead of ✓. Pass only the message IDs the user just saw and
+   * isn't already in (caller filters). FieldValue.arrayUnion is a no-op
+   * when the user is already present, so duplicate calls are safe — but
+   * filtering still saves write-cost.
+   */
+  static async markMessagesAsRead(
+    chatId: string,
+    messageIds: string[],
+    userId: number,
+  ): Promise<void> {
+    if (!chatId || !userId || messageIds.length === 0) return;
+    try {
+      const arrayUnion = (firestore as any).FieldValue?.arrayUnion?.(userId);
+      const batch = firestore().batch();
+      const messagesCol = firestore().collection('chats').doc(chatId).collection('messages');
+      for (const messageId of messageIds) {
+        batch.set(
+          messagesCol.doc(messageId),
+          { readBy: arrayUnion ?? [userId] },
+          { merge: true },
+        );
+      }
+      await batch.commit();
+    } catch (error) {
+      console.warn('⚠️ markMessagesAsRead failed (non-fatal):', error);
+    }
+  }
+
   static subscribeToMessages(
     chatId: string,
     onMessagesUpdate: (messages: FirebaseMessage[]) => void
@@ -116,6 +156,7 @@ export class MessageService {
                 timestamp: data.timestamp?.toDate() || new Date(),
                 type: data.type || 'text',
                 imageUrl: data.imageUrl,
+                readBy: Array.isArray(data.readBy) ? data.readBy : undefined,
               });
             });
             onMessagesUpdate(messages);
@@ -157,9 +198,10 @@ export class MessageService {
           timestamp: data.timestamp?.toDate() || new Date(),
           type: data.type || 'text',
           imageUrl: data.imageUrl,
+          readBy: Array.isArray(data.readBy) ? data.readBy : undefined,
         });
       });
-      
+
       console.log('✅ Retrieved', messages.length, 'messages from Firebase');
       return messages;
     } catch (error) {
