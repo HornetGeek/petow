@@ -100,6 +100,7 @@ interface QuickAction {
   isFilter?: boolean;
   filterType?: PetFilterType;
   primary?: boolean;  // Visually emphasised tile (wider flex, stronger label).
+  bgColor?: string;   // Override the tile background — for the Stitch v1 design (rose adoption / mint matches+add).
 }
 
 type HomeScreenProps = {
@@ -487,7 +488,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onOpenProfileTab,
   onSetTabBarVisible,
 }) => {
-  const { logout, shouldShowNotificationModal, setShouldShowNotificationModal } = useAuth();
+  const { user, logout, shouldShowNotificationModal, setShouldShowNotificationModal } = useAuth();
   const { clinicHomeEnabled, requestChatV2Enabled, refreshFlags } = useFeatureFlags();
   const insets = useSafeAreaInsets();
   const [popularPets, setPopularPets] = useState<Pet[]>([]);
@@ -966,6 +967,14 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const unavailablePets = useMemo(() => {
     return myPets.filter((p) => getPetStatusAppearance(p.status, p.status_display).isUnavailable);
   }, [myPets]);
+
+  // Time-based Arabic greeting in the hero. Recomputed per render — cheap.
+  const userGreeting = useMemo(() => {
+    const hour = new Date().getHours();
+    const namePart = (user?.first_name || '').trim();
+    const greetingBase = hour < 12 ? 'صباح الخير' : hour < 17 ? 'مساء النور' : 'مساء الخير';
+    return namePart ? `${greetingBase}، ${namePart}` : greetingBase;
+  }, [user?.first_name]);
   const unavailablePetsCount = unavailablePets.length;
   const shouldShowClinicsAction = clinicHomeEnabled;
   const homeBottomSafePadding = getFloatingTabBarContentPadding(insets.bottom, 8);
@@ -1120,24 +1129,27 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       key: 'adoption',
       label: 'تبني الآن',
       icon: 'home' as AppIconName,
-      iconColor: '#FF6B35',
+      iconColor: '#E11D48',
       onPress: () => onOpenAdoption && onOpenAdoption(),
+      bgColor: '#FCE7E7',  // rose pastel
     },
     {
       key: 'matches',
       label: 'مطابقة التزاوج',
       icon: 'heart' as AppIconName,
-      iconColor: '#FF4D6D',
+      iconColor: '#E11D48',
       filled: true,
       onPress: () => onOpenMatches && onOpenMatches(),
+      bgColor: '#D6F4F0',  // mint pastel
     },
     {
       key: 'add',
       label: 'إضافة حيوان',
       icon: 'plus' as AppIconName,
-      iconColor: '#02B7B4',
+      iconColor: '#0F766E',
       onPress: showAddPetScreen,
-      primary: true,  // Gets a wider tile (flex: 2) to anchor the grid.
+      primary: true,
+      bgColor: '#D6F4F0',  // mint pastel — same as matches per design
     },
     // Inbox tiles are hidden when v2 is on — chat list is the primary inbox.
     // Push deeplinks to BreedingRequestsOverview / AdoptionRequestsScreen still work
@@ -1335,53 +1347,64 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       }}
       scrollEventThrottle={16}
     >
-      <View style={styles.header}>
-        <Image
-          source={require('../../../assets/icon.png')}
-          style={styles.headerLogo}
-          resizeMode="contain"
-        />
-        <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.headerIconButton} onPress={openNotifications} accessibilityLabel="الإشعارات">
-            <AppIcon name="bell" size={IconSize.lg} color="#F59E0B" accessibilityLabel="إشعارات" />
+      <View style={styles.tealHero}>
+        <View style={styles.heroTopRow}>
+          <Image
+            source={require('../../../assets/icon.png')}
+            style={styles.heroLogo}
+            resizeMode="contain"
+          />
+          <View style={styles.heroGreetingBlock}>
+            <Text style={styles.heroGreeting}>{userGreeting}</Text>
+            <TouchableOpacity onPress={() => onOpenProfileTab && onOpenProfileTab()} accessibilityLabel="الملف الشخصي">
+              {user?.profile_picture ? (
+                <Image source={{ uri: user.profile_picture }} style={styles.heroAvatar} />
+              ) : (
+                <View style={[styles.heroAvatar, styles.heroAvatarFallback]}>
+                  <AppIcon name="user" size={IconSize.lg} color="#0F766E" accessibilityLabel="الملف الشخصي" />
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.heroActionRow}>
+          <TouchableOpacity style={styles.heroActionPill} onPress={openNotifications} accessibilityLabel="الإشعارات">
+            <AppIcon name="bell" size={IconSize.md} color="#F59E0B" accessibilityLabel="إشعارات" />
             {unreadNotifications > 0 ? (
-              <View style={styles.headerBadge}>
-                <Text style={styles.headerBadgeText}>
+              <View style={styles.heroActionBadge}>
+                <Text style={styles.heroActionBadgeText}>
                   {unreadNotifications > 99 ? '99+' : String(unreadNotifications)}
                 </Text>
               </View>
             ) : null}
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerIconButton} onPress={openChatList} accessibilityLabel="المحادثات">
-            <AppIcon name="chat" size={IconSize.lg} color="#3B82F6" accessibilityLabel="محادثات" />
+          <TouchableOpacity style={styles.heroActionPill} onPress={openChatList} accessibilityLabel="المحادثات">
+            <AppIcon name="chat" size={IconSize.md} color="#3B82F6" accessibilityLabel="محادثات" />
             {unreadMessagesCount > 0 ? (
-              <View style={styles.headerBadge}>
-                <Text style={styles.headerBadgeText}>
+              <View style={styles.heroActionBadge}>
+                <Text style={styles.heroActionBadgeText}>
                   {unreadMessagesCount > 99 ? '99+' : String(unreadMessagesCount)}
                 </Text>
               </View>
             ) : null}
           </TouchableOpacity>
-
-          <TouchableOpacity style={styles.headerIconButton} onPress={handleLogout} accessibilityLabel="تسجيل الخروج">
-            <AppIcon name="logout" size={IconSize.lg} color="#64748B" accessibilityLabel="خروج" />
-          </TouchableOpacity>
         </View>
-      </View>
 
-      <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="ابحث بالسلالة أو النوع..."
-          placeholderTextColor="#95a5a6"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={executeSearch}
-          returnKeyType="search"
-        />
-        <TouchableOpacity style={styles.searchButton} onPress={executeSearch} accessibilityLabel="بحث">
-          <AppIcon name="search" size={IconSize.md} color="#fff" accessibilityLabel="بحث" />
-        </TouchableOpacity>
+        <View style={styles.heroSearchCard}>
+          <TouchableOpacity style={styles.heroSearchFilterBtn} onPress={() => { /* TODO filters */ }} accessibilityLabel="فلتر">
+            <AppIcon name="search" size={IconSize.sm} color="#0F766E" accessibilityLabel="فلتر" />
+          </TouchableOpacity>
+          <TextInput
+            style={styles.heroSearchInput}
+            placeholder="ابحث عن سلالة أو خدمة..."
+            placeholderTextColor="#94A3B8"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={executeSearch}
+            returnKeyType="search"
+          />
+        </View>
       </View>
 
       <View style={styles.quickActionsContainer}>
@@ -1395,6 +1418,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                   styles.navItem,
                   isActiveFilter && styles.navItemActive,
                   action.primary && styles.navItemPrimary,
+                  action.bgColor ? { backgroundColor: action.bgColor, borderColor: 'transparent' } : null,
                 ]}
                 onPress={action.onPress}
                 activeOpacity={0.9}
@@ -1419,8 +1443,12 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {shouldShowClinicsAction ? (
         <View style={styles.servicesStripSection}>
-          <Text style={styles.sectionTitle}>الخدمات البيطرية</Text>
-          <Text style={styles.servicesStripHint}>اختر نوع الخدمة لعرض العيادات القريبة</Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>الخدمات البيطرية</Text>
+            <TouchableOpacity onPress={() => openServices()}>
+              <Text style={styles.seeAllText}>عرض</Text>
+            </TouchableOpacity>
+          </View>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -1434,7 +1462,9 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
                 accessibilityRole="button"
                 accessibilityLabel={SERVICE_CATEGORY_LABELS[category]}
               >
-                <Text style={styles.serviceTileEmoji}>{SERVICE_CATEGORY_EMOJI[category]}</Text>
+                <View style={styles.serviceTileIconCircle}>
+                  <Text style={styles.serviceTileEmoji}>{SERVICE_CATEGORY_EMOJI[category]}</Text>
+                </View>
                 <Text style={styles.serviceTileLabel} numberOfLines={1}>
                   {SERVICE_CATEGORY_LABELS[category]}
                 </Text>
@@ -1480,8 +1510,8 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>الحيوانات المتاحة</Text>
-          <TouchableOpacity onPress={() => loadPopularPets(activeType, searchQuery.trim())}>
-            <Text style={styles.seeAllText}>تحديث</Text>
+          <TouchableOpacity onPress={() => onOpenAdoption && onOpenAdoption()}>
+            <Text style={styles.seeAllText}>عرض</Text>
           </TouchableOpacity>
         </View>
 
@@ -1551,6 +1581,111 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f8f9fa',
+  },
+  // ────────────────────────────────────────────────────────────────────
+  // Stitch v1 hero — teal section that holds the greeting + avatar +
+  // action pills (bell/chat) + the floating white search card.
+  // ────────────────────────────────────────────────────────────────────
+  tealHero: {
+    backgroundColor: '#2DD4BF',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 22,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
+  heroTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  heroLogo: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+  },
+  heroGreetingBlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  heroGreeting: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'right',
+  },
+  heroAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.6)',
+  },
+  heroAvatarFallback: {
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+  },
+  heroActionPill: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  heroActionBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: '#EF4444',
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  heroActionBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  heroSearchCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginTop: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  heroSearchFilterBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#E0F2F1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    color: '#0F172A',
+    paddingHorizontal: 10,
+    textAlign: 'right',
   },
   header: {
     flexDirection: 'row',
@@ -1922,9 +2057,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // Stitch v1: emoji sits inside a soft mint circle for a cleaner, more
+  // app-like service tile (vs. floating naked emoji on white card).
+  serviceTileIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#E0F2F1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
   serviceTileEmoji: {
-    fontSize: 26,
-    marginBottom: 6,
+    fontSize: 22,
   },
   serviceTileLabel: {
     fontSize: 12,
