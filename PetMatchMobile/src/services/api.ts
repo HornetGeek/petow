@@ -309,8 +309,14 @@ export interface ChatRoomList {
   updated_at: string;
   other_participant: string;
   other_participant_is_verified?: boolean;
+  other_participant_avatar?: string;  // person's profile picture (preferred over pet_image for the avatar)
   pet_name: string;
   pet_image?: string;
+  // Forward-compatible inbox fields. Populated by backend / firestore listener
+  // when available; the UI hides the row gracefully when undefined.
+  unread_count?: number;
+  last_message?: string;
+  last_message_at?: string;
 }
 
 export interface ChatContext {

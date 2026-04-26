@@ -579,6 +579,10 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             isCurrentUser && styles.sentMessageTime
           ]}>
             {formatMessageTime(message.timestamp)}
+            {/* Delivery status: ✓ = delivered (firestore confirmed),
+                ✓✓ = read by recipient. Read state requires backend
+                support; until then we only show ✓ for sent messages. */}
+            {isCurrentUser && !isSystem ? '  ✓' : ''}
           </Text>
         </View>
       </View>
@@ -909,9 +913,15 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           }}
         />
       ) : requestChatV2Enabled && phase === 'rejected' ? null : requestChatV2Enabled && perspective === 'requester' && !inputEnabled ? (
-        <View style={styles.lockedInputBar}>
+        <TouchableOpacity
+          style={styles.lockedInputBar}
+          onPress={() => messagesEndRef.current?.scrollTo({ y: 0, animated: true })}
+          accessibilityRole="button"
+          accessibilityLabel="عرض تفاصيل الطلب"
+        >
           <Text style={styles.lockedInputText}>🔒 لا يمكن إرسال رسائل قبل قبول الطلب</Text>
-        </View>
+          <Text style={styles.lockedInputHint}>اضغط لمراجعة تفاصيل طلبك ↑</Text>
+        </TouchableOpacity>
       ) : (
       <View
         style={[
@@ -1091,7 +1101,7 @@ const styles = StyleSheet.create({
   },
   backButton: {
     padding: 10,
-    marginRight: 10,
+    marginEnd: 10,
   },
   backButtonText: {
     fontSize: 24,
@@ -1115,7 +1125,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    marginRight: 12,
+    marginEnd: 12,
   },
   participantDetails: {
     flex: 1,
@@ -1128,7 +1138,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#2c3e50',
-    marginRight: 6,
+    marginEnd: 6,
   },
   trustedBadge: {
     flexDirection: 'row',
@@ -1140,7 +1150,7 @@ const styles = StyleSheet.create({
   },
   trustedBadgeIcon: {
     fontSize: 12,
-    marginRight: 4,
+    marginEnd: 4,
   },
   trustedBadgeText: {
     fontSize: 12,
@@ -1345,6 +1355,12 @@ const styles = StyleSheet.create({
   lockedInputText: {
     color: '#6B7280',
     fontSize: 13,
+  },
+  lockedInputHint: {
+    color: '#1E3A8A',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 4,
   },
   errorBanner: {
     backgroundColor: '#f8d7da',
