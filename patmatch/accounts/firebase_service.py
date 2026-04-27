@@ -2,7 +2,8 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 from django.conf import settings
 import logging
-import os
+import json
+from numbers import Number
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,41 @@ class FirebaseService:
             logger.error(f"❌ Failed to initialize Firebase: {str(e)}")
             self.app = None
             self.is_initialized = False
+
+    @staticmethod
+    def _normalize_data_value(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, bool):
+            return 'true' if value else 'false'
+        if isinstance(value, Number):
+            return str(value)
+        if isinstance(value, (dict, list, tuple)):
+            try:
+                return json.dumps(value, separators=(',', ':'), ensure_ascii=False)
+            except Exception:
+                return str(value)
+        return str(value)
+
+    @classmethod
+    def _normalize_data_payload(cls, data):
+        if not data:
+            return {}
+
+        normalized = {}
+        for key, value in data.items():
+            if key is None or value is None:
+                continue
+
+            normalized_key = str(key)
+            normalized_value = cls._normalize_data_value(value)
+            if normalized_value is None:
+                continue
+            normalized[normalized_key] = normalized_value
+
+        return normalized
     
     def send_notification(self, fcm_token, title, body, data=None):
         """إرسال إشعار لـ FCM token واحد"""
@@ -77,12 +113,13 @@ class FirebaseService:
             return False
         
         try:
+            normalized_data = self._normalize_data_payload(data)
             message = messaging.Message(
                 notification=messaging.Notification(
                     title=title,
                     body=body
                 ),
-                data=data or {},
+                data=normalized_data,
                 token=fcm_token
             )
             
@@ -101,12 +138,13 @@ class FirebaseService:
             return False
         
         try:
+            normalized_data = self._normalize_data_payload(data)
             message = messaging.MulticastMessage(
                 notification=messaging.Notification(
                     title=title,
                     body=body
                 ),
-                data=data or {},
+                data=normalized_data,
                 tokens=fcm_tokens
             )
             
@@ -125,12 +163,13 @@ class FirebaseService:
             return False
         
         try:
+            normalized_data = self._normalize_data_payload(data)
             message = messaging.Message(
                 notification=messaging.Notification(
                     title=title,
                     body=body
                 ),
-                data=data or {},
+                data=normalized_data,
                 topic=topic
             )
             

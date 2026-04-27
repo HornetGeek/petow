@@ -12,7 +12,10 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+import logging
+import dj_database_url
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,9 +28,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-your-secret-key-here'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
+logger = logging.getLogger(__name__)
 
 
 # Application definition
@@ -39,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.gis',
     'django.contrib.sites',
     
     # Third party apps
@@ -46,6 +51,7 @@ INSTALLED_APPS = [
     'rest_framework.authtoken',
     'corsheaders',
     'django_filters',
+    'storages',
     
     # Local apps
     'accounts',
@@ -87,14 +93,18 @@ WSGI_APPLICATION = 'patmatch_backend.wsgi.application'
 
 
 # Database
-# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
+# Default to the Postgres service defined in docker-compose.
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.config(
+        default="postgresql://petmatch_user:petmatch_password@db:5432/petmatch",
+        conn_max_age=600,
+    )
 }
+
+default_engine = DATABASES['default'].get('ENGINE')
+if default_engine not in {'django.db.backends.postgresql', 'django.contrib.gis.db.backends.postgis'}:
+    raise RuntimeError("DATABASE_URL must point to a PostgreSQL/PostGIS instance for staging/docker setups.")
+DATABASES['default']['ENGINE'] = 'django.contrib.gis.db.backends.postgis'
 
 
 # Password validation
@@ -134,8 +144,144 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+
+
+def _ensure_trailing_slash(value: str) -> str:
+    normalized = (value or '').strip()
+    if not normalized:
+        return normalized
+    return normalized if normalized.endswith('/') else f'{normalized}/'
+
+
+def _normalize_domain_to_url(value: str) -> str:
+    normalized = (value or '').strip()
+    if not normalized:
+        return ''
+    if normalized.startswith('http://') or normalized.startswith('https://'):
+        return normalized
+    return f'https://{normalized}'
+
+
+USE_HETZNER_OBJECT_STORAGE = config('USE_HETZNER_OBJECT_STORAGE', default=False, cast=bool)
+HETZNER_S3_ENDPOINT_URL = config('HETZNER_S3_ENDPOINT_URL', default='').strip()
+HETZNER_S3_REGION = config('HETZNER_S3_REGION', default='').strip()
+HETZNER_S3_ACCESS_KEY = config('HETZNER_S3_ACCESS_KEY', default='').strip()
+HETZNER_S3_SECRET_KEY = config('HETZNER_S3_SECRET_KEY', default='').strip()
+HETZNER_MEDIA_BUCKET = config('HETZNER_MEDIA_BUCKET', default='').strip()
+HETZNER_MEDIA_CUSTOM_DOMAIN = config('HETZNER_MEDIA_CUSTOM_DOMAIN', default='').strip()
+HETZNER_MEDIA_URL = config('HETZNER_MEDIA_URL', default='').strip()
+
+# Static bucket vars are defined for phase-2 rollout and intentionally unused in this phase.
+HETZNER_STATIC_BUCKET = config('HETZNER_STATIC_BUCKET', default='').strip()
+HETZNER_STATIC_CUSTOM_DOMAIN = config('HETZNER_STATIC_CUSTOM_DOMAIN', default='').strip()
+
+if USE_HETZNER_OBJECT_STORAGE:
+    required_values = {
+        'HETZNER_S3_ENDPOINT_URL': HETZNER_S3_ENDPOINT_URL,
+        'HETZNER_S3_REGION': HETZNER_S3_REGION,
+        'HETZNER_S3_ACCESS_KEY': HETZNER_S3_ACCESS_KEY,
+        'HETZNER_S3_SECRET_KEY': HETZNER_S3_SECRET_KEY,
+        'HETZNER_MEDIA_BUCKET': HETZNER_MEDIA_BUCKET,
+    }
+    missing = [name for name, value in required_values.items() if not value]
+    if missing:
+        raise RuntimeError(
+            f"USE_HETZNER_OBJECT_STORAGE=true but required vars are missing: {', '.join(missing)}"
+        )
+
+    AWS_ACCESS_KEY_ID = HETZNER_S3_ACCESS_KEY
+    AWS_SECRET_ACCESS_KEY = HETZNER_S3_SECRET_KEY
+    AWS_S3_REGION_NAME = HETZNER_S3_REGION
+    AWS_S3_ENDPOINT_URL = HETZNER_S3_ENDPOINT_URL
+    AWS_STORAGE_BUCKET_NAME = HETZNER_MEDIA_BUCKET
+    AWS_DEFAULT_ACL = 'public-read'
+    AWS_QUERYSTRING_AUTH = False
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
+
+    if HETZNER_MEDIA_CUSTOM_DOMAIN:
+        AWS_S3_CUSTOM_DOMAIN = HETZNER_MEDIA_CUSTOM_DOMAIN
+
+    STORAGES = {
+        'default': {
+            'BACKEND': 'patmatch_backend.storage_backends.HetznerMediaStorage',
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
+
+    media_base_url = HETZNER_MEDIA_URL
+    if not media_base_url and HETZNER_MEDIA_CUSTOM_DOMAIN:
+        media_base_url = _normalize_domain_to_url(HETZNER_MEDIA_CUSTOM_DOMAIN)
+    if not media_base_url:
+        media_base_url = f"{HETZNER_S3_ENDPOINT_URL.rstrip('/')}/{HETZNER_MEDIA_BUCKET}/"
+    MEDIA_URL = _ensure_trailing_slash(media_base_url)
+
+default_notifications_delivery_mode = 'sync' if DEBUG else 'async'
+NOTIFICATIONS_DELIVERY_MODE = config(
+    'NOTIFICATIONS_DELIVERY_MODE',
+    default=default_notifications_delivery_mode,
+).strip().lower()
+if NOTIFICATIONS_DELIVERY_MODE not in {'sync', 'async'}:
+    raise RuntimeError("NOTIFICATIONS_DELIVERY_MODE must be either 'sync' or 'async'")
+
+REDIS_URL = config('REDIS_URL', default='redis://redis:6379/0').strip()
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=REDIS_URL).strip() or REDIS_URL
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=CELERY_BROKER_URL).strip() or CELERY_BROKER_URL
+CELERY_NOTIFICATION_QUEUE = config('CELERY_NOTIFICATION_QUEUE', default='notifications').strip() or 'notifications'
+CELERY_NOTIFICATION_MAX_ATTEMPTS = config('CELERY_NOTIFICATION_MAX_ATTEMPTS', default=8, cast=int)
+CELERY_NOTIFICATION_RETRY_BASE_SECONDS = config('CELERY_NOTIFICATION_RETRY_BASE_SECONDS', default=5, cast=int)
+CELERY_NOTIFICATION_RETRY_MAX_SECONDS = config('CELERY_NOTIFICATION_RETRY_MAX_SECONDS', default=900, cast=int)
+CELERY_NOTIFICATION_STUCK_SECONDS = config('CELERY_NOTIFICATION_STUCK_SECONDS', default=900, cast=int)
+CELERY_NOTIFICATION_SWEEP_SECONDS = config('CELERY_NOTIFICATION_SWEEP_SECONDS', default=60, cast=int)
+CELERY_NOTIFICATION_SWEEP_LIMIT = config('CELERY_NOTIFICATION_SWEEP_LIMIT', default=200, cast=int)
+NOTIFICATION_EXPERIMENT_PHASE = config('NOTIFICATION_EXPERIMENT_PHASE', default=10, cast=int)
+NOTIFICATION_PUSH_BATCH_SIZE = config('NOTIFICATION_PUSH_BATCH_SIZE', default=500, cast=int)
+
+CELERY_TASK_DEFAULT_QUEUE = CELERY_NOTIFICATION_QUEUE
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_ROUTES = {
+    'pets.tasks.process_notification_outbox_event': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.sweep_notification_outbox': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.run_lifecycle_engagement_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.run_auto_manage_requests': {'queue': CELERY_NOTIFICATION_QUEUE},
+    'pets.tasks.run_daily_unread_email_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
+}
+CELERY_BEAT_SCHEDULE = {
+    'notification-outbox-sweep': {
+        'task': 'pets.tasks.sweep_notification_outbox',
+        'schedule': CELERY_NOTIFICATION_SWEEP_SECONDS,
+        'kwargs': {'limit': CELERY_NOTIFICATION_SWEEP_LIMIT},
+    },
+    'lifecycle-engagement-reminders-hourly': {
+        'task': 'pets.tasks.run_lifecycle_engagement_reminders',
+        'schedule': crontab(minute=5),
+    },
+    'auto-manage-requests-hourly': {
+        'task': 'pets.tasks.run_auto_manage_requests',
+        'schedule': crontab(minute=10),
+    },
+    'daily-unread-email-reminders': {
+        'task': 'pets.tasks.run_daily_unread_email_reminders',
+        'schedule': crontab(hour=23, minute=30),
+    },
+}
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'patmatch-cache',
+    }
+}
+MAP_MARKERS_CACHE_TTL_SECONDS = config('MAP_MARKERS_CACHE_TTL_SECONDS', default=30, cast=int)
 
 # Allow larger payloads so multi-image uploads don't fail (413 Payload Too Large)
 MAX_UPLOAD_SIZE_MB = 200
@@ -156,9 +302,15 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],
+    'DEFAULT_THROTTLE_RATES': {
+        'google_maps_autocomplete': '60/minute',
+        'google_maps_geocode': '30/minute',
+    },
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20
 }
+
+GOOGLE_MAPS_SERVER_API_KEY = config('GOOGLE_MAPS_SERVER_API_KEY', default='')
 
 # Mobile app invite links
 MOBILE_APP_INVITE_LINK_BASE = os.environ.get('MOBILE_APP_INVITE_LINK_BASE', 'https://app.petmatch.com/invite')
@@ -177,9 +329,6 @@ CORS_ALLOWED_ORIGINS = [
 if os.environ.get('CORS_ALLOWED_ORIGINS'):
     cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS').split(',')
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins]
-    print(f"DEBUG: CORS_ALLOWED_ORIGINS set from environment: {CORS_ALLOWED_ORIGINS}")
-else:
-    print(f"DEBUG: Using default CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
 
 # Ensure CORS is properly configured
 CORS_ALLOW_CREDENTIALS = True
@@ -240,9 +389,6 @@ CSRF_TRUSTED_ORIGINS = [
 if os.environ.get('CSRF_TRUSTED_ORIGINS'):
     csrf_origins = os.environ.get('CSRF_TRUSTED_ORIGINS').split(',')
     CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins]
-    print(f"DEBUG: CSRF_TRUSTED_ORIGINS set from environment: {CSRF_TRUSTED_ORIGINS}")
-else:
-    print(f"DEBUG: Using default CSRF_TRUSTED_ORIGINS: {CSRF_TRUSTED_ORIGINS}")
 
 # Additional CSRF settings
 CSRF_COOKIE_SECURE = False  # Allow HTTP for local development
@@ -276,24 +422,38 @@ FIREBASE_CLIENT_X509_CERT_URL = config('FIREBASE_CLIENT_X509_CERT_URL', default=
 BREVO_API_KEY = config('BREVO_API_KEY', default='')
 BREVO_SMTP_USER = config('BREVO_SMTP_USER', default='')
 BREVO_FROM_EMAIL = config('BREVO_FROM_EMAIL', default='')
-BREVO_FROM_NAME = config('BREVO_FROM_NAME', default='PetMatch')
+BREVO_FROM_NAME = config('BREVO_FROM_NAME', default='Petow')
 BREVO_SERVER_EMAIL = config('BREVO_SERVER_EMAIL', default='')
+BREVO_REQUEST_TIMEOUT_SECONDS = config('BREVO_REQUEST_TIMEOUT_SECONDS', default=10, cast=float)
+BREVO_MAX_RETRIES = config('BREVO_MAX_RETRIES', default=2, cast=int)
+BREVO_RETRY_BACKOFF_SECONDS = config('BREVO_RETRY_BACKOFF_SECONDS', default=0.75, cast=float)
+EMAIL_REMINDER_UNSUBSCRIBE_URL = config(
+    'EMAIL_REMINDER_UNSUBSCRIBE_URL',
+    default='https://petow.app/profile/notifications',
+)
+EMAIL_REMINDER_FAILURE_ALERT_THRESHOLD = config(
+    'EMAIL_REMINDER_FAILURE_ALERT_THRESHOLD',
+    default=0.4,
+    cast=float,
+)
 
 # Email Configuration using Brevo API (more reliable than SMTP)
 if BREVO_API_KEY and BREVO_FROM_EMAIL:
     EMAIL_BACKEND = 'accounts.brevo_email_backend.BrevoEmailBackend'
     DEFAULT_FROM_EMAIL = BREVO_FROM_EMAIL
     SERVER_EMAIL = BREVO_SERVER_EMAIL
-    print("✅ Using Brevo API email backend")
 else:
     # Fallback to console backend for development
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-    print("WARNING: Brevo email credentials not found. Using console email backend.")
+    logger.warning("Brevo email credentials not found. Using console email backend.")
 
 # Brevo API Configuration (for advanced features like campaigns)
 BREVO_CONFIG = {
     'api_key': BREVO_API_KEY,
     'base_url': 'https://api.brevo.com/v3',
+    'request_timeout_seconds': BREVO_REQUEST_TIMEOUT_SECONDS,
+    'max_retries': BREVO_MAX_RETRIES,
+    'retry_backoff_seconds': BREVO_RETRY_BACKOFF_SECONDS,
 }
 
 # Infobip SMS configuration

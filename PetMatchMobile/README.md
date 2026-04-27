@@ -29,7 +29,7 @@
 
 ### المتطلبات
 
-- Node.js >= 18
+- Node.js >= 20.19.4
 - React Native CLI
 - Android Studio (للتطوير على Android)
 - Xcode (للتطوير على iOS)

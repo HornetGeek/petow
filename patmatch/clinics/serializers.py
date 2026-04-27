@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.gis.geos import Point
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -60,6 +61,19 @@ def _calculate_age_text(date_of_birth):
     return ' '.join(parts)
 
 
+def _point_from_coordinates(latitude, longitude):
+    if latitude in (None, '') or longitude in (None, ''):
+        return None
+    try:
+        lat = float(latitude)
+        lng = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if lat < -90 or lat > 90 or lng < -180 or lng > 180:
+        return None
+    return Point(lng, lat, srid=4326)
+
+
 class ClinicSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
@@ -69,6 +83,24 @@ class ClinicSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'is_active', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        if 'latitude' in validated_data or 'longitude' in validated_data:
+            lat = validated_data.get('latitude')
+            lng = validated_data.get('longitude')
+            validated_data['location_point'] = _point_from_coordinates(lat, lng)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        location_point = validated_data.get('location_point')
+        if location_point is not None:
+            validated_data['latitude'] = location_point.y
+            validated_data['longitude'] = location_point.x
+        elif 'latitude' in validated_data or 'longitude' in validated_data:
+            lat = validated_data.get('latitude', instance.latitude)
+            lng = validated_data.get('longitude', instance.longitude)
+            validated_data['location_point'] = _point_from_coordinates(lat, lng)
+        return super().update(instance, validated_data)
 
 
 class ClinicPublicSerializer(serializers.ModelSerializer):
@@ -90,7 +122,8 @@ class ClinicListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'email', 'website',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
-            'latitude', 'longitude', 'is_active', 'has_dashboard', 'service_categories'
+            'latitude', 'longitude', 'is_active', 'has_dashboard', 'service_categories',
+            'created_at', 'updated_at'
         ]
         read_only_fields = fields
 
@@ -109,6 +142,70 @@ class ClinicListSerializer(serializers.ModelSerializer):
             return []
         ordered = [choice[0] for choice in ClinicService.CATEGORY_CHOICES]
         return [key for key in ordered if key in categories]
+
+
+class ClinicMapPointSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for clinic map markers."""
+    service_categories = serializers.SerializerMethodField()
+    distance = serializers.SerializerMethodField()
+    distance_display = serializers.SerializerMethodField()
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+
+    def _distance_km(self, obj):
+        distance_value = getattr(obj, 'map_distance_m', None)
+        if distance_value is None:
+            return None
+        try:
+            distance_meters = float(getattr(distance_value, 'm', distance_value))
+        except (TypeError, ValueError):
+            return None
+        return round(distance_meters / 1000.0, 2)
+
+    def get_distance(self, obj):
+        return self._distance_km(obj)
+
+    def get_distance_display(self, obj):
+        distance_km = self._distance_km(obj)
+        if distance_km is None:
+            return None
+        if distance_km < 1:
+            return f"{int(distance_km * 1000)} متر"
+        if distance_km < 100:
+            return f"{distance_km:.1f} كم"
+        return f"{int(distance_km)} كم"
+
+    def get_latitude(self, obj):
+        value = getattr(obj, 'map_latitude', None)
+        if value is None:
+            value = obj.latitude
+        return float(value) if value is not None else None
+
+    def get_longitude(self, obj):
+        value = getattr(obj, 'map_longitude', None)
+        if value is None:
+            value = obj.longitude
+        return float(value) if value is not None else None
+
+    def get_service_categories(self, obj):
+        services = getattr(obj, '_prefetched_objects_cache', {}).get('services_list')
+        if services is None:
+            services = obj.services_list.filter(is_active=True).only('category')
+        categories = {service.category for service in services if service.category}
+        if not categories:
+            return []
+        ordered = [choice[0] for choice in ClinicService.CATEGORY_CHOICES]
+        return [key for key in ordered if key in categories]
+
+    class Meta:
+        model = Clinic
+        fields = [
+            'id', 'name', 'address', 'city', 'phone', 'email',
+            'logo', 'opening_hours', 'services', 'storefront_primary_color',
+            'latitude', 'longitude', 'is_active',
+            'service_categories', 'distance', 'distance_display',
+        ]
+        read_only_fields = fields
 
 
 class ClinicStaffSerializer(serializers.ModelSerializer):

@@ -9,6 +9,7 @@ urlpatterns = [
     
     # الحيوانات
     path('', views.PetListCreateView.as_view(), name='pet-list-create'),
+    path('map/markers/', views.PetMapMarkersView.as_view(), name='pet-map-markers'),
     path('<int:pk>/', views.PetDetailView.as_view(), name='pet-detail'),
     path('my/', views.MyPetsView.as_view(), name='my-pets'),
     
@@ -29,6 +30,8 @@ urlpatterns = [
     path('notifications/unread-count/', views.get_unread_notifications_count, name='unread-notifications-count'),
     path('notifications/mark-chat-read/', views.mark_chat_notifications_as_read, name='mark-chat-notifications-read'),
     path('notifications/chat-message/', views.send_chat_message_notification, name='send-chat-message-notification'),
+    path('notifications/preferences/', views.notification_preferences, name='notification-preferences'),
+    path('notifications/events/', views.create_notification_interaction_event, name='notification-events'),
     
     # المفضلات
     path('favorites/', views.FavoriteListCreateView.as_view(), name='favorite-list-create'),

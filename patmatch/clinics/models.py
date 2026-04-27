@@ -2,6 +2,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 from django.utils import timezone
 
 
@@ -35,6 +36,7 @@ class Clinic(models.Model):
     # معلومات إضافية
     latitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
 
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -750,6 +752,8 @@ class VeterinaryAppointment(models.Model):
     APPOINTMENT_TYPE_CHOICES = [
         ('checkup', 'فحص دوري'),
         ('vaccination', 'تطعيم'),
+        ('dental', 'تنظيف أسنان'),
+        ('follow-up', 'متابعة'),
         ('breeding_consultation', 'استشارة تزاوج'),
         ('pregnancy_check', 'فحص حمل'),
         ('emergency', 'طوارئ'),
