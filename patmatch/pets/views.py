@@ -3,6 +3,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
 from rest_framework.views import APIView
+import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
@@ -320,9 +321,13 @@ class PetMapMarkersView(APIView):
                 queryset = queryset.exclude(status__in=excluded)
 
         if pet_type:
-            queryset = queryset.filter(pet_type=pet_type)
+            pet_types = [v.strip() for v in pet_type.split(',') if v.strip()]
+            if pet_types:
+                queryset = queryset.filter(pet_type__in=pet_types)
         if gender:
-            queryset = queryset.filter(gender=gender)
+            genders = [v.strip() for v in gender.split(',') if v.strip()]
+            if genders:
+                queryset = queryset.filter(gender__in=genders)
         if search_term:
             queryset = queryset.filter(
                 Q(name__icontains=search_term) |
@@ -461,6 +466,25 @@ class BreedListView(generics.ListAPIView):
     permission_classes = []
     authentication_classes = []  # No authentication needed
 
+class PetFilterSet(django_filters.FilterSet):
+    """
+    Pet list filtering with multi-value support.
+
+    `pet_type` and `gender` accept either a single value (`?pet_type=dogs`)
+    or a comma-separated list (`?pet_type=dogs,cats`) — both shapes resolve
+    to a `__in` lookup so the existing single-value clients keep working.
+    `status` and `breed` stay single-value to preserve the previous semantics.
+    """
+
+    pet_type = django_filters.BaseInFilter(field_name='pet_type', lookup_expr='in')
+    gender = django_filters.BaseInFilter(field_name='gender', lookup_expr='in')
+    hosting_preference = django_filters.CharFilter(field_name='hosting_preference')
+
+    class Meta:
+        model = Pet
+        fields = ['pet_type', 'gender', 'hosting_preference', 'status', 'breed']
+
+
 class PetListCreateView(generics.ListCreateAPIView):
     """قائمة الحيوانات وإنشاء حيوان جديد"""
     queryset = Pet.objects.all()
@@ -496,7 +520,7 @@ class PetListCreateView(generics.ListCreateAPIView):
         return response
     # نُحافظ على البحث والفلترة، ونُدير الترتيب يدوياً لدعم الأقرب أولاً افتراضياً
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['pet_type', 'gender', 'status', 'breed']
+    filterset_class = PetFilterSet
     search_fields = ['name', 'breed__name', 'location', 'description']
     ordering_fields = ['created_at', 'age_months', 'breeding_fee']
     # اترك ترتيب افتراضي فارغاً ليتم استخدام ترتيب النموذج أو ما نحدده يدوياً
