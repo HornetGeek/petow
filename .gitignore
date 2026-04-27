@@ -1,4 +1,5 @@
 # Firebase Service Account Key
+# Secrets & credentials
 petmatch-sdk.json
 
 # Environment variables
@@ -6,6 +7,59 @@ petmatch-sdk.json
 .env.local
 .env.production
 
+# Dependency folders
+node_modules/
+**/node_modules/
+
+# Package manager logs
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+.next/
+.expo/
+.expo-shared/
+.turbo/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.hprof
+
+# Coverage & reports
+coverage/
+*.lcov
+
 # Local databases
 *.sqlite3
 patmatch/db.sqlite3
+
+# Secrets — never commit
+cloudflare-cert.txt
+cloudflare-key.txt
+*.pem
+*.key
+*.cert
+GoogleService-Info.plist
+
+# Local clutter
+.codex
+tmp/
+*.backup
+*.bak
+Untitled.*
+5992279603801689004.jpg
+
+# Worktree directory (project-local fallback)
+.worktrees/

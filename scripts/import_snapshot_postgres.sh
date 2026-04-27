@@ -111,16 +111,110 @@ if [[ -z "$(compose ps -q "$SERVICE")" ]]; then
   compose up -d "$SERVICE"
 fi
 
+CONTAINER_ID="$(compose ps -q "$SERVICE" | head -n 1 | tr -d '\r')"
+if [[ -z "$CONTAINER_ID" ]]; then
+  echo "Could not resolve running container id for service '$SERVICE'." >&2
+  exit 1
+fi
+
 CONTAINER_SNAPSHOT="/tmp/petow_snapshot.json.gz"
 if [[ "$SNAPSHOT_PATH" == *.json ]]; then
   CONTAINER_SNAPSHOT="/tmp/petow_snapshot.json"
 fi
+CONTAINER_SNAPSHOT_LOAD="/tmp/petow_snapshot.reordered.json"
 
 echo "Copying snapshot into container..."
-compose cp "$SNAPSHOT_PATH" "${SERVICE}:${CONTAINER_SNAPSHOT}"
+docker cp "$SNAPSHOT_PATH" "${CONTAINER_ID}:${CONTAINER_SNAPSHOT}"
 
 echo "Running migrations before import..."
 compose exec -T "$SERVICE" python manage.py migrate --noinput
+
+echo "Reordering fixture by model dependencies for FK-safe load..."
+compose exec -T -e SNAPSHOT_IN="$CONTAINER_SNAPSHOT" -e SNAPSHOT_OUT="$CONTAINER_SNAPSHOT_LOAD" "$SERVICE" python - <<'PY'
+import gzip
+import json
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "patmatch_backend.settings")
+import django
+django.setup()
+from django.apps import apps
+
+snapshot_in = os.environ["SNAPSHOT_IN"]
+snapshot_out = os.environ["SNAPSHOT_OUT"]
+
+def read_fixture(path):
+    if path.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+def write_fixture(path, payload):
+    if path.endswith(".gz"):
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+            return
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+data = read_fixture(snapshot_in)
+for idx, obj in enumerate(data):
+    obj["_original_index"] = idx
+
+models_present = sorted({obj["model"] for obj in data})
+deps = {model_label: set() for model_label in models_present}
+
+for model_label in models_present:
+    try:
+        app_label, model_name = model_label.split(".", 1)
+        model = apps.get_model(app_label, model_name)
+    except Exception:
+        continue
+
+    for field in model._meta.get_fields():
+        if not getattr(field, "is_relation", False):
+            continue
+        if getattr(field, "auto_created", False):
+            continue
+        if getattr(field, "many_to_many", False):
+            continue
+        if getattr(field, "one_to_many", False):
+            continue
+
+        related = field.related_model._meta.label_lower
+        if related in deps and related != model_label:
+            deps[model_label].add(related)
+
+remaining = {label: set(values) for label, values in deps.items()}
+ordered_models = []
+ready = sorted([label for label, values in remaining.items() if not values])
+
+while ready:
+    current = ready.pop(0)
+    if current in ordered_models:
+        continue
+    ordered_models.append(current)
+    for label in sorted(remaining):
+        if current in remaining[label]:
+            remaining[label].remove(current)
+            if not remaining[label] and label not in ordered_models and label not in ready:
+                ready.append(label)
+    ready.sort()
+
+unresolved = [label for label in models_present if label not in ordered_models]
+ordered_models.extend(unresolved)
+rank = {label: idx for idx, label in enumerate(ordered_models)}
+
+data.sort(key=lambda obj: (rank.get(obj["model"], len(rank)), obj["_original_index"]))
+for obj in data:
+    obj.pop("_original_index", None)
+
+write_fixture(snapshot_out, data)
+print(
+    f"Reordered fixture: models={len(models_present)} objects={len(data)} unresolved_cycles={len(unresolved)}"
+)
+PY
 
 echo "Truncating target PostgreSQL tables (except django_migrations, spatial_ref_sys)..."
 compose exec -T "$SERVICE" python - <<'PY'
@@ -132,8 +226,8 @@ from django.conf import settings
 from django.db import connection
 
 engine = settings.DATABASES["default"]["ENGINE"]
-if "postgresql" not in engine:
-    raise SystemExit(f"Target DB must be PostgreSQL. Found: {engine}")
+if not ("postgresql" in engine or "postgis" in engine):
+    raise SystemExit(f"Target DB must be PostgreSQL/PostGIS. Found: {engine}")
 
 excluded = {"django_migrations", "spatial_ref_sys"}
 
@@ -152,12 +246,132 @@ with connection.cursor() as cursor:
 print(f"Truncated {len(tables)} tables.")
 PY
 
+echo "Normalizing UUID column types to match Django models..."
+compose exec -T "$SERVICE" python - <<'PY'
+import os
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "patmatch_backend.settings")
+import django
+django.setup()
+
+from django.apps import apps
+from django.db import connection, models
+
+text_types = {"text", "character varying", "character"}
+text_udts = {"text", "varchar", "bpchar"}
+
+normalized = 0
+skipped = 0
+
+with connection.cursor() as cursor:
+    for model in apps.get_models():
+        if model._meta.proxy or not model._meta.managed:
+            continue
+
+        table_name = model._meta.db_table
+        for field in model._meta.local_fields:
+            if not isinstance(field, models.UUIDField):
+                continue
+
+            column_name = field.column
+            cursor.execute(
+                """
+                SELECT data_type, udt_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = %s
+                  AND column_name = %s
+                """,
+                [table_name, column_name],
+            )
+            row = cursor.fetchone()
+            if not row:
+                skipped += 1
+                continue
+
+            data_type, udt_name = row
+            if data_type == "uuid" or udt_name == "uuid":
+                continue
+
+            if data_type in text_types or udt_name in text_udts:
+                sql = (
+                    f'ALTER TABLE "{table_name}" '
+                    f'ALTER COLUMN "{column_name}" TYPE uuid '
+                    f'USING NULLIF("{column_name}"::text, \'\')::uuid'
+                )
+                cursor.execute(sql)
+                normalized += 1
+            else:
+                print(
+                    f"Skipped non-text UUID mismatch {table_name}.{column_name}: "
+                    f"data_type={data_type}, udt_name={udt_name}"
+                )
+                skipped += 1
+
+print(f"UUID normalization completed: normalized={normalized}, skipped={skipped}")
+PY
+
 echo "Loading snapshot fixture..."
-compose exec -T "$SERVICE" python manage.py loaddata "$CONTAINER_SNAPSHOT"
+compose exec -T -e SNAPSHOT_LOAD="$CONTAINER_SNAPSHOT_LOAD" "$SERVICE" python - <<'PY'
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "patmatch_backend.settings")
+import django
+django.setup()
+
+from django.core.management import call_command
+from django.db.models.signals import m2m_changed, post_delete, post_save, pre_delete, pre_save
+
+snapshot = os.environ["SNAPSHOT_LOAD"]
+signals = [pre_save, post_save, pre_delete, post_delete, m2m_changed]
+saved_receivers = {sig: list(sig.receivers) for sig in signals}
+
+for sig in signals:
+    sig.receivers = []
+
+try:
+    call_command("loaddata", snapshot, verbosity=1)
+finally:
+    for sig in signals:
+        sig.receivers = saved_receivers[sig]
+
+print("Fixture loaded successfully with model signals disabled during import.")
+PY
 
 echo "Resetting sequences..."
-compose exec -T "$SERVICE" sh -lc \
-  "python manage.py sqlsequencereset accounts pets clinics auth authtoken | python manage.py dbshell"
+compose exec -T "$SERVICE" python - <<'PY'
+import io
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "patmatch_backend.settings")
+import django
+django.setup()
+
+from django.core.management import call_command
+from django.db import connection
+
+buffer = io.StringIO()
+call_command(
+    "sqlsequencereset",
+    "accounts",
+    "pets",
+    "clinics",
+    "auth",
+    "authtoken",
+    stdout=buffer,
+)
+
+sql_batch = buffer.getvalue().strip()
+if not sql_batch:
+    print("No sequence reset SQL generated.")
+    raise SystemExit(0)
+
+statements = [stmt.strip() for stmt in sql_batch.split(";") if stmt.strip()]
+with connection.cursor() as cursor:
+    for stmt in statements:
+        cursor.execute(stmt)
+
+print(f"Applied {len(statements)} sequence reset statements.")
+PY
 
 if [[ $REBUILD_GEOMETRY -eq 1 ]]; then
   echo "Rebuilding derived geometry fields from latitude/longitude..."

@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { requestNotificationPermissionWithUX } from '../services/notifications';
+import AppIcon from './icons/AppIcon';
 
 interface NotificationPermissionModalProps {
   visible: boolean;
@@ -24,6 +25,12 @@ const NotificationPermissionModal: React.FC<NotificationPermissionModalProps> = 
   onPermissionGranted,
 }) => {
   const [isRequesting, setIsRequesting] = useState(false);
+  const benefits = [
+    { icon: 'paw' as const, text: 'العثور على حيوان أليف مناسب' },
+    { icon: 'chat' as const, text: 'وصول رسائل جديدة' },
+    { icon: 'heart' as const, text: 'إعجاب أحدهم بحيوانك الأليف' },
+    { icon: 'calendar' as const, text: 'تذكيرات مهمة للعناية' },
+  ];
 
   const handleRequestPermission = async () => {
     setIsRequesting(true);
@@ -37,11 +44,11 @@ const NotificationPermissionModal: React.FC<NotificationPermissionModalProps> = 
         onClose();
       } else {
         // Permission denied - provide more specific guidance
-                  Alert.alert(
-            '⚠️ تفعيل الإشعارات يدوياً',
-            Platform.OS === 'android' 
-              ? '🔧 لتفعيل الإشعارات يدوياً:\n\n📱 الطريقة الأولى:\n1️⃣ اذهب إلى إعدادات الجهاز\n2️⃣ ابحث عن "التطبيقات" أو "Apps"\n3️⃣ اختر "PetMatch"\n4️⃣ اضغط على "الإشعارات" أو "Notifications"\n5️⃣ فعل "السماح بالإشعارات"\n\n⚙️ الطريقة الثانية:\n1️⃣ اضغط "فتح الإعدادات" أدناه\n2️⃣ ابحث عن "الإشعارات"\n3️⃣ فعل جميع أنواع الإشعارات'
-              : '🔧 لتفعيل الإشعارات على iOS:\n\n1️⃣ اذهب إلى إعدادات الجهاز\n2️⃣ اختر "الإشعارات"\n3️⃣ ابحث عن "PetMatch"\n4️⃣ فعل "السماح بالإشعارات"\n5️⃣ اختر نوع الإشعارات المطلوبة',
+        Alert.alert(
+          'تفعيل الإشعارات يدوياً',
+          Platform.OS === 'android'
+            ? 'لتفعيل الإشعارات يدوياً:\n\nالطريقة الأولى:\n1. اذهب إلى إعدادات الجهاز\n2. ابحث عن "التطبيقات" أو "Apps"\n3. اختر "PetMatch"\n4. اضغط على "الإشعارات" أو "Notifications"\n5. فعل "السماح بالإشعارات"\n\nالطريقة الثانية:\n1. اضغط "فتح الإعدادات" أدناه\n2. ابحث عن "الإشعارات"\n3. فعل جميع أنواع الإشعارات'
+            : 'لتفعيل الإشعارات على iOS:\n\n1. اذهب إلى إعدادات الجهاز\n2. اختر "الإشعارات"\n3. ابحث عن "PetMatch"\n4. فعل "السماح بالإشعارات"\n5. اختر نوع الإشعارات المطلوبة',
           [
             {
               text: 'فتح الإعدادات',
@@ -85,7 +92,7 @@ const NotificationPermissionModal: React.FC<NotificationPermissionModalProps> = 
         <View style={styles.modal}>
           {/* Icon */}
           <View style={styles.iconContainer}>
-            <Text style={styles.icon}>🔔</Text>
+            <AppIcon name="bell" size={34} color="#3498DB" />
           </View>
 
           {/* Title */}
@@ -98,10 +105,19 @@ const NotificationPermissionModal: React.FC<NotificationPermissionModalProps> = 
 
           {/* Benefits List */}
           <View style={styles.benefitsList}>
-            <Text style={styles.benefit}>🐾 العثور على حيوان أليف مناسب</Text>
-            <Text style={styles.benefit}>💬 وصول رسائل جديدة</Text>
-            <Text style={styles.benefit}>❤️ إعجاب أحدهم بحيوانك الأليف</Text>
-            <Text style={styles.benefit}>📅 تذكيرات مهمة للعناية</Text>
+            {benefits.map(benefit => (
+              <View key={benefit.text} style={styles.benefitRow}>
+                <View style={styles.benefitIcon}>
+                  <AppIcon
+                    name={benefit.icon}
+                    size={18}
+                    color={benefit.icon === 'heart' ? '#ef476f' : '#3498DB'}
+                    filled={benefit.icon === 'heart'}
+                  />
+                </View>
+                <Text style={styles.benefit}>{benefit.text}</Text>
+              </View>
+            ))}
           </View>
 
           {/* Buttons */}
@@ -112,7 +128,7 @@ const NotificationPermissionModal: React.FC<NotificationPermissionModalProps> = 
               disabled={isRequesting}
             >
               <Text style={styles.allowButtonText}>
-                {isRequesting ? '⏳ جاري التفعيل...' : '✅ السماح بالإشعارات'}
+                {isRequesting ? 'جاري التفعيل...' : 'السماح بالإشعارات'}
               </Text>
             </TouchableOpacity>
 
@@ -127,7 +143,7 @@ const NotificationPermissionModal: React.FC<NotificationPermissionModalProps> = 
 
           {/* Privacy Note */}
           <Text style={styles.privacyNote}>
-            💡 يمكنك تغيير هذا الإعداد لاحقاً من إعدادات التطبيق
+            يمكنك تغيير هذا الإعداد لاحقاً من إعدادات التطبيق
           </Text>
         </View>
       </View>
@@ -160,9 +176,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
-  icon: {
-    fontSize: 40,
-  },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
@@ -180,11 +193,20 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
     marginBottom: 24,
   },
+  benefitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  benefitIcon: {
+    width: 24,
+    alignItems: 'center',
+  },
   benefit: {
     fontSize: 15,
     color: '#34495E',
-    marginBottom: 8,
-    paddingLeft: 8,
+    flex: 1,
   },
   buttonContainer: {
     alignSelf: 'stretch',

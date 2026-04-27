@@ -884,6 +884,8 @@ class ChatRoom(models.Model):
                 if not pet:
                     return {}
                 
+                requester_pet = breeding_request.requester_pet
+                veterinary_clinic = breeding_request.veterinary_clinic
                 return {
                     'chat_id': self.firebase_chat_id,
                     'type': 'breeding',
@@ -892,6 +894,19 @@ class ChatRoom(models.Model):
                         'status': breeding_request.status,
                         'created_at': breeding_request.created_at.isoformat(),
                         'message': breeding_request.message,
+                        # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
+                        'meeting_date': breeding_request.meeting_date.isoformat() if breeding_request.meeting_date else None,
+                        'contact_phone': breeding_request.contact_phone,
+                        'agreed_fee': str(breeding_request.agreed_fee) if breeding_request.agreed_fee else None,
+                        'fee_paid_by': breeding_request.fee_paid_by,
+                        'veterinary_clinic_name': veterinary_clinic.name if veterinary_clinic else None,
+                        'requester_pet': {
+                            'id': requester_pet.id,
+                            'name': requester_pet.name,
+                            'breed_name': requester_pet.breed.name if requester_pet.breed else None,
+                            'pet_type_display': requester_pet.pet_type_display,
+                            'main_image': requester_pet.main_image.url if requester_pet.main_image else None,
+                        } if requester_pet else None,
                     },
                     'pet': {
                         'id': pet.id,
@@ -914,7 +929,7 @@ class ChatRoom(models.Model):
                 pet = adoption_request.pet
                 if not pet:
                     return {}
-                
+
                 return {
                     'chat_id': self.firebase_chat_id,
                     'type': 'adoption',
@@ -923,6 +938,23 @@ class ChatRoom(models.Model):
                         'status': adoption_request.status,
                         'created_at': adoption_request.created_at.isoformat(),
                         'adopter_name': adoption_request.adopter_name,
+                        # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
+                        'adopter_age': adoption_request.adopter_age,
+                        'adopter_phone': adoption_request.adopter_phone,
+                        'housing_type': adoption_request.housing_type,
+                        'family_members': adoption_request.family_members,
+                        'experience_level': adoption_request.experience_level,
+                        'time_availability': adoption_request.time_availability,
+                        'reason_for_adoption': adoption_request.reason_for_adoption,
+                        'feeding_plan': adoption_request.feeding_plan,
+                        'exercise_plan': adoption_request.exercise_plan,
+                        'vet_care_plan': adoption_request.vet_care_plan,
+                        'emergency_plan': adoption_request.emergency_plan,
+                        'notes': adoption_request.notes,
+                        'family_agreement': adoption_request.family_agreement,
+                        'agrees_to_follow_up': adoption_request.agrees_to_follow_up,
+                        'agrees_to_vet_care': adoption_request.agrees_to_vet_care,
+                        'agrees_to_training': adoption_request.agrees_to_training,
                     },
                     'pet': {
                         'id': pet.id,

@@ -7,12 +7,21 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:171353883247:android:a38b78f0aaf2342086439a",
+        "mobilesdk_app_id": "1:171353883247:android:d2fc08466807794986439a",
         "android_client_info": {
-          "package_name": "com.petmatch"
+          "package_name": "com.petmatchmobile"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "171353883247-0b63876o20ee4g3ehe51skqftfo67ahi.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.petmatchmobile",
+            "certificate_hash": "fb9e32ad8a3866c79293e0564b64525c137aebe9"
+          }
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCEUBNAkYdL0_uWztw8UylagwMpZX15R28"
@@ -20,7 +29,16 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "171353883247-0u0t3567pgbb48ijjmif5is0s62h5os4.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "app.petow.petow",
+                "app_store_id": "123456789"
+              }
+            }
+          ]
         }
       }
     }

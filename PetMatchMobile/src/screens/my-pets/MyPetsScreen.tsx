@@ -13,6 +13,7 @@ import {
 import { apiService, Pet } from '../../services/api';
 import PetDetailsScreen from '../pets/PetDetailsScreen';
 import EditPetScreen from '../pets/EditPetScreen';
+import AppIcon from '../../components/icons/AppIcon';
 
 interface MyPetsScreenProps {
   onClose: () => void;
@@ -87,10 +88,10 @@ const MyPetsScreen: React.FC<MyPetsScreenProps> = ({ onClose }) => {
                 Alert.alert('نجح', 'تم حذف الحيوان بنجاح');
                 loadPets(); // Refresh the list
               } else {
-                Alert.alert('خطأ', 'فشل في حذف الحيوان');
+                Alert.alert('خطأ', response.error || 'فشل في حذف الحيوان');
               }
             } catch (error) {
-              Alert.alert('خطأ', 'فشل في حذف الحيوان');
+              Alert.alert('خطأ', error instanceof Error ? error.message : 'فشل في حذف الحيوان');
             }
           }
         },
@@ -119,17 +120,17 @@ const MyPetsScreen: React.FC<MyPetsScreenProps> = ({ onClose }) => {
           <Text style={styles.petType}>{pet.pet_type_display} - {pet.gender_display}</Text>
           <Text style={styles.petStatus}>{pet.status_display}</Text>
         </View>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.editButton}
           onPress={() => showEditPet(pet.id)}
         >
-          <Text style={styles.editButtonText}>✏️</Text>
+          <AppIcon name="edit" size={16} color="#fff" />
         </TouchableOpacity>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.deleteButton}
           onPress={() => deletePet(pet.id, pet.name)}
         >
-          <Text style={styles.deleteButtonText}>🗑️</Text>
+          <AppIcon name="trash" size={16} color="#fff" />
         </TouchableOpacity>
       </TouchableOpacity>
     );

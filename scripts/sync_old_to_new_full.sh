@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 MODE=""
 OLD_HOST=""
 OLD_USER=""
@@ -191,6 +193,23 @@ mkdir -p "$LOCAL_ARTIFACTS_DIR"
 LOG_FILE="$LOCAL_ARTIFACTS_DIR/sync.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+CURRENT_STEP="initialization"
+
+die() {
+  echo "ERROR [${CURRENT_STEP}]: $*" >&2
+  exit 1
+}
+
+on_err() {
+  local exit_code=$?
+  echo "ERROR [${CURRENT_STEP}]: command failed (exit=${exit_code})." >&2
+  echo "ERROR [${CURRENT_STEP}]: failed command: ${BASH_COMMAND}" >&2
+  echo "ERROR [${CURRENT_STEP}]: See log: ${LOG_FILE}" >&2
+  exit "$exit_code"
+}
+
+trap on_err ERR
+
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
@@ -242,6 +261,37 @@ copy_new_to_local() {
   SSHPASS="$NEW_PASSWORD" sshpass -e scp "${NEW_SSH_OPTS[@]}" "${NEW_USER}@${NEW_HOST}:${remote_path}" "$local_path"
 }
 
+local_sha256() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  die "Neither sha256sum nor shasum is available locally."
+}
+
+check_old() {
+  local label="$1"
+  local cmd="$2"
+  log " - old: ${label}"
+  if ! run_old "$cmd"; then
+    die "old preflight failed: ${label}"
+  fi
+}
+
+check_new() {
+  local label="$1"
+  local cmd="$2"
+  log " - new: ${label}"
+  if ! run_new "$cmd"; then
+    die "new preflight failed: ${label}"
+  fi
+}
+
 LOCAL_SNAPSHOT="$LOCAL_ARTIFACTS_DIR/$(basename "$REMOTE_SNAPSHOT")"
 LOCAL_COUNTS="$LOCAL_ARTIFACTS_DIR/$(basename "$REMOTE_COUNTS")"
 LOCAL_COUNTS_AFTER="$LOCAL_ARTIFACTS_DIR/$(basename "$REMOTE_COUNTS_AFTER")"
@@ -251,37 +301,88 @@ if [[ "$MODE" == "final" ]]; then
   log "Ensure writes are frozen on old server BEFORE running this sync."
 fi
 
-log "Preflight: validating remote paths and scripts..."
-run_old "test -d $(q "$OLD_PROJECT_DIR")"
-run_old "test -x $(q "$OLD_PROJECT_DIR/scripts/export_sqlite_snapshot.sh")"
-run_new "test -d $(q "$NEW_PROJECT_DIR")"
-run_new "test -x $(q "$NEW_PROJECT_DIR/scripts/import_snapshot_postgres.sh")"
+CURRENT_STEP="preflight"
+log "Preflight: validating remote paths and dependencies..."
+check_old "project dir exists ($OLD_PROJECT_DIR)" "test -d $(q "$OLD_PROJECT_DIR")"
+check_old "compose file exists ($OLD_COMPOSE_FILE)" "test -f $(q "$OLD_PROJECT_DIR/$OLD_COMPOSE_FILE")"
+check_old "docker compose available" "set -Eeuo pipefail; \
+if docker compose version >/dev/null 2>&1; then true; \
+elif command -v docker-compose >/dev/null 2>&1; then true; \
+else echo \"Neither docker compose nor docker-compose is available on old server.\" >&2; exit 1; fi"
+check_new "project dir exists ($NEW_PROJECT_DIR)" "test -d $(q "$NEW_PROJECT_DIR")"
 
-log "Step 1/5: exporting snapshot on old server..."
+CURRENT_STEP="old_export"
+log "Step 1/5: exporting snapshot on old server (inline)..."
 OLD_EXPORT_CMD="set -Eeuo pipefail; cd $(q "$OLD_PROJECT_DIR"); \
-./scripts/export_sqlite_snapshot.sh --compose-file $(q "$OLD_COMPOSE_FILE") --service $(q "$SERVICE") \
---snapshot $(q "$REMOTE_SNAPSHOT") --counts $(q "$REMOTE_COUNTS")"
+if docker compose version >/dev/null 2>&1; then COMPOSE_BIN='docker compose'; \
+elif command -v docker-compose >/dev/null 2>&1; then COMPOSE_BIN='docker-compose'; \
+else echo \"Neither docker compose nor docker-compose is available on old server.\" >&2; exit 1; fi; \
+CONTAINER_ID=\"\$(\$COMPOSE_BIN -f $(q "$OLD_COMPOSE_FILE") ps -q $(q "$SERVICE") | head -n 1 | tr -d '\r')\"; \
+[ -n \"\$CONTAINER_ID\" ] || { \
+echo \"Service $(q "$SERVICE") is not running on old server.\" >&2; exit 1; }; \
+mkdir -p $(q "$(dirname "$REMOTE_SNAPSHOT")") $(q "$(dirname "$REMOTE_COUNTS")"); \
+CONTAINER_SNAPSHOT_JSON='/tmp/petow_snapshot.json'; \
+CONTAINER_SNAPSHOT_GZ='/tmp/petow_snapshot.json.gz'; \
+CONTAINER_COUNTS_JSON='/tmp/petow_counts.json'; \
+\$COMPOSE_BIN -f $(q "$OLD_COMPOSE_FILE") exec -T $(q "$SERVICE") rm -f \"\$CONTAINER_SNAPSHOT_JSON\" \"\$CONTAINER_SNAPSHOT_GZ\" \"\$CONTAINER_COUNTS_JSON\"; \
+\$COMPOSE_BIN -f $(q "$OLD_COMPOSE_FILE") exec -T $(q "$SERVICE") python manage.py shell -c \
+\"from django.apps import apps; print('yes' if apps.get_model('pets','NotificationOutbox') else 'no')\" >/tmp/petow_has_notificationoutbox.txt 2>/dev/null || true; \
+HAS_OUTBOX=\$(tr -d '\r\n' </tmp/petow_has_notificationoutbox.txt || true); \
+if [ \"\$HAS_OUTBOX\" = \"yes\" ]; then OUTBOX_EXCLUDE='--exclude pets.notificationoutbox'; else OUTBOX_EXCLUDE=''; fi; \
+\$COMPOSE_BIN -f $(q "$OLD_COMPOSE_FILE") exec -T $(q "$SERVICE") python manage.py dumpdata \
+--natural-foreign --natural-primary \
+--exclude sessions.session \
+--exclude admin.logentry \
+\$OUTBOX_EXCLUDE \
+--output \"\$CONTAINER_SNAPSHOT_JSON\"; \
+\$COMPOSE_BIN -f $(q "$OLD_COMPOSE_FILE") exec -T $(q "$SERVICE") gzip -f \"\$CONTAINER_SNAPSHOT_JSON\"; \
+docker cp \"\$CONTAINER_ID:\$CONTAINER_SNAPSHOT_GZ\" $(q "$REMOTE_SNAPSHOT"); \
+\$COMPOSE_BIN -f $(q "$OLD_COMPOSE_FILE") exec -T $(q "$SERVICE") python manage.py shell -c \
+\"import json;from django.apps import apps;targets=['accounts.User','accounts.AccountVerification','pets.Breed','pets.Pet','pets.BreedingRequest','pets.AdoptionRequest','pets.Notification','pets.ChatRoom','clinics.Clinic','clinics.ClinicStaff','clinics.ClinicService','clinics.ClinicProduct','clinics.StorefrontOrder','clinics.StorefrontBooking','authtoken.Token','auth.Group','auth.Permission','contenttypes.ContentType','sites.Site'];out={target: apps.get_model(*target.split('.')).objects.count() for target in targets};open('/tmp/petow_counts.json','w').write(json.dumps(out, sort_keys=True))\"; \
+docker cp \"\$CONTAINER_ID:\$CONTAINER_COUNTS_JSON\" $(q "$REMOTE_COUNTS")"
 run_old "$OLD_EXPORT_CMD"
 
+CURRENT_STEP="download_old_artifacts"
 log "Step 2/5: downloading export artifacts to local..."
 copy_old_to_local "$REMOTE_SNAPSHOT" "$LOCAL_SNAPSHOT"
 copy_old_to_local "$REMOTE_COUNTS" "$LOCAL_COUNTS"
 
+CURRENT_STEP="upload_to_new"
 log "Step 3/5: uploading artifacts to new server..."
 copy_local_to_new "$LOCAL_SNAPSHOT" "$REMOTE_SNAPSHOT"
 copy_local_to_new "$LOCAL_COUNTS" "$REMOTE_COUNTS"
+run_new "mkdir -p $(q "$NEW_PROJECT_DIR/scripts")"
+copy_local_to_new "$SCRIPT_DIR/import_snapshot_postgres.sh" "$NEW_PROJECT_DIR/scripts/import_snapshot_postgres.sh"
+copy_local_to_new "$SCRIPT_DIR/verify_sync_counts.py" "$NEW_PROJECT_DIR/scripts/verify_sync_counts.py"
+run_new "chmod +x $(q "$NEW_PROJECT_DIR/scripts/import_snapshot_postgres.sh")"
+LOCAL_IMPORT_HASH="$(local_sha256 "$SCRIPT_DIR/import_snapshot_postgres.sh")"
+REMOTE_IMPORT_HASH="$(
+  run_new "if command -v sha256sum >/dev/null 2>&1; then sha256sum $(q "$NEW_PROJECT_DIR/scripts/import_snapshot_postgres.sh") | cut -d' ' -f1; \
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 $(q "$NEW_PROJECT_DIR/scripts/import_snapshot_postgres.sh") | cut -d' ' -f1; \
+  else echo ''; fi" | tail -n 1 | tr -d '\r'
+)"
+if [[ -z "$REMOTE_IMPORT_HASH" ]]; then
+  die "Could not compute remote hash for import script on new server."
+fi
+if [[ "$LOCAL_IMPORT_HASH" != "$REMOTE_IMPORT_HASH" ]]; then
+  die "Remote import script hash mismatch after upload."
+fi
+log " - new: import script synced (sha256: $REMOTE_IMPORT_HASH)"
 
+CURRENT_STEP="new_import"
 log "Step 4/5: importing snapshot on new server..."
 NEW_IMPORT_CMD="set -Eeuo pipefail; cd $(q "$NEW_PROJECT_DIR"); \
-./scripts/import_snapshot_postgres.sh --compose-file $(q "$NEW_COMPOSE_FILE") --service $(q "$SERVICE") \
+bash ./scripts/import_snapshot_postgres.sh --compose-file $(q "$NEW_COMPOSE_FILE") --service $(q "$SERVICE") \
 --snapshot $(q "$REMOTE_SNAPSHOT") --counts-reference $(q "$REMOTE_COUNTS") \
 --counts-after $(q "$REMOTE_COUNTS_AFTER") --yes"
 run_new "$NEW_IMPORT_CMD"
 
+CURRENT_STEP="download_new_counts"
 log "Step 5/5: downloading post-import counts to local..."
 copy_new_to_local "$REMOTE_COUNTS_AFTER" "$LOCAL_COUNTS_AFTER"
 
 if [[ $KEEP_ARTIFACTS -ne 1 ]]; then
+  CURRENT_STEP="cleanup"
   log "Cleaning local snapshot (use --keep-artifacts to retain it)..."
   rm -f "$LOCAL_SNAPSHOT"
 fi
