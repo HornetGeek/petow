@@ -85,6 +85,12 @@ if [[ -z "$(compose ps -q "$SERVICE")" ]]; then
   exit 1
 fi
 
+CONTAINER_ID="$(compose ps -q "$SERVICE" | head -n 1 | tr -d '\r')"
+if [[ -z "$CONTAINER_ID" ]]; then
+  echo "Could not resolve running container id for service '$SERVICE'." >&2
+  exit 1
+fi
+
 CONTAINER_SNAPSHOT_JSON="/tmp/petow_snapshot.json"
 CONTAINER_SNAPSHOT_GZ="${CONTAINER_SNAPSHOT_JSON}.gz"
 
@@ -116,7 +122,7 @@ compose exec -T "$SERVICE" python manage.py dumpdata \
 compose exec -T "$SERVICE" gzip -f "$CONTAINER_SNAPSHOT_JSON"
 
 mkdir -p "$(dirname "$SNAPSHOT_PATH")"
-compose cp "${SERVICE}:${CONTAINER_SNAPSHOT_GZ}" "$SNAPSHOT_PATH"
+docker cp "${CONTAINER_ID}:${CONTAINER_SNAPSHOT_GZ}" "$SNAPSHOT_PATH"
 
 echo "Generating counts manifest..."
 mkdir -p "$(dirname "$COUNTS_PATH")"

@@ -120,6 +120,7 @@ npm start
 SECRET_KEY=your_secret_key
 DEBUG=True
 DATABASE_URL=postgresql://user:password@localhost:5432/petmatch
+GOOGLE_MAPS_SERVER_API_KEY=your_server_maps_key
 # Mobile app invites
 MOBILE_APP_INVITE_LINK_BASE=https://app.petmatch.com/invite
 MOBILE_APP_DOWNLOAD_URL=https://app.petmatch.com/download
@@ -127,7 +128,15 @@ MOBILE_APP_DOWNLOAD_URL=https://app.petmatch.com/download
 # Next.js
 NEXT_PUBLIC_API_URL=http://localhost:8000/api
 NEXT_PUBLIC_FIREBASE_API_KEY=your_firebase_key
+NEXT_PUBLIC_GOOGLE_MAPS_JS_API_KEY=your_web_maps_key
+
+# Mobile
+GOOGLE_MAPS_ANDROID_API_KEY=your_android_maps_key
+GOOGLE_MAPS_IOS_API_KEY=your_ios_maps_key
 ```
+
+> راجع `GOOGLE_MAPS_SETUP.md` لخطوات التفعيل وتقييد المفاتيح لكل منصة.
+> في حالات الطوارئ التشغيلية راجع `INCIDENT_RECOVERY_RUNBOOK.md`.
 
 #### قاعدة البيانات
 ```bash
@@ -282,6 +291,7 @@ npm start
 SECRET_KEY=your_secret_key
 DEBUG=True
 DATABASE_URL=postgresql://user:password@localhost:5432/petmatch
+GOOGLE_MAPS_SERVER_API_KEY=your_server_maps_key
 # Mobile app invites
 MOBILE_APP_INVITE_LINK_BASE=https://app.petmatch.com/invite
 MOBILE_APP_DOWNLOAD_URL=https://app.petmatch.com/download
@@ -289,7 +299,15 @@ MOBILE_APP_DOWNLOAD_URL=https://app.petmatch.com/download
 # Next.js
 NEXT_PUBLIC_API_URL=http://localhost:8000/api
 NEXT_PUBLIC_FIREBASE_API_KEY=your_firebase_key
+NEXT_PUBLIC_GOOGLE_MAPS_JS_API_KEY=your_web_maps_key
+
+# Mobile
+GOOGLE_MAPS_ANDROID_API_KEY=your_android_maps_key
+GOOGLE_MAPS_IOS_API_KEY=your_ios_maps_key
 ```
+
+> See `GOOGLE_MAPS_SETUP.md` for API enablement and platform key restriction rules.
+> For production incident response, see `INCIDENT_RECOVERY_RUNBOOK.md`.
 
 #### Database Setup
 ```bash

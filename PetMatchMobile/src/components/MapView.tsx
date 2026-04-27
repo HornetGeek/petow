@@ -1,16 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  Alert,
   ActivityIndicator,
-  Dimensions,
+  Alert,
   PermissionsAndroid,
   Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { WebView } from 'react-native-webview';
 import Geolocation from 'react-native-geolocation-service';
+import MapView, { MapPressEvent, Marker, PROVIDER_GOOGLE, PROVIDER_DEFAULT, Region } from 'react-native-maps';
+
+import { apiService } from '../services/api';
+import { normalizeLatLng } from '../utils/coordinates';
+import AppIcon from './icons/AppIcon';
 
 interface MapViewProps {
   onLocationSelect?: (location: { lat: number; lng: number; name: string }) => void;
@@ -18,230 +22,139 @@ interface MapViewProps {
   height?: number;
 }
 
-const MapViewComponent: React.FC<MapViewProps> = ({ 
-  onLocationSelect, 
+const DEFAULT_LOCATION = { lat: 31.2001, lng: 29.9187 };
+const DEFAULT_DELTA = { latitudeDelta: 0.02, longitudeDelta: 0.02 };
+
+const MapViewComponent: React.FC<MapViewProps> = ({
+  onLocationSelect,
   initialLocation,
-  height = 300 
+  height = 300,
 }) => {
-  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(
-    initialLocation || null
+  const mapRef = useRef<MapView | null>(null);
+  const normalizedInitialLocation = useMemo(
+    () => normalizeLatLng(initialLocation?.lat, initialLocation?.lng),
+    [initialLocation?.lat, initialLocation?.lng],
   );
-  const [isLoading, setIsLoading] = useState(false);
+
+  const [isLoading, setIsLoading] = useState(!normalizedInitialLocation);
   const [locationName, setLocationName] = useState<string>('');
-  const [mapKey, setMapKey] = useState(0); // لإعادة تحميل الخريطة
-  const webViewRef = useRef<WebView>(null);
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(
+    normalizedInitialLocation,
+  );
 
-  // HTML للخريطة باستخدام Leaflet
-  const generateMapHTML = (lat: number, lng: number) => `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <title>Leaflet Map</title>
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-        <style>
-            body { 
-                margin: 0; 
-                padding: 0; 
-                overflow: hidden;
-                touch-action: manipulation;
-            }
-            #map { 
-                height: 100vh; 
-                width: 100vw; 
-                cursor: pointer;
-            }
-            .leaflet-control-custom {
-                background: white !important;
-                border: 2px solid #ccc !important;
-                border-radius: 4px !important;
-                cursor: pointer !important;
-                font-size: 18px !important;
-                text-align: center !important;
-                line-height: 36px !important;
-            }
-        </style>
-    </head>
-    <body>
-        <div id="map"></div>
-        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-        <script>
-            let map, marker;
-            
-            function initMap() {
-                // إنشاء الخريطة
-                map = L.map('map', {
-                    zoomControl: true,
-                    scrollWheelZoom: true,
-                    doubleClickZoom: true,
-                    boxZoom: true,
-                    keyboard: true,
-                    dragging: true,
-                    touchZoom: true
-                }).setView([${lat}, ${lng}], 13);
-                
-                // إضافة طبقة الخريطة
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                    attribution: '© OpenStreetMap contributors',
-                    maxZoom: 19
-                }).addTo(map);
-                
-                // إضافة علامة للموقع
-                marker = L.marker([${lat}, ${lng}]).addTo(map);
-                marker.bindPopup('الموقع المحدد').openPopup();
-                
-                // معالجة النقر على الخريطة
-                map.on('click', function(e) {
-                    try {
-                        const lat = e.latlng.lat;
-                        const lng = e.latlng.lng;
-                        
-                        // إزالة العلامة القديمة
-                        if (marker) {
-                            map.removeLayer(marker);
-                        }
-                        
-                        // إضافة علامة جديدة
-                        marker = L.marker([lat, lng]).addTo(map);
-                        marker.bindPopup('الموقع الجديد').openPopup();
-                        
-                        // إرسال البيانات للتطبيق
-                        if (window.ReactNativeWebView) {
-                            window.ReactNativeWebView.postMessage(JSON.stringify({
-                                type: 'locationSelected',
-                                lat: lat,
-                                lng: lng
-                            }));
-                        }
-                    } catch (error) {
-                        console.error('Error handling map click:', error);
-                    }
-                });
-                
-                // إضافة زر للعودة للموقع الحالي
-                const currentLocationButton = L.control({position: 'topright'});
-                currentLocationButton.onAdd = function(map) {
-                    const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control leaflet-control-custom');
-                    div.style.width = '40px';
-                    div.style.height = '40px';
-                    div.innerHTML = '📍';
-                    div.title = 'موقعي الحالي';
-                    
-                    div.onclick = function(e) {
-                        e.stopPropagation();
-                        if (window.ReactNativeWebView) {
-                            window.ReactNativeWebView.postMessage(JSON.stringify({
-                                type: 'getCurrentLocation'
-                            }));
-                        }
-                    };
-                    
-                    return div;
-                };
-                currentLocationButton.addTo(map);
-                
-                // منع إغلاق الخريطة عند النقر
-                map.getContainer().addEventListener('click', function(e) {
-                    e.stopPropagation();
-                });
-            }
-            
-            // تهيئة الخريطة عند تحميل الصفحة
-            document.addEventListener('DOMContentLoaded', initMap);
-        </script>
-    </body>
-    </html>
-  `;
+  const markerLocation = currentLocation || DEFAULT_LOCATION;
 
-  // الحصول على الموقع الحالي
-  const getCurrentLocation = async () => {
-    try {
-      setIsLoading(true);
-      
-      // التحقق من الأذونات
-      let hasPermission = false;
-      
-      if (Platform.OS === 'android') {
-        const fineLocationGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
-        const coarseLocationGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION);
-        
-        if (fineLocationGranted || coarseLocationGranted) {
-          hasPermission = true;
-        } else {
-          // طلب الأذونات - هذا سيظهر نافذة النظام
-          const result = await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-            {
-              title: 'أذونات الموقع',
-              message: 'يحتاج التطبيق للوصول لموقعك الحالي لعرض الخريطة',
-              buttonNeutral: 'اسألني لاحقاً',
-              buttonNegative: 'رفض',
-              buttonPositive: 'موافق',
-            }
-          );
-          hasPermission = result === PermissionsAndroid.RESULTS.GRANTED;
+  const initialRegion: Region = useMemo(
+    () => ({
+      latitude: markerLocation.lat,
+      longitude: markerLocation.lng,
+      ...DEFAULT_DELTA,
+    }),
+    [markerLocation.lat, markerLocation.lng],
+  );
+
+  const requestLocationPermission = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS === 'ios') {
+      const status = await Geolocation.requestAuthorization('whenInUse');
+      return status === 'granted';
+    }
+
+    const fineLocationGranted = await PermissionsAndroid.check(
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+    );
+    const coarseLocationGranted = await PermissionsAndroid.check(
+      PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
+    );
+    if (fineLocationGranted || coarseLocationGranted) {
+      return true;
+    }
+
+    const result = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      {
+        title: 'أذونات الموقع',
+        message: 'يحتاج التطبيق للوصول لموقعك الحالي لعرض الخريطة',
+        buttonNeutral: 'اسألني لاحقاً',
+        buttonNegative: 'رفض',
+        buttonPositive: 'موافق',
+      },
+    );
+    return result === PermissionsAndroid.RESULTS.GRANTED;
+  }, []);
+
+  const reverseGeocodeAddress = useCallback(async (lat: number, lng: number): Promise<string> => {
+    const fallback = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+    const response = await apiService.mapsReverseGeocode({ lat, lng, language: 'ar' });
+    if (!response.success || !response.data?.address) {
+      return fallback;
+    }
+    return response.data.address;
+  }, []);
+
+  const setLocationAndNotify = useCallback(
+    async (latValue: unknown, lngValue: unknown, notify: boolean = true) => {
+      const normalizedLocation = normalizeLatLng(latValue, lngValue);
+      if (!normalizedLocation) {
+        if (__DEV__) {
+          console.warn('MapViewComponent: ignored invalid coordinates', {
+            lat: latValue,
+            lng: lngValue,
+          });
         }
-      } else {
-        hasPermission = true;
+        return;
       }
 
+      const { lat, lng } = normalizedLocation;
+      const nextLocation = { lat, lng };
+      setCurrentLocation(nextLocation);
+      mapRef.current?.animateToRegion(
+        {
+          latitude: lat,
+          longitude: lng,
+          ...DEFAULT_DELTA,
+        },
+        350,
+      );
+
+      let address = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+      try {
+        address = await reverseGeocodeAddress(lat, lng);
+      } catch (_error) {
+        // keep fallback coordinates when reverse-geocoding fails
+      }
+
+      setLocationName(address);
+      if (notify && onLocationSelect) {
+        onLocationSelect({ lat, lng, name: address });
+      }
+    },
+    [onLocationSelect, reverseGeocodeAddress],
+  );
+
+  const getCurrentLocation = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const hasPermission = await requestLocationPermission();
       if (!hasPermission) {
         Alert.alert(
           'أذونات الموقع مطلوبة',
-          'يحتاج التطبيق للوصول لموقعك لاستخدام ميزة الخريطة. يرجى السماح بالوصول للموقع في إعدادات التطبيق.',
-          [
-            { text: 'موافق', style: 'default' }
-          ]
+          'يرجى السماح بالوصول للموقع من إعدادات التطبيق.',
         );
         setIsLoading(false);
         return;
       }
 
-      // الحصول على الموقع
       Geolocation.getCurrentPosition(
         async (position) => {
           const { latitude, longitude } = position.coords;
-          const newLocation = { lat: latitude, lng: longitude };
-          
-          setCurrentLocation(newLocation);
-          
-          try {
-            // البحث العكسي للحصول على اسم المكان
-            const response = await fetch(
-              `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&accept-language=ar,en`
-            );
-            
-            if (response.ok) {
-              const result = await response.json();
-              const name = result.display_name || `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
-              setLocationName(name);
-              
-              if (onLocationSelect) {
-                onLocationSelect({ lat: latitude, lng: longitude, name });
-              }
-            }
-          } catch (error) {
-            console.error('Error reverse geocoding:', error);
-            const name = `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
-            setLocationName(name);
-            
-            if (onLocationSelect) {
-              onLocationSelect({ lat: latitude, lng: longitude, name });
-            }
-          }
-          
-          // إعادة تحميل الخريطة بالموقع الجديد
-          setMapKey(prev => prev + 1);
+          await setLocationAndNotify(latitude, longitude);
           setIsLoading(false);
         },
         (error) => {
-          console.error('Error getting location:', error);
           let errorMessage = 'تعذر الحصول على الموقع الحالي';
-          
           switch (error.code) {
             case 1:
-              errorMessage = 'تم رفض الوصول للموقع. يرجى السماح بالوصول للموقع في إعدادات التطبيق.';
+              errorMessage = 'تم رفض الوصول للموقع. يرجى السماح بالوصول للموقع من الإعدادات.';
               break;
             case 2:
               errorMessage = 'خطأ في الحصول على الموقع. تأكد من تفعيل خدمة الموقع.';
@@ -249,75 +162,52 @@ const MapViewComponent: React.FC<MapViewProps> = ({
             case 3:
               errorMessage = 'انتهت مهلة الحصول على الموقع. حاول مرة أخرى.';
               break;
+            default:
+              break;
           }
-          
           Alert.alert('خطأ', errorMessage);
           setIsLoading(false);
         },
         {
-          enableHighAccuracy: true,
+          // Casual map viewing doesn't need sub-10m precision; false keeps the
+          // GPS chip from warming up and drops battery cost significantly.
+          enableHighAccuracy: false,
           timeout: 15000,
-          maximumAge: 10000,
-        }
+          maximumAge: 60000,
+        },
       );
-    } catch (error) {
-      console.error('Error getting location:', error);
+    } catch (_error) {
       Alert.alert('خطأ', 'تعذر الحصول على الموقع الحالي');
       setIsLoading(false);
     }
-  };
+  }, [requestLocationPermission, setLocationAndNotify]);
 
-  // معالجة الرسائل من WebView
-  const handleWebViewMessage = (event: any) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      
-      if (data.type === 'locationSelected') {
-        const { lat, lng } = data;
-        const newLocation = { lat, lng };
-        setCurrentLocation(newLocation);
-        
-        // البحث العكسي للحصول على اسم المكان
-        fetch(
-          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=ar,en`
-        )
-        .then(response => response.json())
-        .then(result => {
-          const name = result.display_name || `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-          setLocationName(name);
-          
-          if (onLocationSelect) {
-            onLocationSelect({ lat, lng, name });
-          }
-        })
-        .catch(error => {
-          console.error('Error reverse geocoding:', error);
-          const name = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-          setLocationName(name);
-          
-          if (onLocationSelect) {
-            onLocationSelect({ lat, lng, name });
-          }
-        });
-      } else if (data.type === 'getCurrentLocation') {
-        getCurrentLocation();
+  const handleMapPress = useCallback(
+    async (event: MapPressEvent) => {
+      if (!onLocationSelect) {
+        return;
       }
-    } catch (error) {
-      console.error('Error parsing WebView message:', error);
-    }
-  };
+      const { latitude, longitude } = event.nativeEvent.coordinate;
+      await setLocationAndNotify(latitude, longitude);
+    },
+    [onLocationSelect, setLocationAndNotify],
+  );
 
-  // معالجة أخطاء WebView
-  const handleWebViewError = (error: any) => {
-    console.error('WebView error:', error);
-  };
-
-  // الحصول على الموقع عند تحميل المكون
   useEffect(() => {
-    if (!initialLocation) {
-      getCurrentLocation();
+    if (__DEV__ && initialLocation && !normalizedInitialLocation) {
+      console.warn('MapViewComponent: invalid initialLocation ignored', initialLocation);
     }
-  }, []);
+  }, [initialLocation, normalizedInitialLocation]);
+
+  useEffect(() => {
+    if (normalizedInitialLocation) {
+      setLocationAndNotify(normalizedInitialLocation.lat, normalizedInitialLocation.lng, false).finally(() => {
+        setIsLoading(false);
+      });
+      return;
+    }
+    getCurrentLocation();
+  }, [getCurrentLocation, normalizedInitialLocation, setLocationAndNotify]);
 
   if (isLoading) {
     return (
@@ -328,37 +218,43 @@ const MapViewComponent: React.FC<MapViewProps> = ({
     );
   }
 
-  const mapLat = currentLocation?.lat || 24.7136; // الرياض كموقع افتراضي
-  const mapLng = currentLocation?.lng || 46.6753;
-
   return (
     <View style={[styles.container, { height }]}>
-      <WebView
-        key={mapKey} // إعادة تحميل الخريطة عند تغيير المفتاح
-        ref={webViewRef}
-        source={{ html: generateMapHTML(mapLat, mapLng) }}
-        style={styles.webView}
-        onMessage={handleWebViewMessage}
-        onError={handleWebViewError}
-        javaScriptEnabled={true}
-        domStorageEnabled={true}
-        startInLoadingState={true}
-        scalesPageToFit={true}
-        mixedContentMode="compatibility"
-        allowsInlineMediaPlayback={true}
-        mediaPlaybackRequiresUserAction={false}
-        bounces={false}
-        scrollEnabled={false}
-        showsHorizontalScrollIndicator={false}
-        showsVerticalScrollIndicator={false}
-        onShouldStartLoadWithRequest={() => true}
-      />
-      
-      {locationName && (
-        <View style={styles.locationInfo}>
-          <Text style={styles.locationText}>📍 {locationName}</Text>
-        </View>
+      <MapView
+        ref={mapRef}
+        provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : PROVIDER_DEFAULT}
+        style={styles.map}
+        initialRegion={initialRegion}
+        onPress={handleMapPress}
+      >
+        <Marker
+          coordinate={{ latitude: markerLocation.lat, longitude: markerLocation.lng }}
+          draggable={!!onLocationSelect}
+          tracksViewChanges={false}
+          onDragEnd={async (event) => {
+            if (!onLocationSelect) {
+              return;
+            }
+            const { latitude, longitude } = event.nativeEvent.coordinate;
+            await setLocationAndNotify(latitude, longitude);
+          }}
+        />
+      </MapView>
+
+      {!!onLocationSelect && (
+        <TouchableOpacity style={styles.myLocationButton} onPress={getCurrentLocation}>
+          <AppIcon name="location" size={20} color="#fff" />
+        </TouchableOpacity>
       )}
+
+      {locationName ? (
+        <View style={styles.locationInfo}>
+          <View style={styles.locationRow}>
+            <AppIcon name="location" size={14} color="#02B7B4" />
+            <Text style={styles.locationText}>{locationName}</Text>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 };
@@ -372,7 +268,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     position: 'relative',
   },
-  webView: {
+  map: {
     flex: 1,
   },
   loadingText: {
@@ -381,24 +277,41 @@ const styles = StyleSheet.create({
     color: '#7f8c8d',
     textAlign: 'center',
   },
+  myLocationButton: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#02B7B4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
   locationInfo: {
     position: 'absolute',
     top: 10,
     left: 10,
-    right: 10,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    right: 64,
+    backgroundColor: 'rgba(255, 255, 255, 0.93)',
     padding: 8,
     borderRadius: 8,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    elevation: 2,
+  },
+  locationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   locationText: {
+    flex: 1,
     fontSize: 12,
     color: '#2c3e50',
-    textAlign: 'center',
   },
 });
 

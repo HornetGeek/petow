@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  Linking,
 } from 'react-native';
 import { apiService } from '../../services/api';
 
@@ -28,6 +29,8 @@ interface AppNotification {
   time_ago?: string;
   type_display?: string;
   type?: string; // Backend notification type
+  related_pet?: number;
+  related_breeding_request?: number;
   // Optional targeting fields (backend may provide some of these)
   pet_id?: number;
   pet?: { id?: number };
@@ -36,6 +39,7 @@ interface AppNotification {
   breeding_request_id?: number;
   chat_id?: number;
   chat_firebase_id?: string;
+  deep_link?: string;
   url?: string;
   extra_data?: any; // Backend extra_data field
 }
@@ -54,6 +58,25 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [inviteActionLoading, setInviteActionLoading] = useState<string | null>(null);
   const [handledInvites, setHandledInvites] = useState<Set<string>>(new Set());
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  const stripLeadingEmoji = (text: string) =>
+    text.replace(/^[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u20E3]+\s*/gu, '');
+
+  const trackEventSafe = useCallback(
+    async (
+      eventType: 'opened' | 'actioned' | 'dismissed',
+      notificationId?: number,
+      metadata?: Record<string, any>
+    ) => {
+      try {
+        await apiService.trackNotificationEvent(eventType, 'in_app', notificationId, metadata);
+      } catch (err) {
+        console.warn('Notification event tracking failed', err);
+      }
+    },
+    []
+  );
 
   const loadNotifications = useCallback(async () => {
     try {
@@ -144,7 +167,7 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
 
   const resolveTarget = (n: AppNotification): { kind: 'pet' | 'breeding' | 'chat' | 'url' | 'none'; id?: number; url?: string } => {
     // Handle "حيوان جديد بالقرب منك" notifications specifically
-    if (n.type === 'pet_nearby' || n.title?.includes('حيوان جديد بالقرب منك')) {
+    if (n.type === 'pet_nearby' || n.type === 'adoption_pet_nearby' || n.title?.includes('حيوان جديد بالقرب منك') || n.title?.includes('فرصة تبني قريبة منك')) {
       // Check extra_data for pet_id (backend sends this)
       if (n.extra_data && typeof n.extra_data === 'object' && n.extra_data.pet_id) {
         const petId = typeof n.extra_data.pet_id === 'number' ? n.extra_data.pet_id : parseInt(n.extra_data.pet_id.toString(), 10);
@@ -191,6 +214,11 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
   };
 
   const handleNotificationPress = async (item: AppNotification) => {
+    await trackEventSafe('opened', item.id, {
+      type: item.type,
+      target: item.target_type || null,
+    });
+
     try {
       if (!item.is_read) {
         // Optimistic update
@@ -202,6 +230,15 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
       // ignore
     }
     const target = resolveTarget(item);
+    if (item.deep_link && typeof item.deep_link === 'string' && item.deep_link.startsWith('petow://')) {
+      onClose();
+      try {
+        await Linking.openURL(item.deep_link);
+      } catch (linkErr) {
+        console.warn('Failed to open notification deep link', linkErr);
+      }
+      return;
+    }
     // Navigate based on target
     if (target.kind === 'pet' && typeof target.id === 'number') {
       onClose();
@@ -258,6 +295,11 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
           setError(response.error);
         }
       } else {
+        await trackEventSafe('actioned', item.id, {
+          type: item.type,
+          action,
+          invite_token: token,
+        });
         // Mark invite as handled in local state
         setHandledInvites(prev => new Set(prev).add(token));
         // Optimistically remove the notification once handled
@@ -279,12 +321,202 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
     }
   };
 
+  const parseNumericId = (value: any): number | null => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed.length) {
+        return null;
+      }
+      const asNumber = Number(trimmed);
+      if (Number.isFinite(asNumber)) {
+        return asNumber;
+      }
+    }
+    return null;
+  };
+
+  const resolveAdoptionRequestId = async (item: AppNotification): Promise<number | null> => {
+    const extra = item.extra_data || {};
+    const candidateKeys = ['adoption_request_id', 'adoptionRequestId', 'request_id', 'requestId'];
+
+    for (const key of candidateKeys) {
+      if (key in extra) {
+        const parsed = parseNumericId((extra as any)[key]);
+        if (parsed) {
+          return parsed;
+        }
+      }
+    }
+
+    const direct = parseNumericId((item as any).adoption_request_id);
+    if (direct) {
+      return direct;
+    }
+
+    const petCandidates = [
+      item.pet_id,
+      item.related_pet,
+      extra.pet_id,
+      extra.petId,
+      item.pet?.id,
+    ];
+
+    let petId: number | null = null;
+    for (const candidate of petCandidates) {
+      const parsed = parseNumericId(candidate);
+      if (parsed) {
+        petId = parsed;
+        break;
+      }
+    }
+
+    if (!petId) {
+      return null;
+    }
+
+    try {
+      const adoptionResponse = await apiService.getReceivedAdoptionRequests();
+      if (adoptionResponse.success) {
+        const list = Array.isArray(adoptionResponse.data)
+          ? adoptionResponse.data
+          : Array.isArray((adoptionResponse.data as any)?.results)
+            ? (adoptionResponse.data as any).results
+            : [];
+
+        const match = list.find((req: any) => {
+          const reqPetId = parseNumericId(req?.pet?.id);
+          const status = (req?.status || '').toString().toLowerCase();
+          return reqPetId === petId && status === 'pending';
+        });
+
+        if (match) {
+          const requestId = parseNumericId(match.id);
+          if (requestId) {
+            return requestId;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('resolveAdoptionRequestId error:', err);
+    }
+
+    return null;
+  };
+
+  const handleBreedingAction = async (item: AppNotification, action: 'approve' | 'reject') => {
+    const requestId = parseNumericId(item.related_breeding_request);
+    if (!requestId) {
+      setError('تعذر تحديد طلب التزاوج المرتبط بالإشعار');
+      return;
+    }
+
+    const actionKey = `breeding:${item.id}:${action}`;
+    const actionPrefix = `breeding:${item.id}`;
+    setError(null);
+    setActionLoading(actionKey);
+    try {
+      const response = await apiService.respondToBreedingRequest(
+        requestId,
+        action,
+        action === 'reject' ? 'تم الرفض من شاشة الإشعارات' : undefined
+      );
+
+      if (!response.success) {
+        setError(response.error || 'تعذر تحديث طلب التزاوج');
+        return;
+      }
+
+      await trackEventSafe('actioned', item.id, {
+        type: item.type,
+        action,
+        related_breeding_request: requestId,
+      });
+
+      setNotifications((prev) => prev.filter((n) => n.id !== item.id));
+      if (!item.is_read) {
+        try {
+          await apiService.markNotificationAsRead(item.id);
+          onMarkedAsRead?.();
+        } catch (markErr) {
+          console.warn('Failed to mark breeding notification as read', markErr);
+        }
+      }
+    } catch (err) {
+      console.error('handleBreedingAction error:', err);
+      setError('تعذر تحديث طلب التزاوج');
+    } finally {
+      setActionLoading((current) => (current && current.startsWith(actionPrefix) ? null : current));
+    }
+  };
+
+  const handleAdoptionAction = async (item: AppNotification, action: 'approve' | 'reject') => {
+    setError(null);
+    const actionKey = `adoption:${item.id}:${action}`;
+    const actionPrefix = `adoption:${item.id}`;
+    setActionLoading(actionKey);
+
+    try {
+      let requestId = parseNumericId((item.extra_data || {}).adoption_request_id);
+      if (!requestId) {
+        requestId = await resolveAdoptionRequestId(item);
+      }
+
+      if (!requestId) {
+        setError('تعذر العثور على طلب التبني المرتبط بهذا الإشعار');
+        return;
+      }
+
+      const response = await apiService.respondToAdoptionRequest(
+        requestId,
+        action,
+        action === 'reject' ? 'تم الرفض من شاشة الإشعارات' : undefined
+      );
+
+      if (!response.success) {
+        setError(response.error || 'تعذر تحديث طلب التبني');
+        return;
+      }
+
+      await trackEventSafe('actioned', item.id, {
+        type: item.type,
+        action,
+        adoption_request_id: requestId,
+      });
+
+      setNotifications((prev) => prev.filter((n) => n.id !== item.id));
+      if (!item.is_read) {
+        try {
+          await apiService.markNotificationAsRead(item.id);
+          onMarkedAsRead?.();
+        } catch (markErr) {
+          console.warn('Failed to mark adoption notification as read', markErr);
+        }
+      }
+    } catch (err) {
+      console.error('handleAdoptionAction error:', err);
+      setError('تعذر تحديث طلب التبني');
+    } finally {
+      setActionLoading((current) => (current && current.startsWith(actionPrefix) ? null : current));
+    }
+  };
+
   const renderNotificationCard = (item: AppNotification) => {
     const extra = item.extra_data || {};
     const inviteToken: string | undefined = extra.invite_token || extra.inviteToken;
     const isInvite = item.type === 'clinic_invite' && !!inviteToken;
     const acceptKey = inviteToken ? `${inviteToken}:accept` : null;
     const declineKey = inviteToken ? `${inviteToken}:decline` : null;
+    const breedingAcceptKey = `breeding:${item.id}:approve`;
+    const breedingRejectKey = `breeding:${item.id}:reject`;
+    const adoptionAcceptKey = `adoption:${item.id}:approve`;
+    const adoptionRejectKey = `adoption:${item.id}:reject`;
+    const isBreedingActionable = item.type === 'breeding_request_received' && !!parseNumericId(item.related_breeding_request);
+    const isAdoptionActionable = item.type === 'adoption_request_received';
+    const breedingLoading = actionLoading?.startsWith(`breeding:${item.id}:`) ?? false;
+    const adoptionLoading = actionLoading?.startsWith(`adoption:${item.id}:`) ?? false;
 
     return (
       <TouchableOpacity
@@ -300,7 +532,7 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
       {item.type_display ? (
         <Text style={styles.notificationType}>{item.type_display}</Text>
       ) : null}
-      <Text style={styles.notificationMessage}>{item.message}</Text>
+      <Text style={styles.notificationMessage}>{stripLeadingEmoji(item.message)}</Text>
       {isInvite ? (
         <View style={styles.inviteActions}>
           <TouchableOpacity
@@ -318,6 +550,62 @@ const NotificationListScreen: React.FC<NotificationListScreenProps> = ({
             activeOpacity={0.8}
           >
             <Text style={styles.inviteButtonText}>قبول</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {isBreedingActionable ? (
+        <View style={styles.notificationActions}>
+          <TouchableOpacity
+            style={[styles.notificationActionButton, styles.notificationActionDecline, breedingLoading && styles.notificationActionButtonDisabled]}
+            onPress={() => handleBreedingAction(item, 'reject')}
+            disabled={breedingLoading}
+            activeOpacity={0.85}
+          >
+            {actionLoading === breedingRejectKey ? (
+              <ActivityIndicator size="small" color="#c0392b" />
+            ) : (
+              <Text style={[styles.notificationActionText, styles.notificationActionTextDecline]}>رفض</Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.notificationActionButton, styles.notificationActionAccept, breedingLoading && styles.notificationActionButtonDisabled]}
+            onPress={() => handleBreedingAction(item, 'approve')}
+            disabled={breedingLoading}
+            activeOpacity={0.85}
+          >
+            {actionLoading === breedingAcceptKey ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.notificationActionText}>قبول</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {isAdoptionActionable ? (
+        <View style={styles.notificationActions}>
+          <TouchableOpacity
+            style={[styles.notificationActionButton, styles.notificationActionDecline, adoptionLoading && styles.notificationActionButtonDisabled]}
+            onPress={() => handleAdoptionAction(item, 'reject')}
+            disabled={adoptionLoading}
+            activeOpacity={0.85}
+          >
+            {actionLoading === adoptionRejectKey ? (
+              <ActivityIndicator size="small" color="#c0392b" />
+            ) : (
+              <Text style={[styles.notificationActionText, styles.notificationActionTextDecline]}>رفض</Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.notificationActionButton, styles.notificationActionAccept, adoptionLoading && styles.notificationActionButtonDisabled]}
+            onPress={() => handleAdoptionAction(item, 'approve')}
+            disabled={adoptionLoading}
+            activeOpacity={0.85}
+          >
+            {actionLoading === adoptionAcceptKey ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.notificationActionText}>قبول</Text>
+            )}
           </TouchableOpacity>
         </View>
       ) : null}
@@ -481,6 +769,38 @@ const styles = StyleSheet.create({
   },
   inviteDeclineText: {
     color: '#34495e',
+  },
+  notificationActions: {
+    flexDirection: 'row',
+    marginTop: 12,
+    justifyContent: 'space-between',
+  },
+  notificationActionButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 4,
+  },
+  notificationActionAccept: {
+    backgroundColor: '#02B7B4',
+  },
+  notificationActionDecline: {
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#f5c6cb',
+  },
+  notificationActionButtonDisabled: {
+    opacity: 0.6,
+  },
+  notificationActionText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  notificationActionTextDecline: {
+    color: '#c0392b',
   },
   errorText: {
     marginTop: 16,
