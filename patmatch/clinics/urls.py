@@ -31,6 +31,7 @@ from .views import (
     PublicStorefrontOrderView,
     PublicStorefrontBookingView,
     PublicClinicListView,
+    PublicMarketplaceServicesView,
     ClinicMapMarkersView,
 )
 
@@ -54,6 +55,7 @@ urlpatterns = [
     path('storefront/<int:clinic_id>/', PublicStorefrontView.as_view(), name='clinic-storefront'),
     path('storefront/<int:clinic_id>/orders/', PublicStorefrontOrderView.as_view(), name='clinic-storefront-orders'),
     path('storefront/<int:clinic_id>/bookings/', PublicStorefrontBookingView.as_view(), name='clinic-storefront-bookings'),
+    path('marketplace/services/', PublicMarketplaceServicesView.as_view(), name='clinic-marketplace-services'),
     path('clinic/', PublicClinicListView.as_view(), name='clinic-list-public'),
     path('map/markers/', ClinicMapMarkersView.as_view(), name='clinic-map-markers'),
     path('veterinarians/<int:pk>/', VeterinariansView.as_view(), name='clinic-veterinarian-detail'),

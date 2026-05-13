@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import AppIcon from '../../components/icons/AppIcon';
 import { apiService, ChatRoom, ChatContext } from '../../services/api';
+import type { ChatPhase } from '../../services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Linking, Share } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
@@ -27,6 +28,12 @@ import { Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { resolveMediaUrl } from '../../utils/mediaUrl';
 import { getFloatingTabBarContentPadding } from '../../utils/tabBarLayout';
+import { useFeatureFlags } from '../../services/featureFlags';
+import { deriveChatPhase } from '../../utils/chatPhase';
+import ChatStatusBanner from './components/ChatStatusBanner';
+import OwnerActionBar from './components/OwnerActionBar';
+import VerificationFormSheet from './components/VerificationFormSheet';
+import RequestSystemCard from './components/RequestSystemCard';
 
 interface ChatScreenProps {
   firebaseChatId: string;
@@ -61,6 +68,10 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
   const [verificationNotice, setVerificationNotice] = useState<string | undefined>(undefined);
   const [showPetDetails, setShowPetDetails] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const { requestChatV2Enabled } = useFeatureFlags();
+  const [verificationStatus, setVerificationStatus] = useState<'pending' | 'approved' | 'rejected' | undefined>(undefined);
+  const [verificationAdminNotes, setVerificationAdminNotes] = useState<string | undefined>(undefined);
+  const [showKycSheet, setShowKycSheet] = useState(false);
 
   const messagesEndRef = useRef<ScrollView>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -87,6 +98,19 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
   }, []);
 
   useEffect(() => {
+    if (!requestChatV2Enabled) return;
+    let cancelled = false;
+    apiService.getVerificationStatus().then((res) => {
+      if (cancelled) return;
+      if (res.success && res.data?.verification?.status) {
+        setVerificationStatus(res.data.verification.status as any);
+        setVerificationAdminNotes(res.data.verification.admin_notes);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [requestChatV2Enabled]);
+
+  useEffect(() => {
     scrollToBottom();
     if (!firebaseChatId || loading) {
       return;
@@ -98,7 +122,19 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     lastMarkReadAtRef.current = now;
     apiService.markChatNotificationsAsRead(firebaseChatId)
       .catch((markErr) => console.log('markChatNotificationsAsRead failed (non-fatal)', markErr));
-  }, [messages, firebaseChatId, loading]);
+    // Reset firestore unread counter so ChatList badge clears.
+    if (user?.id) {
+      MessageService.markChatAsRead(firebaseChatId, user.id);
+      // Mark each visible message from the OTHER user as read so the
+      // sender's ✓ flips to ✓✓.
+      const unreadMessageIds = messages
+        .filter((m) => m.senderId !== user.id && !(m.readBy || []).includes(user.id))
+        .map((m) => m.id);
+      if (unreadMessageIds.length > 0) {
+        MessageService.markMessagesAsRead(firebaseChatId, unreadMessageIds, user.id);
+      }
+    }
+  }, [messages, firebaseChatId, loading, user?.id]);
 
   // Trigger support nudge after threshold (3 messages) once per chat
   // Trigger support nudge after threshold (3 messages) once per chat
@@ -170,6 +206,9 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
       const currentUserId = user?.id || 0;
       const currentUserName = (user?.full_name || `${user?.first_name || ''} ${user?.last_name || ''}` || 'أنا').trim();
       const imgClientId = `img_${Date.now()}`;
+      const recipientIds = chatRoom?.participants
+        ? Object.values(chatRoom.participants).map((p) => p?.id).filter((id): id is number => typeof id === 'number')
+        : [];
       const ok = await MessageService.sendMessage(
         firebaseChatId,
         {
@@ -179,7 +218,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           type: 'image',
           imageUrl: upload.data.image_url,
         },
-        { clientId: imgClientId }
+        { clientId: imgClientId, recipientIds }
       );
       if (!ok) {
         Alert.alert('تحذير', 'تعذر إرسال الصورة الآن، سيتم إرسالها لاحقاً');
@@ -339,6 +378,21 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     }
   };
 
+  const reloadChatContext = async () => {
+    try {
+      const chatRoomData = await apiService.getChatRoomByFirebaseId(firebaseChatId);
+      if (chatRoomData.success && chatRoomData.data) {
+        setChatRoom(chatRoomData.data);
+        const contextData = await apiService.getChatRoomContext(chatRoomData.data.id);
+        if (contextData.success && contextData.data) {
+          setChatContext(contextData.data.chat_context);
+        }
+      }
+    } catch (reloadError) {
+      console.log('⚠️ reloadChatContext failed (non-fatal)', reloadError);
+    }
+  };
+
   const setupMessageListener = async () => {
     console.log('💬 ChatScreen - Setting up Firebase message listener for:', firebaseChatId);
 
@@ -437,6 +491,9 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
 
       // Try to send via Firebase
       if (firebaseConnected) {
+        const recipientIds = chatRoom?.participants
+          ? Object.values(chatRoom.participants).map((p) => p?.id).filter((id): id is number => typeof id === 'number')
+          : [];
         const ok = await MessageService.sendMessage(
           firebaseChatId,
           {
@@ -445,7 +502,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             senderName: currentUserName,
             type: 'text',
           },
-          { clientId }
+          { clientId, recipientIds }
         );
         if (!ok) {
           console.warn('⚠️ Firebase send returned false; keeping local optimistic message');
@@ -500,9 +557,29 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     }
   };
 
+  // Other-participant IDs (everyone in the chat except the current user).
+  // Used to derive ✓✓ "read by all recipients" — when every otherId is
+  // present in a message's readBy array, the message has been seen.
+  const otherParticipantIds = useMemo(() => {
+    if (!chatRoom?.participants || !user?.id) return [];
+    return Object.values(chatRoom.participants)
+      .map((p) => p?.id)
+      .filter((id): id is number => typeof id === 'number' && id !== user.id);
+  }, [chatRoom?.participants, user?.id]);
+
   const renderMessage = (message: FirebaseMessage) => {
     const isCurrentUser = user?.id ? message.senderId === user.id : false;
     const isSystem = message.type === 'system';
+    // Read state: ✓✓ if every other participant has the message in
+    // their readBy; ✓ otherwise. When otherParticipantIds is empty
+    // (e.g. mock data, or solo room) we conservatively show ✓.
+    const readBy = message.readBy || [];
+    const seenByAllOthers =
+      otherParticipantIds.length > 0 &&
+      otherParticipantIds.every((id) => readBy.includes(id));
+    const deliveryGlyph = isCurrentUser && !isSystem
+      ? (seenByAllOthers ? '  ✓✓' : '  ✓')
+      : '';
 
     return (
       <View
@@ -540,11 +617,134 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             isCurrentUser && styles.sentMessageTime
           ]}>
             {formatMessageTime(message.timestamp)}
+            {/* ✓ = delivered (firestore confirmed) ✓✓ = seen by recipient */}
+            {deliveryGlyph}
           </Text>
         </View>
       </View>
     );
   };
+
+  // Date-separator helper. Returns "اليوم" / "أمس" / "DD/MM/YYYY" given a
+  // timestamp. Comparisons are calendar-day based, not 24h-window.
+  const isSameCalendarDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  const formatDateSeparator = (date: Date): string => {
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (isSameCalendarDay(date, now)) return 'اليوم';
+    if (isSameCalendarDay(date, yesterday)) return 'أمس';
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  };
+
+  const renderMessageWithDate = (message: FirebaseMessage, idx: number) => {
+    const prev = idx > 0 ? messages[idx - 1] : null;
+    const showDate = !prev || !isSameCalendarDay(prev.timestamp, message.timestamp);
+    return (
+      <React.Fragment key={message.id}>
+        {showDate ? (
+          <View style={styles.dateSeparator}>
+            <Text style={styles.dateSeparatorText}>{formatDateSeparator(message.timestamp)}</Text>
+          </View>
+        ) : null}
+        {renderMessage(message)}
+      </React.Fragment>
+    );
+  };
+
+  // ────────────────────────────────────────────────────────────────────
+  // chat-v2 derivations. MUST be declared above the loading/error early
+  // returns below so the hook-call order is identical across renders
+  // (React's Rules of Hooks).
+  // ────────────────────────────────────────────────────────────────────
+  const ownerNameForPhase = chatContext?.pet?.owner_name || null;
+  const userFullNameForPhase = user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
+  const isRequester = !!ownerNameForPhase && !!userFullNameForPhase
+    ? ownerNameForPhase !== userFullNameForPhase
+    : true;
+  const perspective: 'requester' | 'owner' = isRequester ? 'requester' : 'owner';
+
+  // TODO(chat-v2 stage 2): once backend exposes a unified `chat_status`
+  // field on the chat-room payload (or via a new endpoint), prefer it
+  // over the local derivation below. Drop deriveChatPhase + the
+  // verificationStatus fetch when that lands.
+  const phase: ChatPhase = useMemo(() => {
+    const requestStatus = (
+      chatContext?.adoption_request?.status ||
+      chatContext?.breeding_request?.status ||
+      'pending'
+    ) as 'pending' | 'approved' | 'rejected';
+    const requestKind: 'adoption' | 'breeding' = chatContext?.adoption_request ? 'adoption' : 'breeding';
+    return deriveChatPhase({
+      requestKind,
+      requestStatus,
+      isActive: chatRoom?.is_active ?? true,
+      isRequester,
+      isRequesterVerified: isRequester ? !!user?.is_verified : false,
+      verificationStatus,
+    });
+  }, [chatRoom, chatContext, user, isRequester, verificationStatus]);
+
+  const inputEnabled = useMemo(() => {
+    if (!requestChatV2Enabled) return true;  // legacy behavior — flag off, input always shown
+    if (phase === 'approved') return true;
+    return false;  // pending / approved_pending_kyc / approved_kyc_pending_review / approved_kyc_rejected / rejected
+  }, [requestChatV2Enabled, phase]);
+
+  // Build the pinned RequestSystemCard payload from chatContext.
+  // Backend `get_chat_context` was extended (patmatch/pets/models.py:877+)
+  // to expose the full request payloads. Older app versions just ignore
+  // the extra keys — additive change.
+  const requestCardPayload = useMemo(() => {
+    if (!requestChatV2Enabled) return null;
+    const adoption = (chatContext as any)?.adoption_request;
+    const breeding = (chatContext as any)?.breeding_request;
+    if (adoption) {
+      return {
+        kind: 'adoption' as const,
+        adopterName: adoption.adopter_name,
+        adopterAge: adoption.adopter_age,
+        adopterPhone: adoption.adopter_phone,
+        housingType: adoption.housing_type,
+        familyMembers: adoption.family_members,
+        experienceLevel: adoption.experience_level,
+        timeAvailability: adoption.time_availability,
+        reasonForAdoption: adoption.reason_for_adoption,
+        feedingPlan: adoption.feeding_plan,
+        exercisePlan: adoption.exercise_plan,
+        vetCarePlan: adoption.vet_care_plan,
+        emergencyPlan: adoption.emergency_plan,
+        notes: adoption.notes,
+        familyAgreement: adoption.family_agreement,
+        agreesToFollowUp: adoption.agrees_to_follow_up,
+        agreesToVetCare: adoption.agrees_to_vet_care,
+        agreesToTraining: adoption.agrees_to_training,
+      };
+    }
+    if (breeding) {
+      const requesterPet = breeding.requester_pet;
+      return {
+        kind: 'breeding' as const,
+        myPetName: requesterPet?.name,
+        myPetBreed: requesterPet?.breed_name,
+        myPetTypeDisplay: requesterPet?.pet_type_display,
+        meetingDate: breeding.meeting_date,
+        message: breeding.message,
+        contactPhone: breeding.contact_phone,
+        agreedFee: breeding.agreed_fee,
+        feePaidBy: breeding.fee_paid_by,
+        veterinaryClinicName: breeding.veterinary_clinic_name,
+      };
+    }
+    return null;
+  }, [chatContext, requestChatV2Enabled]);
 
   if (loading) {
     return (
@@ -591,6 +791,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
     || chatContext?.clinic?.name
     || 'فريق العيادة';
   const currentUserId = user?.id;
+
   const otherParticipantVerified = (() => {
     if (chatRoom?.other_participant?.is_verified) {
       return true;
@@ -674,6 +875,25 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
         </View>
       )}
 
+      {requestChatV2Enabled ? (
+        <ChatStatusBanner
+          phase={phase}
+          perspective={perspective}
+          onStartKyc={() => setShowKycSheet(true)}
+          onRetryKyc={() => setShowKycSheet(true)}
+          rejectionReason={
+            phase === 'approved_kyc_rejected' ? verificationAdminNotes : undefined
+          }
+        />
+      ) : null}
+
+      {requestChatV2Enabled && requestCardPayload ? (
+        <RequestSystemCard
+          payload={requestCardPayload}
+          defaultCollapsed={phase === 'approved'}
+        />
+      ) : null}
+
       {/* Chat Messages */}
       <ScrollView
         ref={messagesEndRef}
@@ -708,11 +928,71 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
             </Text>
           </View>
         ) : (
-          messages.map(renderMessage)
+          messages.map(renderMessageWithDate)
         )}
       </ScrollView>
 
       {/* Message Input */}
+      {requestChatV2Enabled && phase === 'pending' && perspective === 'owner' ? (
+        <OwnerActionBar
+          onApprove={async () => {
+            const adoptionId = chatContext?.adoption_request?.id;
+            const breedingId = chatContext?.breeding_request?.id;
+            try {
+              if (adoptionId) {
+                const res = await apiService.respondToAdoptionRequest(adoptionId, 'approve');
+                if (!res.success) {
+                  console.log('respondToAdoptionRequest approve failed', res.error);
+                }
+              } else if (breedingId) {
+                const res = await apiService.respondToBreedingRequest(breedingId, 'approve');
+                if (!res.success) {
+                  console.log('respondToBreedingRequest approve failed', res.error);
+                }
+              }
+            } catch (approveErr) {
+              console.log('approve failed (non-fatal)', approveErr);
+            }
+            await reloadChatContext();
+          }}
+          onReject={async () => {
+            const adoptionId = chatContext?.adoption_request?.id;
+            const breedingId = chatContext?.breeding_request?.id;
+            try {
+              if (adoptionId) {
+                const res = await apiService.respondToAdoptionRequest(adoptionId, 'reject');
+                if (!res.success) {
+                  console.log('respondToAdoptionRequest reject failed', res.error);
+                }
+              } else if (breedingId) {
+                const res = await apiService.respondToBreedingRequest(breedingId, 'reject');
+                if (!res.success) {
+                  console.log('respondToBreedingRequest reject failed', res.error);
+                }
+              }
+              if (chatRoom?.id) {
+                const archiveRes = await apiService.archiveChatRoom(chatRoom.id);
+                if (!archiveRes.success) {
+                  console.log('archiveChatRoom failed', archiveRes.error);
+                }
+              }
+            } catch (rejectErr) {
+              console.log('reject failed (non-fatal)', rejectErr);
+            }
+            await reloadChatContext();
+          }}
+        />
+      ) : requestChatV2Enabled && phase === 'rejected' ? null : requestChatV2Enabled && perspective === 'requester' && !inputEnabled ? (
+        <TouchableOpacity
+          style={styles.lockedInputBar}
+          onPress={() => messagesEndRef.current?.scrollTo({ y: 0, animated: true })}
+          accessibilityRole="button"
+          accessibilityLabel="عرض تفاصيل الطلب"
+        >
+          <Text style={styles.lockedInputText}>🔒 لا يمكن إرسال رسائل قبل قبول الطلب</Text>
+          <Text style={styles.lockedInputHint}>اضغط لمراجعة تفاصيل طلبك ↑</Text>
+        </TouchableOpacity>
+      ) : (
       <View
         style={[
           styles.inputContainer,
@@ -771,6 +1051,7 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
           </TouchableOpacity>
         </View>
       </View>
+      )}
 
       {/* Image Modal */}
       {selectedImageForModal && (
@@ -842,6 +1123,22 @@ const ChatScreen: React.FC<ChatScreenProps> = ({
         />
       )}
 
+      {/* KYC Verification Sheet (request-as-chat v2) */}
+      {requestChatV2Enabled ? (
+        <VerificationFormSheet
+          visible={showKycSheet}
+          onClose={() => setShowKycSheet(false)}
+          onSubmitted={async () => {
+            // Refresh verification status so phase advances to kyc_pending_review.
+            const res = await apiService.getVerificationStatus();
+            if (res.success && res.data?.verification?.status) {
+              setVerificationStatus(res.data.verification.status as any);
+              setVerificationAdminNotes(res.data.verification.admin_notes);
+            }
+          }}
+        />
+      ) : null}
+
       {/* Pet Details Modal */}
       {showPetDetails && chatContext?.pet?.id && (
         <Modal
@@ -874,7 +1171,7 @@ const styles = StyleSheet.create({
   },
   backButton: {
     padding: 10,
-    marginRight: 10,
+    marginEnd: 10,
   },
   backButtonText: {
     fontSize: 24,
@@ -898,7 +1195,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    marginRight: 12,
+    marginEnd: 12,
   },
   participantDetails: {
     flex: 1,
@@ -911,7 +1208,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#2c3e50',
-    marginRight: 6,
+    marginEnd: 6,
   },
   trustedBadge: {
     flexDirection: 'row',
@@ -923,7 +1220,7 @@ const styles = StyleSheet.create({
   },
   trustedBadgeIcon: {
     fontSize: 12,
-    marginRight: 4,
+    marginEnd: 4,
   },
   trustedBadgeText: {
     fontSize: 12,
@@ -1117,6 +1414,36 @@ const styles = StyleSheet.create({
   },
   inputContainerRaised: {
     marginBottom: 8,
+  },
+  lockedInputBar: {
+    padding: 14,
+    backgroundColor: '#F9FAFB',
+    borderTopWidth: 1,
+    borderColor: '#E5E7EB',
+    alignItems: 'center',
+  },
+  lockedInputText: {
+    color: '#6B7280',
+    fontSize: 13,
+  },
+  lockedInputHint: {
+    color: '#1E3A8A',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  dateSeparator: {
+    alignSelf: 'center',
+    backgroundColor: '#E5E7EB',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginVertical: 10,
+  },
+  dateSeparatorText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#374151',
   },
   errorBanner: {
     backgroundColor: '#f8d7da',

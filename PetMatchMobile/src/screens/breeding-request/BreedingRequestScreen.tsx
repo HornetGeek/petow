@@ -12,6 +12,7 @@ import {
   LayoutChangeEvent,
   FlatList,
   ListRenderItemInfo,
+  Alert,
 } from 'react-native';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import FastImage from 'react-native-fast-image';
@@ -23,6 +24,7 @@ import AppIcon from '../../components/icons/AppIcon';
 interface BreedingRequestScreenProps {
   petId: number;
   onClose: () => void;
+  onSuccess?: (firebaseChatId?: string) => void;
   onOpenPetDetails?: (petId: number) => void;
   onAddPet?: () => void;
 }
@@ -165,7 +167,7 @@ const PickerColumn = memo<PickerColumnProps>(({ title, rows, selected, onSelect 
 });
 PickerColumn.displayName = 'PickerColumn';
 
-const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, onClose, onOpenPetDetails, onAddPet }) => {
+const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, onClose, onSuccess, onOpenPetDetails, onAddPet }) => {
   const [targetPet, setTargetPet] = useState<Pet | null>(null);
   const [myPets, setMyPets] = useState<Pet[]>([]);
   const [loading, setLoading] = useState(true);
@@ -437,10 +439,31 @@ const BreedingRequestScreen: React.FC<BreedingRequestScreenProps> = ({ petId, on
       const response = await apiService.createBreedingRequest(payload);
 
       if (response.success) {
-        setSuccess('تم إرسال طلب المقابلة بنجاح! سيتم إشعارك عند الرد على الطلب.');
-        setTimeout(() => {
-          onClose();
-        }, 2000);
+        let firebaseChatId: string | undefined;
+        const requestId = response.data?.id ?? response.data?.request?.id;
+        if (requestId) {
+          const lookup = await apiService.getChatRoomByBreedingRequest(requestId);
+          if (lookup.success && lookup.data?.firebase_chat_id) {
+            firebaseChatId = lookup.data.firebase_chat_id;
+          } else {
+            const created = await apiService.createChatRoom(requestId);
+            firebaseChatId = created.success ? created.data?.chat_room?.firebase_chat_id : undefined;
+          }
+        }
+
+        Alert.alert(
+          'تم الإرسال بنجاح',
+          'تم إرسال طلب المقابلة بنجاح. سيتم مراجعته من قبل صاحب الحيوان.',
+          [
+            {
+              text: 'حسناً',
+              onPress: () => {
+                if (onSuccess) onSuccess(firebaseChatId);
+                onClose();
+              },
+            },
+          ]
+        );
       } else {
         // Handle specific API errors
         if (response.error?.includes('already exists')) {

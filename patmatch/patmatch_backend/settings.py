@@ -282,6 +282,8 @@ CACHES = {
     }
 }
 MAP_MARKERS_CACHE_TTL_SECONDS = config('MAP_MARKERS_CACHE_TTL_SECONDS', default=30, cast=int)
+GOOGLE_MAPS_AUTOCOMPLETE_CACHE_TTL_SECONDS = config('GOOGLE_MAPS_AUTOCOMPLETE_CACHE_TTL_SECONDS', default=600, cast=int)
+GOOGLE_MAPS_GEOCODE_CACHE_TTL_SECONDS = config('GOOGLE_MAPS_GEOCODE_CACHE_TTL_SECONDS', default=2592000, cast=int)
 
 # Allow larger payloads so multi-image uploads don't fail (413 Payload Too Large)
 MAX_UPLOAD_SIZE_MB = 200

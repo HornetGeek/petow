@@ -309,8 +309,14 @@ export interface ChatRoomList {
   updated_at: string;
   other_participant: string;
   other_participant_is_verified?: boolean;
+  other_participant_avatar?: string;  // person's profile picture (preferred over pet_image for the avatar)
   pet_name: string;
   pet_image?: string;
+  // Forward-compatible inbox fields. Populated by backend / firestore listener
+  // when available; the UI hides the row gracefully when undefined.
+  unread_count?: number;
+  last_message?: string;
+  last_message_at?: string;
 }
 
 export interface ChatContext {
@@ -349,6 +355,14 @@ export interface ChatContext {
   };
 }
 
+export type ChatPhase =
+  | 'pending'
+  | 'approved'
+  | 'approved_pending_kyc'
+  | 'approved_kyc_pending_review'
+  | 'approved_kyc_rejected'
+  | 'rejected';
+
 export interface ChatStatus {
   id: number;
   firebase_chat_id: string;
@@ -357,6 +371,8 @@ export interface ChatStatus {
   updated_at: string;
   breeding_request_status: string;
   participants_count: number;
+  // Stage 2: backend will populate this. Stage 1: undefined → derive client-side.
+  chat_status?: ChatPhase;
 }
 
 export interface UserChatStatus {

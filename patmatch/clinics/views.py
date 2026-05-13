@@ -10,7 +10,7 @@ from django.contrib.auth import authenticate
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
-from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper
+from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper, Exists, OuterRef
 from django.db.models.functions import Cast, Coalesce, Floor
 from django.db import models, transaction
 from django.http import Http404
@@ -52,11 +52,13 @@ from pets.notifications import create_notification
 from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
 from .permissions import IsClinicStaff
+from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_categories_for_group
 from .serializers import (
     ClinicSerializer,
     ClinicPublicSerializer,
     ClinicListSerializer,
     ClinicMapPointSerializer,
+    MarketplaceServiceSerializer,
     ClinicServiceSerializer,
     ClinicProductSerializer,
     StorefrontOrderSerializer,
@@ -166,6 +168,29 @@ def _parse_point_limit(raw_limit):
     return min(parsed, MAP_MAX_POINT_LIMIT)
 
 
+def _build_service_category_filter(service_category):
+    if not service_category:
+        return None
+    categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
+    if not categories:
+        return None
+
+    category_labels = dict(ClinicService.CATEGORY_CHOICES)
+    text_query = None
+    for cat in categories:
+        label = category_labels.get(cat)
+        for term in (cat, label):
+            if not term:
+                continue
+            clause = Q(services__icontains=term)
+            text_query = clause if text_query is None else text_query | clause
+
+    filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
+    if text_query is not None:
+        filter_query |= text_query
+    return filter_query
+
+
 def _cap_limit_points_for_zoom(limit_points, zoom):
     if zoom <= 8:
         return min(limit_points, MAP_LOW_ZOOM_POINT_LIMIT)
@@ -254,22 +279,9 @@ class ClinicMapMarkersView(APIView):
             )
         )
 
-        if service_category:
-            categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
-            if categories:
-                category_labels = dict(ClinicService.CATEGORY_CHOICES)
-                text_query = None
-                for cat in categories:
-                    label = category_labels.get(cat)
-                    for term in (cat, label):
-                        if not term:
-                            continue
-                        clause = Q(services__icontains=term)
-                        text_query = clause if text_query is None else text_query | clause
-                filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
-                if text_query is not None:
-                    filter_query |= text_query
-                queryset = queryset.filter(filter_query)
+        category_filter = _build_service_category_filter(service_category)
+        if category_filter is not None:
+            queryset = queryset.filter(category_filter)
 
         if search_term:
             queryset = queryset.filter(
@@ -830,6 +842,101 @@ class PublicStorefrontView(APIView):
         return Response(payload)
 
 
+class PublicMarketplaceServicesView(APIView):
+    permission_classes = [AllowAny]
+
+    def _parse_coordinates(self, request):
+        user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
+        user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
+        if (user_lat is None) != (user_lng is None):
+            raise ValueError('يجب تمرير user_lat و user_lng معًا')
+        if user_lat is not None and (user_lat < -90 or user_lat > 90):
+            raise ValueError('user_lat خارج النطاق المسموح')
+        if user_lng is not None and (user_lng < -180 or user_lng > 180):
+            raise ValueError('user_lng خارج النطاق المسموح')
+        return user_lat, user_lng
+
+    def _resolve_categories(self, request):
+        valid_categories = {choice[0] for choice in ClinicService.CATEGORY_CHOICES}
+        category_param = request.query_params.get('category')
+        if category_param:
+            categories = [cat.strip() for cat in category_param.split(',') if cat.strip()]
+            invalid = [cat for cat in categories if cat not in valid_categories]
+            if invalid:
+                raise ValueError(f"فئة خدمة غير مدعومة: {', '.join(invalid)}")
+            return categories
+
+        group_key = request.query_params.get('group') or 'clinic_vaccination'
+        categories = get_marketplace_categories_for_group(group_key)
+        if categories is None:
+            raise ValueError('مجموعة الخدمات غير مدعومة')
+        return categories
+
+    def get(self, request):
+        try:
+            user_lat, user_lng = self._parse_coordinates(request)
+            categories = self._resolve_categories(request)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        queryset = (
+            ClinicService.objects
+            .filter(is_active=True, category__in=categories, clinic__is_active=True)
+            .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
+            .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
+            .annotate(
+                marketplace_min_price=Min(
+                    'pricing_tiers__price',
+                    filter=Q(pricing_tiers__is_active=True),
+                ),
+                marketplace_max_price=Max(
+                    'pricing_tiers__price',
+                    filter=Q(pricing_tiers__is_active=True),
+                ),
+            )
+            .select_related('clinic')
+        )
+
+        search_term = (request.query_params.get('search') or '').strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(name__icontains=search_term) |
+                Q(description__icontains=search_term) |
+                Q(clinic__name__icontains=search_term) |
+                Q(clinic__address__icontains=search_term) |
+                Q(clinic__services__icontains=search_term)
+            )
+
+        user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
+        if user_point is not None:
+            effective_point_field = gis_models.PointField(geography=True, srid=4326)
+            queryset = queryset.annotate(
+                effective_point=Coalesce('clinic__location_point', output_field=effective_point_field),
+            ).annotate(
+                marketplace_distance_m=Distance('effective_point', user_point),
+            ).order_by(
+                F('marketplace_distance_m').asc(nulls_last=True),
+                'display_order',
+                '-is_featured',
+                'base_price',
+                'name',
+            )
+        else:
+            queryset = queryset.order_by('display_order', '-is_featured', 'base_price', 'name')
+
+        paginator = ClinicListPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = MarketplaceServiceSerializer(
+            page,
+            many=True,
+            context={
+                'request': request,
+                'marketplace_groups': MARKETPLACE_SERVICE_GROUPS,
+            },
+        )
+        return paginator.get_paginated_response(serializer.data)
+
+
 class PublicClinicListView(APIView):
     permission_classes = [AllowAny]
 
@@ -841,23 +948,9 @@ class PublicClinicListView(APIView):
             .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
         )
-        service_category = request.query_params.get('service_category')
-        if service_category:
-            categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
-            if categories:
-                category_labels = dict(ClinicService.CATEGORY_CHOICES)
-                text_query = None
-                for cat in categories:
-                    label = category_labels.get(cat)
-                    for term in (cat, label):
-                        if not term:
-                            continue
-                        clause = Q(services__icontains=term)
-                        text_query = clause if text_query is None else text_query | clause
-                filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
-                if text_query is not None:
-                    filter_query |= text_query
-                clinics = clinics.filter(filter_query)
+        category_filter = _build_service_category_filter(request.query_params.get('service_category'))
+        if category_filter is not None:
+            clinics = clinics.filter(category_filter)
         clinics = clinics.prefetch_related(
             models.Prefetch(
                 'services_list',
@@ -956,17 +1049,21 @@ class PublicStorefrontBookingView(APIView):
             preferred_date=data.get('preferred_date'),
             preferred_time=data.get('preferred_time'),
             notes=data.get('notes'),
+            request_type=data.get('request_type', 'appointment'),
+            source=data.get('source') or 'PetMatch',
+            contact_channel=data.get('contact_channel', 'app'),
             status='new',
             quoted_price=service.base_price,
         )
 
+        request_type = data.get('request_type', 'appointment')
         preferred_date = data.get('preferred_date')
         preferred_time = data.get('preferred_time')
         customer_phone = data.get('customer_phone')
         customer_email = data.get('customer_email')
         pet_name = data.get('pet_name')
 
-        if preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
+        if request_type == 'appointment' and preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
             appointment_owner = None
             appointment_pet = None
 

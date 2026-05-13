@@ -22,7 +22,12 @@ from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceErr
 def reverse_geocode_address(lat: float, lng: float) -> str:
     fallback = f"{lat:.4f}, {lng:.4f}"
     try:
-        result = GoogleMapsService().reverse_geocode(lat=lat, lng=lng, language="ar")
+        result = GoogleMapsService().reverse_geocode(
+            lat=lat,
+            lng=lng,
+            language="ar",
+            source="pet_serializer",
+        )
         full = (result.get("address") or "").strip()
         if full:
             parts = full.split(", ")
@@ -87,6 +92,19 @@ class PetSerializer(serializers.ModelSerializer):
         if not value:
             return False
         return bool(re.match(r'^\s*-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?\s*$', str(value)))
+
+    @classmethod
+    def _needs_reverse_geocode(cls, value: str) -> bool:
+        normalized = (value or '').strip()
+        if not normalized:
+            return True
+        if cls._looks_like_coords(normalized):
+            return True
+        return normalized in {
+            'تم تحديد الموقع',
+            'الموقع المحدد على الخريطة',
+            'موقعي الحالي',
+        }
 
     def _normalize_coordinate(self, value, field_name, min_value, max_value):
         if value in (None, '', 'null'):
@@ -159,7 +177,7 @@ class PetSerializer(serializers.ModelSerializer):
         if lat is not None and lng is not None:
             lat_f = float(lat)
             lng_f = float(lng)
-            if not loc or self._looks_like_coords(loc):
+            if self._needs_reverse_geocode(loc):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
             validated_data['location_point'] = self._point_from_coordinates(lat, lng)
 
@@ -223,7 +241,7 @@ class PetSerializer(serializers.ModelSerializer):
         if lat is not None and lng is not None:
             lat_f = float(lat)
             lng_f = float(lng)
-            if not loc or self._looks_like_coords(loc):
+            if self._needs_reverse_geocode(loc):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
             validated_data['location_point'] = self._point_from_coordinates(lat, lng)
 
