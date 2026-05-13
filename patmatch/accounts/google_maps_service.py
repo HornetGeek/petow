@@ -1,14 +1,18 @@
 import logging
+import hashlib
 import os
 import time
 from typing import Any, Dict, List, Optional
 
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
 GOOGLE_MAPS_BASE_URL = "https://maps.googleapis.com/maps/api"
+AUTOCOMPLETE_CACHE_TTL_SECONDS = getattr(settings, "GOOGLE_MAPS_AUTOCOMPLETE_CACHE_TTL_SECONDS", 10 * 60)
+GEOCODE_CACHE_TTL_SECONDS = getattr(settings, "GOOGLE_MAPS_GEOCODE_CACHE_TTL_SECONDS", 30 * 24 * 60 * 60)
 
 
 class GoogleMapsServiceError(Exception):
@@ -163,15 +167,40 @@ class GoogleMapsService:
             code="google_maps_unknown_error",
         )
 
+    def _cache_key(self, namespace: str, *parts: Any) -> str:
+        raw = "|".join(str(part).strip().lower() for part in parts)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return f"google_maps:{namespace}:{digest}"
+
+    def _get_cached(self, key: str, *, endpoint: str, source: Optional[str]) -> Optional[Dict[str, Any]]:
+        cached = cache.get(key)
+        logger.info(
+            "google_maps.%s cache_%s source=%s",
+            endpoint,
+            "hit" if cached is not None else "miss",
+            source or "unknown",
+        )
+        return cached
+
+    def _set_cached(self, key: str, value: Dict[str, Any], ttl_seconds: int) -> None:
+        cache.set(key, value, ttl_seconds)
+
     def autocomplete(
         self,
         *,
         query: str,
         language: str = "ar",
         session_token: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
+        normalized_query = query.strip()
+        cache_key = self._cache_key("autocomplete", language, normalized_query)
+        cached = self._get_cached(cache_key, endpoint="autocomplete", source=source)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
         params: Dict[str, Any] = {
-            "input": query,
+            "input": normalized_query,
             "language": language,
             "types": "geocode",
         }
@@ -197,13 +226,27 @@ class GoogleMapsService:
                 }
             )
 
-        return {"predictions": normalized}
+        result = {"predictions": normalized}
+        self._set_cached(cache_key, result, AUTOCOMPLETE_CACHE_TTL_SECONDS)
+        return result
 
-    def geocode_place(self, *, place_id: str, language: str = "ar") -> Dict[str, Any]:
+    def geocode_place(
+        self,
+        *,
+        place_id: str,
+        language: str = "ar",
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_place_id = place_id.strip()
+        cache_key = self._cache_key("geocode_place", language, normalized_place_id)
+        cached = self._get_cached(cache_key, endpoint="geocode_place", source=source)
+        if cached is not None:
+            return cached
+
         payload = self._request(
             "/geocode/json",
             {
-                "place_id": place_id,
+                "place_id": normalized_place_id,
                 "language": language,
             },
         )
@@ -228,38 +271,58 @@ class GoogleMapsService:
                 code="google_maps_invalid_response",
             )
 
-        return {
+        result = {
             "address": first.get("formatted_address") or f"{lat:.6f}, {lng:.6f}",
             "lat": float(lat),
             "lng": float(lng),
         }
+        self._set_cached(cache_key, result, GEOCODE_CACHE_TTL_SECONDS)
+        return result
 
-    def reverse_geocode(self, *, lat: float, lng: float, language: str = "ar") -> Dict[str, Any]:
+    def reverse_geocode(
+        self,
+        *,
+        lat: float,
+        lng: float,
+        language: str = "ar",
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        rounded_lat = round(float(lat), 5)
+        rounded_lng = round(float(lng), 5)
+        cache_key = self._cache_key("reverse_geocode", language, f"{rounded_lat:.5f}", f"{rounded_lng:.5f}")
+        cached = self._get_cached(cache_key, endpoint="reverse_geocode", source=source)
+        if cached is not None:
+            return cached
+
         payload = self._request(
             "/geocode/json",
             {
-                "latlng": f"{lat},{lng}",
+                "latlng": f"{rounded_lat:.5f},{rounded_lng:.5f}",
                 "language": language,
             },
         )
 
         results = payload.get("results") or []
         if not results:
-            return {
-                "address": f"{lat:.6f}, {lng:.6f}",
-                "lat": float(lat),
-                "lng": float(lng),
+            result = {
+                "address": f"{rounded_lat:.6f}, {rounded_lng:.6f}",
+                "lat": rounded_lat,
+                "lng": rounded_lng,
             }
+            self._set_cached(cache_key, result, GEOCODE_CACHE_TTL_SECONDS)
+            return result
 
         first = results[0]
         geometry = first.get("geometry") or {}
         location = geometry.get("location") or {}
 
-        resolved_lat = float(location.get("lat", lat))
-        resolved_lng = float(location.get("lng", lng))
+        resolved_lat = float(location.get("lat", rounded_lat))
+        resolved_lng = float(location.get("lng", rounded_lng))
 
-        return {
+        result = {
             "address": first.get("formatted_address") or f"{resolved_lat:.6f}, {resolved_lng:.6f}",
             "lat": resolved_lat,
             "lng": resolved_lng,
         }
+        self._set_cached(cache_key, result, GEOCODE_CACHE_TTL_SECONDS)
+        return result
