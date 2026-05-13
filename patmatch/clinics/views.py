@@ -11,7 +11,7 @@ from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
 from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper, Exists, OuterRef
-from django.db.models.functions import Cast, Coalesce, Floor
+from django.db.models.functions import Cast, Floor
 from django.db import models, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404
@@ -254,7 +254,6 @@ class ClinicMapMarkersView(APIView):
         if cached_payload is not None:
             return Response(cached_payload)
 
-        effective_point_field = gis_models.PointField(geography=True, srid=4326)
         bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
         bbox.srid = 4326
 
@@ -264,15 +263,14 @@ class ClinicMapMarkersView(APIView):
             .annotate(staff_count=Count('staff_members', distinct=True))
             .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
-            .annotate(effective_point=Coalesce('location_point', output_field=effective_point_field))
             .annotate(
                 effective_point_geom=Cast(
-                    'effective_point',
+                    'location_point',
                     output_field=gis_models.PointField(srid=4326),
                 )
             )
-            .exclude(effective_point__isnull=True)
-            .filter(effective_point__intersects=bbox)
+            .exclude(location_point__isnull=True)
+            .filter(location_point__intersects=bbox)
             .annotate(
                 map_latitude=Cast(Func(F('effective_point_geom'), function='ST_Y'), FloatField()),
                 map_longitude=Cast(Func(F('effective_point_geom'), function='ST_X'), FloatField()),
@@ -294,7 +292,7 @@ class ClinicMapMarkersView(APIView):
 
         user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
         if user_point is not None:
-            queryset = queryset.annotate(map_distance_m=Distance('effective_point', user_point))
+            queryset = queryset.annotate(map_distance_m=Distance('location_point', user_point))
 
         total_matched = queryset.count()
         clusters_payload = []
@@ -879,62 +877,74 @@ class PublicMarketplaceServicesView(APIView):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        queryset = (
-            ClinicService.objects
-            .filter(is_active=True, category__in=categories, clinic__is_active=True)
-            .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
-            .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
-            .annotate(
-                marketplace_min_price=Min(
-                    'pricing_tiers__price',
-                    filter=Q(pricing_tiers__is_active=True),
-                ),
-                marketplace_max_price=Max(
-                    'pricing_tiers__price',
-                    filter=Q(pricing_tiers__is_active=True),
-                ),
-            )
-            .select_related('clinic')
-        )
-
-        search_term = (request.query_params.get('search') or '').strip()
-        if search_term:
-            queryset = queryset.filter(
-                Q(name__icontains=search_term) |
-                Q(description__icontains=search_term) |
-                Q(clinic__name__icontains=search_term) |
-                Q(clinic__address__icontains=search_term) |
-                Q(clinic__services__icontains=search_term)
+        try:
+            queryset = (
+                ClinicService.objects
+                .filter(is_active=True, category__in=categories, clinic__is_active=True)
+                .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
+                .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
+                .annotate(
+                    marketplace_min_price=Min(
+                        'pricing_tiers__price',
+                        filter=Q(pricing_tiers__is_active=True),
+                    ),
+                    marketplace_max_price=Max(
+                        'pricing_tiers__price',
+                        filter=Q(pricing_tiers__is_active=True),
+                    ),
+                )
+                .select_related('clinic')
             )
 
-        user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
-        if user_point is not None:
-            effective_point_field = gis_models.PointField(geography=True, srid=4326)
-            queryset = queryset.annotate(
-                effective_point=Coalesce('clinic__location_point', output_field=effective_point_field),
-            ).annotate(
-                marketplace_distance_m=Distance('effective_point', user_point),
-            ).order_by(
-                F('marketplace_distance_m').asc(nulls_last=True),
-                'display_order',
-                '-is_featured',
-                'base_price',
-                'name',
-            )
-        else:
-            queryset = queryset.order_by('display_order', '-is_featured', 'base_price', 'name')
+            search_term = (request.query_params.get('search') or '').strip()
+            if search_term:
+                queryset = queryset.filter(
+                    Q(name__icontains=search_term) |
+                    Q(description__icontains=search_term) |
+                    Q(clinic__name__icontains=search_term) |
+                    Q(clinic__address__icontains=search_term) |
+                    Q(clinic__services__icontains=search_term)
+                )
 
-        paginator = ClinicListPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        serializer = MarketplaceServiceSerializer(
-            page,
-            many=True,
-            context={
-                'request': request,
-                'marketplace_groups': MARKETPLACE_SERVICE_GROUPS,
-            },
-        )
-        return paginator.get_paginated_response(serializer.data)
+            user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
+            if user_point is not None:
+                queryset = queryset.annotate(
+                    marketplace_distance_m=Distance('clinic__location_point', user_point),
+                ).order_by(
+                    F('marketplace_distance_m').asc(nulls_last=True),
+                    'display_order',
+                    '-is_featured',
+                    'base_price',
+                    'name',
+                )
+            else:
+                queryset = queryset.order_by('display_order', '-is_featured', 'base_price', 'name')
+
+            paginator = ClinicListPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            serializer = MarketplaceServiceSerializer(
+                page,
+                many=True,
+                context={
+                    'request': request,
+                    'marketplace_groups': MARKETPLACE_SERVICE_GROUPS,
+                },
+            )
+            return paginator.get_paginated_response(serializer.data)
+        except Exception:
+            logger.exception(
+                'Unexpected marketplace services error',
+                extra={
+                    'group': request.query_params.get('group'),
+                    'category': request.query_params.get('category'),
+                    'search': request.query_params.get('search'),
+                    'has_location': user_lat is not None and user_lng is not None,
+                },
+            )
+            return Response(
+                {'error': 'تعذر تحميل خدمات السوق حالياً. حاول مرة أخرى.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class PublicClinicListView(APIView):

@@ -50,6 +50,8 @@ class Clinic(models.Model):
     def save(self, *args, **kwargs):
         if self.latitude is not None and self.longitude is not None:
             self.location_point = Point(float(self.longitude), float(self.latitude), srid=4326)
+        else:
+            self.location_point = None
         super().save(*args, **kwargs)
 
     class Meta:
