@@ -48,7 +48,12 @@ logger = logging.getLogger(__name__)
 def reverse_geocode_address(lat: float, lng: float) -> str:
     fallback = f"{lat:.4f}, {lng:.4f}"
     try:
-        result = GoogleMapsService().reverse_geocode(lat=lat, lng=lng, language="ar")
+        result = GoogleMapsService().reverse_geocode(
+            lat=lat,
+            lng=lng,
+            language="ar",
+            source="pets_view",
+        )
         full = (result.get("address") or "").strip()
         if full:
             parts = full.split(", ")
