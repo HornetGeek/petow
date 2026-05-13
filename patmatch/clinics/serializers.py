@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .invite_service import build_invite_link, build_invite_message, create_invite_for_patient
+from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_group_for_category
 from .models import (
     Clinic,
     ClinicStaff,
@@ -79,7 +80,7 @@ class ClinicSerializer(serializers.ModelSerializer):
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'emergency_phone',
-            'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color',
+            'whatsapp_phone', 'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'is_active', 'created_at', 'updated_at']
@@ -107,7 +108,7 @@ class ClinicPublicSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
         fields = [
-            'id', 'name', 'description', 'address', 'phone',
+            'id', 'name', 'description', 'address', 'phone', 'whatsapp_phone',
             'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color'
         ]
         read_only_fields = fields
@@ -120,7 +121,7 @@ class ClinicListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
         fields = [
-            'id', 'name', 'description', 'address', 'phone', 'email', 'website',
+            'id', 'name', 'description', 'address', 'phone', 'whatsapp_phone', 'email', 'website',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active', 'has_dashboard', 'service_categories',
             'created_at', 'updated_at'
@@ -200,7 +201,7 @@ class ClinicMapPointSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
         fields = [
-            'id', 'name', 'address', 'city', 'phone', 'email',
+            'id', 'name', 'address', 'city', 'phone', 'whatsapp_phone', 'email',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active',
             'service_categories', 'distance', 'distance_display',
@@ -316,6 +317,105 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
         return value
 
 
+class MarketplaceServiceSerializer(serializers.ModelSerializer):
+    """Service-first public marketplace row with embedded clinic summary."""
+
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    price_range = serializers.SerializerMethodField()
+    group = serializers.SerializerMethodField()
+    group_display = serializers.SerializerMethodField()
+    distance = serializers.SerializerMethodField()
+    distance_display = serializers.SerializerMethodField()
+    clinic = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClinicService
+        fields = [
+            'id', 'name', 'description', 'category', 'category_display',
+            'group', 'group_display', 'applicable_pet_types',
+            'base_price', 'price_range', 'pricing_unit', 'min_duration_units',
+            'duration_minutes', 'requires_appointment', 'is_featured', 'display_order',
+            'service_icon', 'service_image', 'distance', 'distance_display', 'clinic',
+        ]
+        read_only_fields = fields
+
+    def get_price_range(self, obj):
+        min_price = getattr(obj, 'marketplace_min_price', None)
+        max_price = getattr(obj, 'marketplace_max_price', None)
+        if obj.has_tiered_pricing and min_price is not None and max_price is not None:
+            if min_price == max_price:
+                return str(min_price)
+            return f"{min_price}-{max_price}"
+        return str(obj.base_price)
+
+    def _group_key(self, obj):
+        return get_marketplace_group_for_category(obj.category)
+
+    def get_group(self, obj):
+        return self._group_key(obj)
+
+    def get_group_display(self, obj):
+        group_key = self._group_key(obj)
+        groups = self.context.get('marketplace_groups', MARKETPLACE_SERVICE_GROUPS)
+        if group_key and group_key in groups:
+            return groups[group_key].get('label')
+        return obj.get_category_display()
+
+    def _distance_km(self, obj):
+        distance_value = getattr(obj, 'marketplace_distance_m', None)
+        if distance_value is None:
+            return None
+        try:
+            distance_meters = float(getattr(distance_value, 'm', distance_value))
+        except (TypeError, ValueError):
+            return None
+        return round(distance_meters / 1000.0, 2)
+
+    def get_distance(self, obj):
+        return self._distance_km(obj)
+
+    def get_distance_display(self, obj):
+        distance_km = self._distance_km(obj)
+        if distance_km is None:
+            return None
+        if distance_km < 1:
+            return f"{int(distance_km * 1000)} متر"
+        if distance_km < 100:
+            return f"{distance_km:.1f} كم"
+        return f"{int(distance_km)} كم"
+
+    def _image_url(self, image_field):
+        if not image_field:
+            return None
+        try:
+            url = image_field.url
+        except ValueError:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(url) if request else url
+
+    def get_clinic(self, obj):
+        clinic = obj.clinic
+        return {
+            'id': clinic.id,
+            'name': clinic.name,
+            'description': clinic.description,
+            'address': clinic.address,
+            'phone': clinic.phone,
+            'whatsapp_phone': clinic.whatsapp_phone,
+            'email': clinic.email,
+            'website': clinic.website,
+            'logo': self._image_url(clinic.logo),
+            'opening_hours': clinic.opening_hours,
+            'services': clinic.services,
+            'storefront_primary_color': clinic.storefront_primary_color,
+            'latitude': float(clinic.latitude) if clinic.latitude is not None else None,
+            'longitude': float(clinic.longitude) if clinic.longitude is not None else None,
+            'distance': self.get_distance(obj),
+            'distance_display': self.get_distance_display(obj),
+        }
+
+
 class ClinicProductSerializer(serializers.ModelSerializer):
     """Serializer for clinic storefront products"""
     category_display = serializers.CharField(source='get_category_display', read_only=True)
@@ -381,7 +481,8 @@ class StorefrontBookingSerializer(serializers.ModelSerializer):
             'public_id', 'clinic', 'service', 'service_name',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'preferred_date', 'preferred_time',
-            'notes', 'status', 'quoted_price', 'created_at'
+            'notes', 'request_type', 'source', 'contact_channel',
+            'status', 'quoted_price', 'created_at'
         ]
         read_only_fields = ['public_id', 'clinic', 'status', 'quoted_price', 'created_at', 'service_name']
 
@@ -395,13 +496,14 @@ class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
             'public_id', 'clinic', 'service', 'service_name',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'preferred_date', 'preferred_time',
-            'notes', 'status', 'quoted_price', 'created_at'
+            'notes', 'request_type', 'source', 'contact_channel',
+            'status', 'quoted_price', 'created_at'
         ]
         read_only_fields = [
             'public_id', 'clinic', 'service', 'service_name',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'preferred_date', 'preferred_time',
-            'notes', 'quoted_price', 'created_at'
+            'notes', 'request_type', 'source', 'contact_channel', 'quoted_price', 'created_at'
         ]
 
 
@@ -414,6 +516,17 @@ class StorefrontBookingCreateSerializer(serializers.Serializer):
     preferred_date = serializers.DateField(required=False, allow_null=True)
     preferred_time = serializers.TimeField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    request_type = serializers.ChoiceField(
+        choices=[choice[0] for choice in StorefrontBooking.REQUEST_TYPE_CHOICES],
+        required=False,
+        default='appointment',
+    )
+    source = serializers.CharField(required=False, allow_blank=True, default='PetMatch')
+    contact_channel = serializers.ChoiceField(
+        choices=[choice[0] for choice in StorefrontBooking.CONTACT_CHANNEL_CHOICES],
+        required=False,
+        default='app',
+    )
 
 
 class ServicePackageSerializer(serializers.ModelSerializer):

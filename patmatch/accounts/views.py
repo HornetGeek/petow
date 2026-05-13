@@ -26,6 +26,7 @@ from .google_maps_service import GoogleMapsService, GoogleMapsServiceError
 from django.conf import settings
 import requests
 import logging
+import hashlib
 import os
 import re
 
@@ -48,6 +49,7 @@ class MapsAutocompleteRequestSerializer(serializers.Serializer):
     language = serializers.ChoiceField(
         choices=["ar", "en"], required=False, default="ar"
     )
+    source = serializers.CharField(required=False, allow_blank=True, max_length=80)
     session_token = serializers.RegexField(
         regex=r"^[A-Za-z0-9_-]{8,128}$",
         required=False,
@@ -71,6 +73,7 @@ class MapsGeocodeRequestSerializer(serializers.Serializer):
     language = serializers.ChoiceField(
         choices=["ar", "en"], required=False, default="ar"
     )
+    source = serializers.CharField(required=False, allow_blank=True, max_length=80)
 
     def validate_place_id(self, value):
         normalized = value.strip()
@@ -85,6 +88,7 @@ class MapsReverseGeocodeRequestSerializer(serializers.Serializer):
     language = serializers.ChoiceField(
         choices=["ar", "en"], required=False, default="ar"
     )
+    source = serializers.CharField(required=False, allow_blank=True, max_length=80)
 
 
 class MapsAutocompleteView(APIView):
@@ -102,6 +106,14 @@ class MapsAutocompleteView(APIView):
                 query=payload["query"],
                 language=payload.get("language", "ar"),
                 session_token=payload.get("session_token") or None,
+                source=payload.get("source") or None,
+            )
+            logger.info(
+                "google_maps.autocomplete user_id=%s source=%s query_hash=%s results=%s",
+                request.user.id,
+                payload.get("source") or "unknown",
+                hashlib.sha256(payload["query"].strip().lower().encode("utf-8")).hexdigest()[:16],
+                len(result.get("predictions") or []),
             )
             return Response(result, status=status.HTTP_200_OK)
         except GoogleMapsServiceError as exc:
@@ -124,6 +136,13 @@ class MapsGeocodeView(APIView):
             result = service.geocode_place(
                 place_id=payload["place_id"],
                 language=payload.get("language", "ar"),
+                source=payload.get("source") or None,
+            )
+            logger.info(
+                "google_maps.geocode_place user_id=%s source=%s place_id=%s",
+                request.user.id,
+                payload.get("source") or "unknown",
+                payload["place_id"],
             )
             return Response(result, status=status.HTTP_200_OK)
         except GoogleMapsServiceError as exc:
@@ -147,6 +166,14 @@ class MapsReverseGeocodeView(APIView):
                 lat=payload["lat"],
                 lng=payload["lng"],
                 language=payload.get("language", "ar"),
+                source=payload.get("source") or None,
+            )
+            logger.info(
+                "google_maps.reverse_geocode user_id=%s source=%s lat=%.5f lng=%.5f",
+                request.user.id,
+                payload.get("source") or "unknown",
+                payload["lat"],
+                payload["lng"],
             )
             return Response(result, status=status.HTTP_200_OK)
         except GoogleMapsServiceError as exc:
