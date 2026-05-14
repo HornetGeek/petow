@@ -51,7 +51,7 @@ from pets.serializers import PublicPetSerializer
 from pets.notifications import create_notification
 from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
-from .permissions import IsClinicStaff
+from .permissions import IsClinicStaff, IsPlatformAdmin
 from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_categories_for_group
 from .serializers import (
     ClinicSerializer,
@@ -514,6 +514,17 @@ class ClinicLoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if user.is_staff and user.is_superuser:
+            token, _ = Token.objects.get_or_create(user=user)
+            return Response(
+                {
+                    'token': token.key,
+                    'clinic': None,
+                    'user': UserSerializer(user).data,
+                    'is_platform_admin': True,
+                }
+            )
+
         if getattr(user, 'user_type', '') != 'clinic_staff':
             return Response(
                 {'error': 'هذا الحساب غير مخول للوصول إلى لوحة تحكم العيادة'},
@@ -534,6 +545,7 @@ class ClinicLoginView(APIView):
                 'token': token.key,
                 'clinic': ClinicSerializer(clinic).data,
                 'user': UserSerializer(user).data,
+                'is_platform_admin': False,
             }
         )
 
@@ -1211,6 +1223,7 @@ class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing clinic services"""
     serializer_class = ClinicServiceSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -1252,6 +1265,102 @@ class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         clinic = self.get_clinic()
         serializer.save(clinic=clinic)
+
+
+class PlatformAdminClinicListView(APIView):
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get(self, request):
+        queryset = (
+            Clinic.objects
+            .all()
+            .annotate(staff_count=Count('staff_members'))
+            .prefetch_related('services_list')
+            .order_by('name')
+        )
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(address__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(email__icontains=search)
+            )
+
+        is_active = request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        paginator = ClinicListPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = ClinicListSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+
+class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
+    serializer_class = ClinicServiceSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_queryset(self):
+        queryset = (
+            ClinicService.objects
+            .all()
+            .select_related('clinic')
+            .prefetch_related('pricing_tiers')
+            .order_by('clinic__name', 'display_order', '-is_featured', 'name')
+        )
+
+        clinic_id = self.request.query_params.get('clinic_id')
+        if clinic_id:
+            queryset = queryset.filter(clinic_id=clinic_id)
+
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        category = self.request.query_params.get('category')
+        if category:
+            queryset = queryset.filter(category=category)
+
+        pet_type = self.request.query_params.get('pet_type')
+        if pet_type:
+            queryset = queryset.filter(applicable_pet_types__contains=[pet_type])
+
+        is_featured = self.request.query_params.get('is_featured')
+        if is_featured is not None:
+            queryset = queryset.filter(is_featured=is_featured.lower() == 'true')
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(description__icontains=search) |
+                Q(clinic__name__icontains=search)
+            )
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        if not request.query_params.get('clinic_id'):
+            return Response(
+                {'error': 'يجب اختيار العيادة أولاً'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
+    def _get_target_clinic(self):
+        clinic_id = self.request.data.get('clinic_id') or self.request.data.get('clinic')
+        if not clinic_id:
+            raise ValidationError({'clinic_id': 'يجب اختيار العيادة'})
+        return get_object_or_404(Clinic, id=clinic_id, is_active=True)
+
+    def perform_create(self, serializer):
+        serializer.save(clinic=self._get_target_clinic())
+
+    def perform_update(self, serializer):
+        serializer.save()
 
 
 class ClinicProductViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -1333,6 +1442,36 @@ class ServicePricingTierViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(service_id=service_id)
             
         return queryset
+
+    def _get_target_service(self):
+        service_id = self.request.data.get('service_id') or self.request.data.get('service')
+        if not service_id:
+            raise ValidationError({'service': 'يجب اختيار الخدمة'})
+        return get_object_or_404(ClinicService, id=service_id, clinic=self.get_clinic())
+
+    def perform_create(self, serializer):
+        serializer.save(service=self._get_target_service())
+
+
+class PlatformAdminServicePricingTierViewSet(viewsets.ModelViewSet):
+    serializer_class = ServicePricingTierSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get_queryset(self):
+        queryset = ServicePricingTier.objects.all().select_related('service', 'service__clinic')
+        service_id = self.request.query_params.get('service_id')
+        if service_id:
+            queryset = queryset.filter(service_id=service_id)
+        return queryset
+
+    def _get_target_service(self):
+        service_id = self.request.data.get('service_id') or self.request.data.get('service')
+        if not service_id:
+            raise ValidationError({'service': 'يجب اختيار الخدمة'})
+        return get_object_or_404(ClinicService, id=service_id)
+
+    def perform_create(self, serializer):
+        serializer.save(service=self._get_target_service())
 
 
 class ServicePackageViewSet(ClinicContextMixin, viewsets.ModelViewSet):
