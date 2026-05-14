@@ -1,6 +1,8 @@
 from django.contrib.auth import get_user_model
 from django.contrib.gis.geos import Point
 from django.utils import timezone
+import json
+
 from rest_framework import serializers
 
 from .invite_service import build_invite_link, build_invite_message, create_invite_for_patient
@@ -274,6 +276,7 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
     price_range = serializers.SerializerMethodField()
     pet_type_display = serializers.SerializerMethodField()
     category_display = serializers.CharField(source='get_category_display', read_only=True)
+    clear_service_image = serializers.BooleanField(write_only=True, required=False, default=False)
     
     class Meta:
         model = ClinicService
@@ -284,7 +287,7 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
             'pricing_unit', 'min_duration_units',
             'duration_minutes', 'requires_appointment',
             'is_active', 'is_featured', 'display_order',
-            'service_icon', 'service_image', 
+            'service_icon', 'service_image', 'clear_service_image',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'clinic', 'pricing_tiers', 'price_range', 
@@ -300,6 +303,12 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
     
     def validate_applicable_pet_types(self, value):
         """Ensure at least one pet type is selected"""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                raise serializers.ValidationError("صيغة أنواع الحيوانات غير صالحة")
+
         if not value or len(value) == 0:
             raise serializers.ValidationError("يجب اختيار نوع حيوان واحد على الأقل")
         
@@ -315,6 +324,13 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
         if value is not None and value < 1:
             raise serializers.ValidationError("الحد الأدنى للمدة يجب أن يكون رقمًا موجبًا")
         return value
+
+    def update(self, instance, validated_data):
+        clear_service_image = validated_data.pop('clear_service_image', False)
+        if clear_service_image and instance.service_image:
+            instance.service_image.delete(save=False)
+            instance.service_image = None
+        return super().update(instance, validated_data)
 
 
 class MarketplaceServiceSerializer(serializers.ModelSerializer):
@@ -413,6 +429,7 @@ class MarketplaceServiceSerializer(serializers.ModelSerializer):
             'longitude': float(clinic.longitude) if clinic.longitude is not None else None,
             'distance': self.get_distance(obj),
             'distance_display': self.get_distance_display(obj),
+            'has_dashboard': bool(clinic.owner_id or getattr(obj, 'has_staff', False)),
         }
 
 
