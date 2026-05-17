@@ -1312,6 +1312,17 @@ class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsPlatformAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+    def _service_create_log_context(self, request):
+        clinic_id = request.data.get('clinic_id') or request.data.get('clinic')
+        return {
+            'method': request.method,
+            'user_id': getattr(request.user, 'id', None),
+            'clinic_id': clinic_id,
+            'content_type': request.META.get('CONTENT_TYPE', ''),
+            'file_fields': list(request.FILES.keys()),
+            'release': getattr(settings, 'RELEASE_VERSION', None) or getattr(settings, 'GIT_SHA', None),
+        }
+
     def get_queryset(self):
         queryset = (
             ClinicService.objects
@@ -1363,10 +1374,72 @@ class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
         clinic_id = self.request.data.get('clinic_id') or self.request.data.get('clinic')
         if not clinic_id:
             raise ValidationError({'clinic_id': 'يجب اختيار العيادة'})
+        try:
+            clinic_id = int(clinic_id)
+        except (TypeError, ValueError):
+            raise ValidationError({'clinic_id': 'معرف العيادة غير صالح'})
+
         return get_object_or_404(Clinic, id=clinic_id, is_active=True)
 
-    def perform_create(self, serializer):
-        serializer.save(clinic=self._get_target_clinic())
+    def create(self, request, *args, **kwargs):
+        log_context = self._service_create_log_context(request)
+        logger.info('Platform admin clinic service create requested', extra=log_context)
+
+        serializer = self.get_serializer(data=request.data)
+        try:
+            is_valid = serializer.is_valid()
+        except Exception:
+            logger.exception(
+                'Unexpected platform admin clinic service validation error',
+                extra=log_context,
+            )
+            return Response(
+                {
+                    'error': 'حدث خطأ غير متوقع أثناء التحقق من بيانات الخدمة',
+                    'request_time': timezone.now().isoformat(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not is_valid:
+            logger.warning(
+                'Platform admin clinic service create validation failed',
+                extra={**log_context, 'validation_errors': str(serializer.errors)},
+            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            clinic = self._get_target_clinic()
+            self.perform_create(serializer, clinic=clinic)
+            response_data = serializer.data
+            headers = self.get_success_headers(response_data)
+        except (ValidationError, Http404):
+            logger.warning(
+                'Platform admin clinic service create rejected',
+                extra=log_context,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                'Unexpected platform admin clinic service create error',
+                extra=log_context,
+            )
+            return Response(
+                {
+                    'error': 'حدث خطأ غير متوقع أثناء إنشاء الخدمة',
+                    'request_time': timezone.now().isoformat(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        logger.info(
+            'Platform admin clinic service create completed',
+            extra={**log_context, 'service_id': serializer.instance.id},
+        )
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer, clinic=None):
+        serializer.save(clinic=clinic or self._get_target_clinic())
 
     def perform_update(self, serializer):
         serializer.save()
