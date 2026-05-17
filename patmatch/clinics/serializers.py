@@ -292,6 +292,25 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'clinic', 'pricing_tiers', 'price_range', 
                            'category_display', 'pet_type_display', 'created_at', 'updated_at']
+
+    def to_internal_value(self, data):
+        """Normalize empty optional multipart fields before DRF field validation."""
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        elif isinstance(data, dict):
+            data = dict(data)
+
+        if hasattr(data, 'get'):
+            if data.get('min_duration_units') == '':
+                data.pop('min_duration_units', None)
+
+            service_image = data.get('service_image')
+            if service_image == '' or (
+                service_image is not None and getattr(service_image, 'size', None) == 0
+            ):
+                data.pop('service_image', None)
+
+        return super().to_internal_value(data)
     
     def get_price_range(self, obj):
         """Get price range for display"""
@@ -1144,6 +1163,7 @@ class ClinicRegistrationSerializer(serializers.Serializer):
     clinic_email = serializers.EmailField()
     clinic_phone = serializers.CharField(max_length=20)
     clinic_emergency_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    clinic_whatsapp_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     clinic_address = serializers.CharField()
     clinic_opening_hours = serializers.CharField()
     clinic_services = serializers.CharField()
@@ -1189,6 +1209,7 @@ class ClinicRegistrationSerializer(serializers.Serializer):
             address=validated_data['clinic_address'],
             phone=validated_data['clinic_phone'],
             emergency_phone=validated_data.get('clinic_emergency_phone'),
+            whatsapp_phone=validated_data.get('clinic_whatsapp_phone'),
             email=validated_data['clinic_email'],
             website=validated_data.get('clinic_website'),
             opening_hours=validated_data['clinic_opening_hours'],

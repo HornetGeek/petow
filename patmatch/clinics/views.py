@@ -1297,6 +1297,15 @@ class PlatformAdminClinicListView(APIView):
         serializer = ClinicListSerializer(page, many=True, context={'request': request})
         return paginator.get_paginated_response(serializer.data)
 
+    def post(self, request):
+        serializer = ClinicRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(
+            ClinicSerializer(result['clinic'], context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
 
 class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
     serializer_class = ClinicServiceSerializer
