@@ -344,6 +344,10 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("الحد الأدنى للمدة يجب أن يكون رقمًا موجبًا")
         return value
 
+    def create(self, validated_data):
+        validated_data.pop('clear_service_image', None)
+        return super().create(validated_data)
+
     def update(self, instance, validated_data):
         clear_service_image = validated_data.pop('clear_service_image', False)
         if clear_service_image and instance.service_image:
