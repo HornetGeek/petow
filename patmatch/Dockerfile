@@ -1,5 +1,5 @@
-# Use Python 3.8 slim image
-FROM python:3.8-slim
+# Use Python 3.11 slim image
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -15,6 +15,11 @@ RUN apt-get update \
         gcc \
         g++ \
         libpq-dev \
+        gdal-bin \
+        libgdal-dev \
+        libproj-dev \
+        binutils \
+        libgeos-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

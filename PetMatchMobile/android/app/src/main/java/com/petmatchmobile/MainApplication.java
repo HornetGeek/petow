@@ -9,33 +9,8 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint;
 import com.facebook.react.defaults.DefaultReactHost;
 import com.facebook.react.defaults.DefaultReactNativeHost;
 import com.facebook.soloader.SoLoader;
-import java.util.Arrays;
+import com.facebook.react.PackageList;
 import java.util.List;
-
-// Import core React Native packages
-import com.facebook.react.shell.MainReactPackage;
-
-// Import AsyncStorage
-import com.reactnativecommunity.asyncstorage.AsyncStoragePackage;
-
-// Import Geolocation Service
-import com.agontuk.RNFusedLocation.RNFusedLocationPackage;
-
-// Import WebView
-import com.reactnativecommunity.webview.RNCWebViewPackage;
-
-// Import Image Picker
-import com.imagepicker.ImagePickerPackage;
-
-// Import Document Picker
-import com.reactnativedocumentpicker.RNDocumentPickerPackage;
-
-// Import Firebase packages
-import io.invertase.firebase.app.ReactNativeFirebaseAppPackage;
-import io.invertase.firebase.analytics.ReactNativeFirebaseAnalyticsPackage;
-import io.invertase.firebase.auth.ReactNativeFirebaseAuthPackage;
-import io.invertase.firebase.firestore.ReactNativeFirebaseFirestorePackage;
-import io.invertase.firebase.messaging.ReactNativeFirebaseMessagingPackage;
 // Notification channel (Android 8+)
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -54,20 +29,7 @@ public class MainApplication extends Application implements ReactApplication {
         @Override
         protected List<ReactPackage> getPackages() {
           @SuppressWarnings("UnnecessaryLocalVariable")
-          List<ReactPackage> packages = Arrays.<ReactPackage>asList(
-              new MainReactPackage(),
-              new AsyncStoragePackage(),
-              new RNFusedLocationPackage(),
-              new RNCWebViewPackage(),
-              new ImagePickerPackage(),
-              new RNDocumentPickerPackage(),
-              // Add Firebase packages
-              new ReactNativeFirebaseAppPackage(),
-              new ReactNativeFirebaseAnalyticsPackage(),
-              new ReactNativeFirebaseAuthPackage(),
-              new ReactNativeFirebaseFirestorePackage(),
-              new ReactNativeFirebaseMessagingPackage()
-          );
+          List<ReactPackage> packages = new PackageList(this).getPackages();
           return packages;
         }
 

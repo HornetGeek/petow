@@ -8,19 +8,20 @@ import {
   StyleSheet,
   Alert,
   ActivityIndicator,
-  Image,
   Dimensions,
-  Modal,
+  BackHandler,
 } from 'react-native';
 import { apiService, Breed } from '../../services/api';
 import MapLocationPicker from '../../components/MapLocationPicker';
 import ImagePicker from '../../components/ImagePicker';
 import DocumentPickerComponent from '../../components/DocumentPicker';
-import DocumentPicker, { DocumentPickerResponse } from 'react-native-document-picker';
+import { type DocumentPickerResponse } from '@react-native-documents/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface AddPetScreenProps {
   onClose: () => void;
+  onPetCreated?: (petId: number) => void;
 }
 
 type AddPetFormState = {
@@ -33,6 +34,8 @@ type AddPetFormState = {
   location: string;
   is_free: boolean;
   status: string;
+  available_for_adoption: boolean;
+  hosting_preference: 'flexible' | 'my_place' | 'other_place';
 };
 
 const ADD_PET_DRAFT_STORAGE_KEY = 'add_pet_form_draft_v1';
@@ -47,16 +50,19 @@ const INITIAL_FORM_STATE: AddPetFormState = {
   location: '',
   is_free: true,
   status: 'available',
+  available_for_adoption: false,
+  hosting_preference: 'flexible',
 };
 
-const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
+const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose, onPetCreated }) => {
+  const insets = useSafeAreaInsets();
+  const bottomSafeSpace = Math.max(120, insets.bottom + 96);
   const [formData, setFormData] = useState<AddPetFormState>(() => ({ ...INITIAL_FORM_STATE }));
 
   const [breeds, setBreeds] = useState<Breed[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingBreeds, setLoadingBreeds] = useState(true);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [isRestoringDraft, setIsRestoringDraft] = useState(true);
   const [locationCoordinates, setLocationCoordinates] = useState<{ lat: number; lng: number } | null>(null);
   const skipNextPersistRef = useRef(false);
@@ -69,6 +75,7 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
   // Scroll and field refs for auto-scroll to first error
   const scrollViewRef = useRef<ScrollView>(null);
   const fieldPositionsRef = useRef<Record<string, number>>({});
+  const submitLockRef = useRef(false);
   const nameInputRef = useRef<TextInput>(null);
   const ageInputRef = useRef<TextInput>(null);
   const descriptionInputRef = useRef<TextInput>(null);
@@ -210,13 +217,6 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
     // Clear breed when pet type changes
     if (field === 'pet_type') {
       setFormData(prev => ({ ...prev, breed: '' }));
-      const availableBreeds = breeds.filter(breed => breed.pet_type === value);
-      if (value === 'cats') {
-        setSuccess(`تم تغيير نوع الحيوان إلى القطط. ${availableBreeds.length} سلالة متاحة للاختيار.`);
-      } else if (value === 'dogs') {
-        setSuccess(`تم تغيير نوع الحيوان إلى الكلاب. ${availableBreeds.length} سلالة متاحة للاختيار.`);
-      }
-      setTimeout(() => setSuccess(''), 3000);
     }
   };
 
@@ -229,41 +229,84 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
     }
   };
 
-  const handleAddPet = async () => {
+  const clearDraftAndResetForm = useCallback(async () => {
+    skipNextPersistRef.current = true;
+    try {
+      await AsyncStorage.removeItem(ADD_PET_DRAFT_STORAGE_KEY);
+    } catch (storageError) {
+      console.warn('Failed to clear add pet draft after success', storageError);
+    }
+
+    setFormData({ ...INITIAL_FORM_STATE });
+    setLocationCoordinates(null);
+    setPetImages([]);
+    setHealthDocuments([]);
+    setVaccinationDocuments([]);
+    setError('');
+  }, []);
+
+  const handleClosePress = useCallback(() => {
+    if (loading) {
+      Alert.alert('جاري الرفع', 'يرجى الانتظار حتى يكتمل رفع بيانات الحيوان.');
+      return;
+    }
+    onClose();
+  }, [loading, onClose]);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleClosePress();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [handleClosePress]);
+
+  const handleAddPet = useCallback(async () => {
+    if (submitLockRef.current) {
+      return;
+    }
+    submitLockRef.current = true;
+    let createdSuccessfully = false;
     // Validation
     if (!formData.name.trim()) {
       raiseError('يرجى إدخال اسم الحيوان', 'name');
+      submitLockRef.current = false;
       return;
     }
     if (!formData.breed) {
       raiseError('يرجى اختيار السلالة', 'breed');
+      submitLockRef.current = false;
       return;
     }
     if (!formData.age_months.trim()) {
       raiseError('يرجى إدخال العمر', 'age');
+      submitLockRef.current = false;
       return;
     }
     if (!formData.location.trim()) {
       raiseError('يرجى إدخال الموقع', 'location');
+      submitLockRef.current = false;
       return;
     }
     if (!formData.description.trim()) {
       raiseError('يرجى إدخال وصف للحيوان', 'description');
+      submitLockRef.current = false;
       return;
     }
     if (!locationCoordinates) {
       raiseError('يرجى تحديد موقعك على الخريطة', 'location');
+      submitLockRef.current = false;
       return;
     }
     if (petImages.length === 0) {
       raiseError('يرجى إضافة صورة واحدة على الأقل', 'images');
+      submitLockRef.current = false;
       return;
     }
 
     try {
       setLoading(true);
       setError('');
-      setSuccess('');
 
       const formDataToSend = new FormData();
       formDataToSend.append('name', formData.name);
@@ -274,7 +317,10 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
       formDataToSend.append('description', formData.description);
       formDataToSend.append('location', formData.location);
       formDataToSend.append('is_free', formData.is_free.toString());
-      formDataToSend.append('status', formData.status);
+      formDataToSend.append('hosting_preference', formData.hosting_preference);
+      // Set status based on adoption toggle
+      const finalStatus = formData.available_for_adoption ? 'available_for_adoption' : 'available';
+      formDataToSend.append('status', finalStatus);
 
       // Add coordinates if available
       if (locationCoordinates) {
@@ -323,10 +369,21 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
       const response = await apiService.createPet(formDataToSend);
 
       if (response.success) {
-        setSuccess('تم إضافة الحيوان بنجاح!');
-        setTimeout(() => {
-          onClose();
-        }, 2000);
+        createdSuccessfully = true;
+        const newPetId = response.data?.id;
+        await clearDraftAndResetForm();
+        if (typeof newPetId === 'number') {
+          onPetCreated?.(newPetId);
+        }
+        Alert.alert('تمت الإضافة بنجاح', 'تم رفع بيانات الحيوان بنجاح.', [
+          {
+            text: 'حسناً',
+            onPress: () => {
+              submitLockRef.current = false;
+              onClose();
+            },
+          },
+        ], { cancelable: false });
       } else {
         setError(response.error || 'فشل في إضافة الحيوان');
         if (response.error) {
@@ -338,13 +395,19 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
       setError('فشل في إضافة الحيوان');
     } finally {
       setLoading(false);
+      if (!createdSuccessfully) {
+        submitLockRef.current = false;
+      }
     }
-  };
+  }, [clearDraftAndResetForm, formData, healthDocuments, locationCoordinates, onClose, onPetCreated, petImages, raiseError, scrollToFieldByErrorMessage, vaccinationDocuments]);
 
   return (
-    <ScrollView ref={scrollViewRef} style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity style={styles.closeButton} onPress={onClose}>
+    <ScrollView ref={scrollViewRef} style={styles.container} contentContainerStyle={styles.scrollContent}>
+      <View style={[styles.header, { paddingTop: Platform.OS === 'ios' ? insets.top + 10 : 50 }]}>
+        <TouchableOpacity
+          style={[styles.closeButton, loading && styles.closeButtonDisabled]}
+          onPress={handleClosePress}
+        >
           <Text style={styles.closeButtonText}>✕</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>إضافة حيوان أليف</Text>
@@ -356,13 +419,6 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
         {error ? (
           <View style={styles.errorContainer}>
             <Text style={styles.errorText}>❌ {error}</Text>
-          </View>
-        ) : null}
-
-        {/* Success Message */}
-        {success ? (
-          <View style={styles.successContainer}>
-            <Text style={styles.successText}>✅ {success}</Text>
           </View>
         ) : null}
 
@@ -503,31 +559,58 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
               <MapLocationPicker
                 value={formData.location}
                 onChange={handleLocationChange}
+                onLocationSelected={(loc) => {
+                  handleLocationChange(loc.address || formData.location, { lat: loc.latitude, lng: loc.longitude });
+                }}
                 placeholder="ابحث عن موقعك أو اختر من الخريطة"
               />
             </View>
 
-            {/* Price */}
+            {/* Adoption Toggle */}
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>السعر</Text>
+              <Text style={styles.label}>متاح للتبني</Text>
+              <TouchableOpacity
+                style={styles.toggleRow}
+                onPress={() => setFormData({...formData, available_for_adoption: !formData.available_for_adoption})}
+              >
+                <Text style={styles.toggleLabel}>
+                  هل تريد عرض هذا الحيوان للتبني؟
+                </Text>
+                <View style={[styles.toggle, formData.available_for_adoption && styles.toggleActive]}>
+                  <View style={[styles.toggleThumb, formData.available_for_adoption && styles.toggleThumbActive]} />
+                </View>
+              </TouchableOpacity>
+              {formData.available_for_adoption && (
+                <Text style={styles.helpText}>
+                  سيتمكن المستخدمون الموثقون من تقديم طلبات تبني لهذا الحيوان
+                </Text>
+              )}
+            </View>
+
+            {/* Hosting Preference */}
+            <View style={styles.inputGroup}>
+              <Text style={styles.label}>الاستضافة *</Text>
               <View style={styles.radioGroup}>
                 <TouchableOpacity
-                  style={[styles.radioButton, formData.is_free && styles.radioButtonActive]}
-                  onPress={() => handleInputChange('is_free', true)}
+                  style={[styles.radioButton, formData.hosting_preference === 'flexible' && styles.radioButtonActive]}
+                  onPress={() => handleInputChange('hosting_preference', 'flexible')}
                 >
-                  <Text style={[styles.radioText, formData.is_free && styles.radioTextActive]}>
-                    🆓 مجاني
-                  </Text>
+                  <Text style={[styles.radioText, formData.hosting_preference === 'flexible' && styles.radioTextActive]}>مرن</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.radioButton, !formData.is_free && styles.radioButtonActive]}
-                  onPress={() => handleInputChange('is_free', false)}
+                  style={[styles.radioButton, formData.hosting_preference === 'my_place' && styles.radioButtonActive]}
+                  onPress={() => handleInputChange('hosting_preference', 'my_place')}
                 >
-                  <Text style={[styles.radioText, !formData.is_free && styles.radioTextActive]}>
-                    💰 مدفوع
-                  </Text>
+                  <Text style={[styles.radioText, formData.hosting_preference === 'my_place' && styles.radioTextActive]}>عندي</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.radioButton, formData.hosting_preference === 'other_place' && styles.radioButtonActive]}
+                  onPress={() => handleInputChange('hosting_preference', 'other_place')}
+                >
+                  <Text style={[styles.radioText, formData.hosting_preference === 'other_place' && styles.radioTextActive]}>عند الطرف الآخر</Text>
                 </TouchableOpacity>
               </View>
+              <Text style={styles.helpText}>اختر مكان الاستضافة المفضل للمقابلة. يمكنك اختيار "مرن" إذا كان كلا الخيارين مناسبين.</Text>
             </View>
 
             {/* Pet Images */}
@@ -544,7 +627,7 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
             <View style={styles.certificatesSection}>
               <Text style={styles.certificatesSectionTitle}>الشهادات الصحية (اختيارية)</Text>
               <Text style={styles.certificatesSectionSubtitle}>
-                📋 رفع الشهادات الصحية اختياري ويزيد من ثقة المالكين الآخرين
+                رفع الشهادات الصحية اختياري ويزيد من ثقة المالكين الآخرين
               </Text>
             </View>
 
@@ -583,6 +666,8 @@ const AddPetScreen: React.FC<AddPetScreenProps> = ({ onClose }) => {
               <Text style={styles.submitButtonText}>إضافة الحيوان</Text>
             )}
           </TouchableOpacity>
+
+          <View style={[styles.bottomSafeSpacer, { height: bottomSafeSpace }]} />
         </View>
       </View>
     </ScrollView>
@@ -596,13 +681,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f8f9fa',
   },
+  scrollContent: {
+    paddingBottom: 0,
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
     backgroundColor: '#02B7B4',
-    paddingTop: 50,
   },
   closeButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
@@ -616,6 +704,9 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  closeButtonDisabled: {
+    opacity: 0.55,
   },
   headerTitle: {
     color: '#fff',
@@ -755,6 +846,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
+  bottomSafeSpacer: {
+    width: '100%',
+  },
   errorContainer: {
     backgroundColor: '#f8d7da',
     borderColor: '#f5c6cb',
@@ -765,19 +859,6 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: '#721c24',
-    fontSize: 14,
-    textAlign: 'center',
-  },
-  successContainer: {
-    backgroundColor: '#d4edda',
-    borderColor: '#c3e6cb',
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 15,
-  },
-  successText: {
-    color: '#155724',
     fontSize: 14,
     textAlign: 'center',
   },
@@ -799,6 +880,51 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#5a6c7d',
     lineHeight: 18,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+  },
+  toggleLabel: {
+    fontSize: 15,
+    color: '#333',
+    flex: 1,
+  },
+  toggle: {
+    width: 50,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#ddd',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleActive: {
+    backgroundColor: '#4CAF50',
+  },
+  toggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  toggleThumbActive: {
+    alignSelf: 'flex-end',
+  },
+  helpText: {
+    fontSize: 13,
+    color: '#666',
+    marginTop: 8,
+    paddingHorizontal: 4,
   },
 });
 

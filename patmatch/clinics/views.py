@@ -1,14 +1,22 @@
 import re
+import time
+import logging
+import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import authenticate
-from django.db.models import Count, Q, Sum
+from django.contrib.gis.db import models as gis_models
+from django.contrib.gis.db.models.functions import Distance, Transform
+from django.contrib.gis.geos import Point, Polygon
+from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper, Exists, OuterRef
+from django.db.models.functions import Cast, Floor
 from django.db import models, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import generics, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
@@ -38,14 +46,19 @@ from .models import (
     ClinicPatientRecord,
     ClinicInvite,
 )
-from pets.models import Notification, ChatRoom, Pet
+from pets.models import Notification, ChatRoom, Pet, NotificationOutbox
 from pets.serializers import PublicPetSerializer
-from pets.notifications import create_notification, _send_push_notification
-from .permissions import IsClinicStaff
+from pets.notifications import create_notification
+from pets.notification_events import enqueue_notification_event
+from pets.push_targets import attach_push_targets
+from .permissions import IsClinicStaff, IsPlatformAdmin
+from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_categories_for_group
 from .serializers import (
     ClinicSerializer,
     ClinicPublicSerializer,
     ClinicListSerializer,
+    ClinicMapPointSerializer,
+    MarketplaceServiceSerializer,
     ClinicServiceSerializer,
     ClinicProductSerializer,
     StorefrontOrderSerializer,
@@ -79,11 +92,368 @@ SERVICE_CATEGORY_APPOINTMENT_TYPE = {
     'emergency': 'emergency',
 }
 
+logger = logging.getLogger(__name__)
+
 
 class ClinicListPagination(PageNumberPagination):
     page_size = settings.REST_FRAMEWORK.get('PAGE_SIZE', 20)
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+MAP_DEFAULT_POINT_LIMIT = 300
+MAP_MAX_POINT_LIMIT = 1000
+MAP_CLUSTER_ZOOM_THRESHOLD = 13
+MAP_LOW_ZOOM_POINT_LIMIT = 200
+NOTIFICATION_PUSH_BATCH_SIZE = max(1, int(getattr(settings, 'NOTIFICATION_PUSH_BATCH_SIZE', 500)))
+
+
+def _parse_bool_param(raw_value, default=True):
+    if raw_value is None:
+        return default
+    normalized = str(raw_value).strip().lower()
+    if normalized in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    return default
+
+
+def _parse_bbox_param(raw_bbox):
+    if not raw_bbox:
+        raise ValueError('bbox مطلوب بصيغة min_lng,min_lat,max_lng,max_lat')
+    try:
+        min_lng, min_lat, max_lng, max_lat = [float(part.strip()) for part in str(raw_bbox).split(',')]
+    except (TypeError, ValueError):
+        raise ValueError('صيغة bbox غير صحيحة')
+
+    if min_lng >= max_lng or min_lat >= max_lat:
+        raise ValueError('حدود bbox غير صحيحة')
+    if min_lat < -90 or max_lat > 90 or min_lng < -180 or max_lng > 180:
+        raise ValueError('bbox خارج نطاق الإحداثيات المسموح')
+
+    return min_lng, min_lat, max_lng, max_lat
+
+
+def _parse_zoom_param(raw_zoom):
+    if raw_zoom in (None, ''):
+        raise ValueError('zoom مطلوب')
+    try:
+        zoom = int(float(raw_zoom))
+    except (TypeError, ValueError):
+        raise ValueError('zoom يجب أن يكون رقمًا صحيحًا')
+    if zoom < 0 or zoom > 25:
+        raise ValueError('zoom خارج النطاق المتوقع')
+    return zoom
+
+
+def _parse_optional_float(raw_value, field_name):
+    if raw_value in (None, ''):
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} غير صالح')
+
+
+def _parse_point_limit(raw_limit):
+    if raw_limit in (None, ''):
+        return MAP_DEFAULT_POINT_LIMIT
+    try:
+        parsed = int(raw_limit)
+    except (TypeError, ValueError):
+        raise ValueError('limit_points يجب أن يكون رقمًا صحيحًا')
+    if parsed <= 0:
+        raise ValueError('limit_points يجب أن يكون أكبر من 0')
+    return min(parsed, MAP_MAX_POINT_LIMIT)
+
+
+def _build_service_category_filter(service_category):
+    if not service_category:
+        return None
+    categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
+    if not categories:
+        return None
+
+    category_labels = dict(ClinicService.CATEGORY_CHOICES)
+    text_query = None
+    for cat in categories:
+        label = category_labels.get(cat)
+        for term in (cat, label):
+            if not term:
+                continue
+            clause = Q(services__icontains=term)
+            text_query = clause if text_query is None else text_query | clause
+
+    filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
+    if text_query is not None:
+        filter_query |= text_query
+    return filter_query
+
+
+def _cap_limit_points_for_zoom(limit_points, zoom):
+    if zoom <= 8:
+        return min(limit_points, MAP_LOW_ZOOM_POINT_LIMIT)
+    return limit_points
+
+
+def _cell_size_meters_for_zoom(zoom):
+    meters_per_pixel = 40075016.686 / (256 * (2 ** max(zoom, 1)))
+    return max(meters_per_pixel * 64, 25.0)
+
+
+def _build_map_cache_key(prefix, params):
+    parts = [f"{key}={params.get(key, '')}" for key in sorted(params.keys())]
+    digest = hashlib.md5("&".join(parts).encode('utf-8')).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+class ClinicMapMarkersView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        started_at = time.perf_counter()
+        try:
+            min_lng, min_lat, max_lng, max_lat = _parse_bbox_param(request.query_params.get('bbox'))
+            zoom = _parse_zoom_param(request.query_params.get('zoom'))
+            cluster_enabled = _parse_bool_param(request.query_params.get('cluster'), default=True)
+            limit_points = _cap_limit_points_for_zoom(
+                _parse_point_limit(request.query_params.get('limit_points')),
+                zoom,
+            )
+
+            user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
+            user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
+            if (user_lat is None) != (user_lng is None):
+                raise ValueError('يجب تمرير user_lat و user_lng معًا')
+            if user_lat is not None and (user_lat < -90 or user_lat > 90):
+                raise ValueError('user_lat خارج النطاق المسموح')
+            if user_lng is not None and (user_lng < -180 or user_lng > 180):
+                raise ValueError('user_lng خارج النطاق المسموح')
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        service_category = request.query_params.get('service_category')
+        search_term = request.query_params.get('search')
+
+        cache_key = _build_map_cache_key(
+            'clinics_map_markers',
+            {
+                'bbox': request.query_params.get('bbox'),
+                'zoom': zoom,
+                'cluster': cluster_enabled,
+                'limit_points': limit_points,
+                'user_lat': user_lat,
+                'user_lng': user_lng,
+                'service_category': service_category,
+                'search': search_term,
+            },
+        )
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
+        try:
+            bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
+            bbox.srid = 4326
+
+            queryset = (
+                Clinic.objects
+                .filter(is_active=True)
+                .annotate(staff_count=Count('staff_members', distinct=True))
+                .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
+                .distinct()
+                .annotate(
+                    effective_point_geom=Cast(
+                        'location_point',
+                        output_field=gis_models.PointField(srid=4326),
+                    )
+                )
+                .exclude(location_point__isnull=True)
+                .filter(location_point__intersects=bbox)
+                .annotate(
+                    map_latitude=Cast(
+                        Func(F('effective_point_geom'), function='ST_Y'),
+                        FloatField(),
+                    ),
+                    map_longitude=Cast(
+                        Func(F('effective_point_geom'), function='ST_X'),
+                        FloatField(),
+                    ),
+                )
+            )
+
+            category_filter = _build_service_category_filter(service_category)
+            if category_filter is not None:
+                queryset = queryset.filter(category_filter)
+
+            if search_term:
+                queryset = queryset.filter(
+                    Q(name__icontains=search_term) |
+                    Q(address__icontains=search_term) |
+                    Q(phone__icontains=search_term) |
+                    Q(email__icontains=search_term) |
+                    Q(services__icontains=search_term)
+                )
+
+            user_point = (
+                Point(user_lng, user_lat, srid=4326)
+                if user_lat is not None and user_lng is not None
+                else None
+            )
+            if user_point is not None:
+                queryset = queryset.annotate(map_distance_m=Distance('location_point', user_point))
+
+            total_matched = queryset.count()
+            clusters_payload = []
+            points_queryset = queryset
+
+            use_clusters = cluster_enabled and zoom < MAP_CLUSTER_ZOOM_THRESHOLD
+            if use_clusters:
+                cell_size_meters = _cell_size_meters_for_zoom(zoom)
+                clustered_queryset = queryset.annotate(
+                    point_mercator=Transform('effective_point_geom', 3857),
+                ).annotate(
+                    grid_x=Cast(
+                        Floor(
+                            ExpressionWrapper(
+                                Func(F('point_mercator'), function='ST_X') /
+                                Value(cell_size_meters),
+                                output_field=FloatField(),
+                            )
+                        ),
+                        IntegerField(),
+                    ),
+                    grid_y=Cast(
+                        Floor(
+                            ExpressionWrapper(
+                                Func(F('point_mercator'), function='ST_Y') /
+                                Value(cell_size_meters),
+                                output_field=FloatField(),
+                            )
+                        ),
+                        IntegerField(),
+                    ),
+                )
+
+                grouped = clustered_queryset.values('grid_x', 'grid_y').annotate(
+                    bucket_count=Count('id'),
+                    latitude=Avg('map_latitude'),
+                    longitude=Avg('map_longitude'),
+                    point_id=Min('id'),
+                )
+
+                cluster_rows = list(grouped.filter(bucket_count__gt=1).order_by('-bucket_count'))
+                clusters_payload = [
+                    {
+                        'id': f"clinic-{zoom}-{row['grid_x']}-{row['grid_y']}",
+                        'latitude': float(row['latitude']) if row['latitude'] is not None else None,
+                        'longitude': float(row['longitude']) if row['longitude'] is not None else None,
+                        'count': int(row['bucket_count']),
+                        'entity_type': 'clinic',
+                    }
+                    for row in cluster_rows
+                ]
+
+                singleton_groups = grouped.filter(bucket_count=1)
+                singleton_total = singleton_groups.count()
+                if user_point is not None:
+                    singleton_groups = singleton_groups.annotate(
+                        sort_distance=Min('map_distance_m'),
+                    ).order_by('sort_distance', '-point_id')
+                else:
+                    singleton_groups = singleton_groups.order_by('-point_id')
+
+                point_ids = [row['point_id'] for row in singleton_groups[:limit_points]]
+                points_queryset = queryset.filter(id__in=point_ids)
+                if user_point is not None:
+                    points_queryset = points_queryset.order_by('map_distance_m', 'name')
+                else:
+                    points_queryset = points_queryset.order_by('name')
+                truncated = singleton_total > len(point_ids)
+            else:
+                if user_point is not None:
+                    points_queryset = queryset.order_by('map_distance_m', 'name')
+                else:
+                    points_queryset = queryset.order_by('name')
+                points_queryset = points_queryset[:limit_points]
+                truncated = total_matched > limit_points
+
+            points_queryset = points_queryset.prefetch_related(
+                models.Prefetch(
+                    'services_list',
+                    queryset=ClinicService.objects.filter(is_active=True).only(
+                        'category',
+                        'clinic_id',
+                    )
+                )
+            )
+            points = list(points_queryset)
+            serializer = ClinicMapPointSerializer(points, many=True, context={'request': request})
+            points_payload = list(serializer.data)
+
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            request_summary = {
+                'bbox': request.query_params.get('bbox'),
+                'zoom': zoom,
+                'cluster': use_clusters,
+                'service_category': service_category,
+                'search': search_term,
+            }
+            logger.info(
+                "clinics_map_markers params=%s total=%s clusters=%s points=%s truncated=%s duration_ms=%s",
+                request_summary,
+                total_matched,
+                len(clusters_payload),
+                len(points_payload),
+                truncated,
+                duration_ms,
+            )
+
+            payload = {
+                'clusters': clusters_payload,
+                'points': points_payload,
+                'meta': {
+                    'zoom': zoom,
+                    'bbox': {
+                        'min_lng': min_lng,
+                        'min_lat': min_lat,
+                        'max_lng': max_lng,
+                        'max_lat': max_lat,
+                    },
+                    'total_matched': total_matched,
+                    'returned_clusters': len(clusters_payload),
+                    'returned_points': len(points_payload),
+                    'truncated': bool(truncated),
+                }
+            }
+            cache.set(
+                cache_key,
+                payload,
+                timeout=max(
+                    1,
+                    int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30)),
+                ),
+            )
+            return Response(payload)
+        except Exception:
+            logger.exception(
+                "clinics_map_markers failed release_marker=%s bbox=%s zoom=%s cluster=%s service_category=%s search=%s",
+                "clinic-map-json-error-v2",
+                request.query_params.get('bbox'),
+                zoom,
+                cluster_enabled,
+                service_category,
+                search_term,
+            )
+            return Response(
+                {
+                    'error': 'تعذر تحميل الخدمات على الخريطة. حاول مرة أخرى لاحقاً.',
+                    'release_marker': 'clinic-map-json-error-v2',
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
@@ -186,6 +556,17 @@ class ClinicLoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if user.is_staff and user.is_superuser:
+            token, _ = Token.objects.get_or_create(user=user)
+            return Response(
+                {
+                    'token': token.key,
+                    'clinic': None,
+                    'user': UserSerializer(user).data,
+                    'is_platform_admin': True,
+                }
+            )
+
         if getattr(user, 'user_type', '') != 'clinic_staff':
             return Response(
                 {'error': 'هذا الحساب غير مخول للوصول إلى لوحة تحكم العيادة'},
@@ -206,6 +587,7 @@ class ClinicLoginView(APIView):
                 'token': token.key,
                 'clinic': ClinicSerializer(clinic).data,
                 'user': UserSerializer(user).data,
+                'is_platform_admin': False,
             }
         )
 
@@ -512,6 +894,113 @@ class PublicStorefrontView(APIView):
         return Response(payload)
 
 
+class PublicMarketplaceServicesView(APIView):
+    permission_classes = [AllowAny]
+
+    def _parse_coordinates(self, request):
+        user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
+        user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
+        if (user_lat is None) != (user_lng is None):
+            raise ValueError('يجب تمرير user_lat و user_lng معًا')
+        if user_lat is not None and (user_lat < -90 or user_lat > 90):
+            raise ValueError('user_lat خارج النطاق المسموح')
+        if user_lng is not None and (user_lng < -180 or user_lng > 180):
+            raise ValueError('user_lng خارج النطاق المسموح')
+        return user_lat, user_lng
+
+    def _resolve_categories(self, request):
+        valid_categories = {choice[0] for choice in ClinicService.CATEGORY_CHOICES}
+        category_param = request.query_params.get('category')
+        if category_param:
+            categories = [cat.strip() for cat in category_param.split(',') if cat.strip()]
+            invalid = [cat for cat in categories if cat not in valid_categories]
+            if invalid:
+                raise ValueError(f"فئة خدمة غير مدعومة: {', '.join(invalid)}")
+            return categories
+
+        group_key = request.query_params.get('group') or 'clinic_vaccination'
+        categories = get_marketplace_categories_for_group(group_key)
+        if categories is None:
+            raise ValueError('مجموعة الخدمات غير مدعومة')
+        return categories
+
+    def get(self, request):
+        try:
+            user_lat, user_lng = self._parse_coordinates(request)
+            categories = self._resolve_categories(request)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            queryset = (
+                ClinicService.objects
+                .filter(is_active=True, category__in=categories, clinic__is_active=True)
+                .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
+                .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
+                .annotate(
+                    marketplace_min_price=Min(
+                        'pricing_tiers__price',
+                        filter=Q(pricing_tiers__is_active=True),
+                    ),
+                    marketplace_max_price=Max(
+                        'pricing_tiers__price',
+                        filter=Q(pricing_tiers__is_active=True),
+                    ),
+                )
+                .select_related('clinic')
+            )
+
+            search_term = (request.query_params.get('search') or '').strip()
+            if search_term:
+                queryset = queryset.filter(
+                    Q(name__icontains=search_term) |
+                    Q(description__icontains=search_term) |
+                    Q(clinic__name__icontains=search_term) |
+                    Q(clinic__address__icontains=search_term) |
+                    Q(clinic__services__icontains=search_term)
+                )
+
+            user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
+            if user_point is not None:
+                queryset = queryset.annotate(
+                    marketplace_distance_m=Distance('clinic__location_point', user_point),
+                ).order_by(
+                    F('marketplace_distance_m').asc(nulls_last=True),
+                    'display_order',
+                    '-is_featured',
+                    'base_price',
+                    'name',
+                )
+            else:
+                queryset = queryset.order_by('display_order', '-is_featured', 'base_price', 'name')
+
+            paginator = ClinicListPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            serializer = MarketplaceServiceSerializer(
+                page,
+                many=True,
+                context={
+                    'request': request,
+                    'marketplace_groups': MARKETPLACE_SERVICE_GROUPS,
+                },
+            )
+            return paginator.get_paginated_response(serializer.data)
+        except Exception:
+            logger.exception(
+                'Unexpected marketplace services error',
+                extra={
+                    'group': request.query_params.get('group'),
+                    'category': request.query_params.get('category'),
+                    'search': request.query_params.get('search'),
+                    'has_location': user_lat is not None and user_lng is not None,
+                },
+            )
+            return Response(
+                {'error': 'تعذر تحميل خدمات السوق حالياً. حاول مرة أخرى.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class PublicClinicListView(APIView):
     permission_classes = [AllowAny]
 
@@ -523,23 +1012,9 @@ class PublicClinicListView(APIView):
             .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
         )
-        service_category = request.query_params.get('service_category')
-        if service_category:
-            categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
-            if categories:
-                category_labels = dict(ClinicService.CATEGORY_CHOICES)
-                text_query = None
-                for cat in categories:
-                    label = category_labels.get(cat)
-                    for term in (cat, label):
-                        if not term:
-                            continue
-                        clause = Q(services__icontains=term)
-                        text_query = clause if text_query is None else text_query | clause
-                filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
-                if text_query is not None:
-                    filter_query |= text_query
-                clinics = clinics.filter(filter_query)
+        category_filter = _build_service_category_filter(request.query_params.get('service_category'))
+        if category_filter is not None:
+            clinics = clinics.filter(category_filter)
         clinics = clinics.prefetch_related(
             models.Prefetch(
                 'services_list',
@@ -638,17 +1113,21 @@ class PublicStorefrontBookingView(APIView):
             preferred_date=data.get('preferred_date'),
             preferred_time=data.get('preferred_time'),
             notes=data.get('notes'),
+            request_type=data.get('request_type', 'appointment'),
+            source=data.get('source') or 'PetMatch',
+            contact_channel=data.get('contact_channel', 'app'),
             status='new',
             quoted_price=service.base_price,
         )
 
+        request_type = data.get('request_type', 'appointment')
         preferred_date = data.get('preferred_date')
         preferred_time = data.get('preferred_time')
         customer_phone = data.get('customer_phone')
         customer_email = data.get('customer_email')
         pet_name = data.get('pet_name')
 
-        if preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
+        if request_type == 'appointment' and preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
             appointment_owner = None
             appointment_pet = None
 
@@ -786,6 +1265,7 @@ class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing clinic services"""
     serializer_class = ClinicServiceSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -827,6 +1307,184 @@ class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         clinic = self.get_clinic()
         serializer.save(clinic=clinic)
+
+
+class PlatformAdminClinicListView(APIView):
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get(self, request):
+        queryset = (
+            Clinic.objects
+            .all()
+            .annotate(staff_count=Count('staff_members'))
+            .prefetch_related('services_list')
+            .order_by('name')
+        )
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(address__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(email__icontains=search)
+            )
+
+        is_active = request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        paginator = ClinicListPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = ClinicListSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        serializer = ClinicRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(
+            ClinicSerializer(result['clinic'], context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
+    serializer_class = ClinicServiceSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _service_create_log_context(self, request):
+        clinic_id = request.data.get('clinic_id') or request.data.get('clinic')
+        return {
+            'method': request.method,
+            'user_id': getattr(request.user, 'id', None),
+            'clinic_id': clinic_id,
+            'content_type': request.META.get('CONTENT_TYPE', ''),
+            'file_fields': list(request.FILES.keys()),
+            'release': getattr(settings, 'RELEASE_VERSION', None) or getattr(settings, 'GIT_SHA', None),
+        }
+
+    def get_queryset(self):
+        queryset = (
+            ClinicService.objects
+            .all()
+            .select_related('clinic')
+            .prefetch_related('pricing_tiers')
+            .order_by('clinic__name', 'display_order', '-is_featured', 'name')
+        )
+
+        clinic_id = self.request.query_params.get('clinic_id')
+        if clinic_id:
+            queryset = queryset.filter(clinic_id=clinic_id)
+
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        category = self.request.query_params.get('category')
+        if category:
+            queryset = queryset.filter(category=category)
+
+        pet_type = self.request.query_params.get('pet_type')
+        if pet_type:
+            queryset = queryset.filter(applicable_pet_types__contains=[pet_type])
+
+        is_featured = self.request.query_params.get('is_featured')
+        if is_featured is not None:
+            queryset = queryset.filter(is_featured=is_featured.lower() == 'true')
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(description__icontains=search) |
+                Q(clinic__name__icontains=search)
+            )
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        if not request.query_params.get('clinic_id'):
+            return Response(
+                {'error': 'يجب اختيار العيادة أولاً'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
+    def _get_target_clinic(self):
+        clinic_id = self.request.data.get('clinic_id') or self.request.data.get('clinic')
+        if not clinic_id:
+            raise ValidationError({'clinic_id': 'يجب اختيار العيادة'})
+        try:
+            clinic_id = int(clinic_id)
+        except (TypeError, ValueError):
+            raise ValidationError({'clinic_id': 'معرف العيادة غير صالح'})
+
+        return get_object_or_404(Clinic, id=clinic_id, is_active=True)
+
+    def create(self, request, *args, **kwargs):
+        log_context = self._service_create_log_context(request)
+        logger.info('Platform admin clinic service create requested', extra=log_context)
+
+        serializer = self.get_serializer(data=request.data)
+        try:
+            is_valid = serializer.is_valid()
+        except Exception:
+            logger.exception(
+                'Unexpected platform admin clinic service validation error',
+                extra=log_context,
+            )
+            return Response(
+                {
+                    'error': 'حدث خطأ غير متوقع أثناء التحقق من بيانات الخدمة',
+                    'request_time': timezone.now().isoformat(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not is_valid:
+            logger.warning(
+                'Platform admin clinic service create validation failed',
+                extra={**log_context, 'validation_errors': str(serializer.errors)},
+            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            clinic = self._get_target_clinic()
+            self.perform_create(serializer, clinic=clinic)
+            response_data = serializer.data
+            headers = self.get_success_headers(response_data)
+        except (ValidationError, Http404):
+            logger.warning(
+                'Platform admin clinic service create rejected',
+                extra=log_context,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                'Unexpected platform admin clinic service create error',
+                extra=log_context,
+            )
+            return Response(
+                {
+                    'error': 'حدث خطأ غير متوقع أثناء إنشاء الخدمة',
+                    'request_time': timezone.now().isoformat(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        logger.info(
+            'Platform admin clinic service create completed',
+            extra={**log_context, 'service_id': serializer.instance.id},
+        )
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer, clinic=None):
+        serializer.save(clinic=clinic or self._get_target_clinic())
+
+    def perform_update(self, serializer):
+        serializer.save()
 
 
 class ClinicProductViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -908,6 +1566,36 @@ class ServicePricingTierViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(service_id=service_id)
             
         return queryset
+
+    def _get_target_service(self):
+        service_id = self.request.data.get('service_id') or self.request.data.get('service')
+        if not service_id:
+            raise ValidationError({'service': 'يجب اختيار الخدمة'})
+        return get_object_or_404(ClinicService, id=service_id, clinic=self.get_clinic())
+
+    def perform_create(self, serializer):
+        serializer.save(service=self._get_target_service())
+
+
+class PlatformAdminServicePricingTierViewSet(viewsets.ModelViewSet):
+    serializer_class = ServicePricingTierSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get_queryset(self):
+        queryset = ServicePricingTier.objects.all().select_related('service', 'service__clinic')
+        service_id = self.request.query_params.get('service_id')
+        if service_id:
+            queryset = queryset.filter(service_id=service_id)
+        return queryset
+
+    def _get_target_service(self):
+        service_id = self.request.data.get('service_id') or self.request.data.get('service')
+        if not service_id:
+            raise ValidationError({'service': 'يجب اختيار الخدمة'})
+        return get_object_or_404(ClinicService, id=service_id)
+
+    def perform_create(self, serializer):
+        serializer.save(service=self._get_target_service())
 
 
 class ServicePackageViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -1081,57 +1769,68 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
         push_sent = 0
         results = []
 
-        for entry in targeted_users.values():
-            user = entry['user']
-            patient = entry['patient']
-            chat_room = entry['chat_room']
+        targeted_entries = list(targeted_users.values())
+        for start in range(0, len(targeted_entries), NOTIFICATION_PUSH_BATCH_SIZE):
+            batch = targeted_entries[start:start + NOTIFICATION_PUSH_BATCH_SIZE]
+            for entry in batch:
+                user = entry['user']
+                patient = entry['patient']
+                chat_room = entry['chat_room']
 
-            extra_data = {
-                'clinic_id': str(clinic.id),
-                'clinic_name': clinic.name,
-                'clinic_message_id': str(base_message.id),
-                'sender_name': sender_name,
-                'patient_id': str(patient.id),
-                'patient_name': patient.name or 'Pet',
-            }
-            if chat_room:
-                extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
-                extra_data['chat_room_id'] = chat_room.id
+                extra_data = {
+                    'type': 'clinic_chat_message',
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                    'patient_id': str(patient.id),
+                    'patient_name': patient.name or 'Pet',
+                }
+                if chat_room:
+                    extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
+                    extra_data['chat_room_id'] = chat_room.id
 
-            notification = create_notification(
-                user=user,
-                notification_type='chat_message_received',
-                title=title,
-                message=message_body,
-                extra_data=extra_data,
-            )
+                notification = create_notification(
+                    user=user,
+                    notification_type='chat_message_received',
+                    title=title,
+                    message=message_body,
+                    extra_data=extra_data,
+                )
 
-            payload = {
-                'type': 'clinic_chat_message',
-                'clinic_id': str(clinic.id),
-                'clinic_message_id': str(base_message.id),
-                'sender_name': sender_name,
-            }
-            if chat_room:
-                payload['firebase_chat_id'] = chat_room.firebase_chat_id
-                payload['chat_room_id'] = str(chat_room.id)
+                payload = {
+                    'type': 'clinic_chat_message',
+                    'clinic_id': str(clinic.id),
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                }
+                if chat_room:
+                    payload['firebase_chat_id'] = chat_room.firebase_chat_id
+                    payload['chat_room_id'] = str(chat_room.id)
+                payload = attach_push_targets(payload, 'clinic_chat_message')
 
-            delivered = _send_push_notification(user, title, message_body, payload)
-            if delivered:
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CLINIC_CHAT_MESSAGE_PUSH,
+                    object_id=notification.id,
+                    dedupe_key=f"clinic_chat_push:{base_message.id}:{notification.id}",
+                    payload={
+                        'title': title,
+                        'message': message_body,
+                        'push_payload': payload,
+                    },
+                )
                 push_sent += 1
-                notification.extra_data['delivered'] = True
-                notification.save(update_fields=['extra_data'])
 
-            if chat_room:
-                chat_room.updated_at = timezone.now()
-                chat_room.save(update_fields=['updated_at'])
+                if chat_room:
+                    chat_room.updated_at = timezone.now()
+                    chat_room.save(update_fields=['updated_at'])
 
-            results.append({
-                'user_id': user.id,
-                'delivered': bool(delivered),
-                'notification_id': notification.id,
-                'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
-            })
+                results.append({
+                    'user_id': user.id,
+                    'delivered': True,
+                    'notification_id': notification.id,
+                    'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
+                })
 
         base_message.status = 'in_progress'
         base_message.save(update_fields=['status', 'updated_at'])
@@ -1464,54 +2163,63 @@ class ClinicBroadcastView(ClinicContextMixin, APIView):
         skipped = []
         results = []
 
-        for patient in patients:
-            user = patient.linked_user
-            if not user:
-                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
-                continue
+        for start in range(0, len(patients), NOTIFICATION_PUSH_BATCH_SIZE):
+            batch = patients[start:start + NOTIFICATION_PUSH_BATCH_SIZE]
+            for patient in batch:
+                user = patient.linked_user
+                if not user:
+                    skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
+                    continue
 
-            token = (user.fcm_token or '').strip()
-            if not token:
-                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
-                continue
+                token = (user.fcm_token or '').strip()
+                if not token:
+                    skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
+                    continue
 
-            targeted += 1
-            pet_name = patient.name or 'Pet'
-            payload = {
-                'type': 'clinic_broadcast',
-                'clinic_id': str(clinic.id),
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-            }
-            extra_data = {
-                'clinic_id': str(clinic.id),
-                'clinic_name': clinic.name,
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-                'delivered': False,
-            }
+                targeted += 1
+                pet_name = patient.name or 'Pet'
+                payload = attach_push_targets({
+                    'type': 'clinic_broadcast',
+                    'clinic_id': str(clinic.id),
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                }, 'clinic_broadcast')
+                extra_data = {
+                    'type': 'clinic_broadcast',
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                    'delivered': False,
+                }
 
-            notification = create_notification(
-                user=user,
-                notification_type='clinic_broadcast',
-                title=title,
-                message=message,
-                extra_data=extra_data,
-            )
+                notification = create_notification(
+                    user=user,
+                    notification_type='clinic_broadcast',
+                    title=title,
+                    message=message,
+                    extra_data=extra_data,
+                )
 
-            delivered = _send_push_notification(user, title, message, payload)
-            if delivered:
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CLINIC_BROADCAST_PUSH,
+                    object_id=notification.id,
+                    dedupe_key=f"clinic_broadcast_push:{clinic.id}:{notification.id}",
+                    payload={
+                        'title': title,
+                        'message': message,
+                        'push_payload': payload,
+                    },
+                )
                 push_sent += 1
-                notification.extra_data['delivered'] = True
-                notification.save(update_fields=['extra_data'])
 
-            results.append({
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-                'user_id': user.id,
-                'delivered': bool(delivered),
-                'notification_id': notification.id,
-            })
+                results.append({
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                    'user_id': user.id,
+                    'delivered': True,
+                    'notification_id': notification.id,
+                })
 
         if targeted == 0:
             return Response({

@@ -2,11 +2,21 @@
 Utilities for creating and managing notifications
 """
 import logging
+from datetime import timedelta
 from math import radians, sin, cos, sqrt, atan2
 
+from django.conf import settings
+from django.db import IntegrityError
+from django.utils import timezone as django_timezone
+from zoneinfo import ZoneInfo
 
-from .models import Notification, Pet, BreedingRequest
-from accounts.models import User
+from .models import (
+    Notification,
+    Pet,
+    BreedingRequest,
+    NotificationDeliveryAttempt,
+)
+from accounts.models import User, UserNotificationSettings
 from accounts.firebase_service import firebase_service
 from .email_notifications import (
     send_breeding_request_email,
@@ -14,8 +24,235 @@ from .email_notifications import (
     send_adoption_request_email,
     send_adoption_request_approved_email
 )
+from .push_targets import attach_push_targets
 
 logger = logging.getLogger(__name__)
+
+TRANSACTIONAL_NOTIFICATION_TYPES = {
+    'chat_message_received',
+    'breeding_request_received',
+    'breeding_request_approved',
+    'breeding_request_rejected',
+    'adoption_request_received',
+    'adoption_request_approved',
+    'clinic_invite',
+}
+
+DISCOVERY_NOTIFICATION_TYPES = {
+    'pet_nearby',
+    'adoption_pet_nearby',
+}
+
+REMINDER_NOTIFICATION_TYPES = {
+    'breeding_request_pending_reminder',
+    'adoption_request_pending_reminder',
+}
+
+CHAT_NOTIFICATION_TYPES = {
+    'chat_message_received',
+    'clinic_chat_message',
+}
+
+BREEDING_NOTIFICATION_TYPES = {
+    'breeding_request_received',
+    'breeding_request_approved',
+    'breeding_request_rejected',
+    'breeding_request_completed',
+    'breeding_request_pending_reminder',
+    'pet_nearby',
+}
+
+ADOPTION_NOTIFICATION_TYPES = {
+    'adoption_request_received',
+    'adoption_request_approved',
+    'adoption_request_pending_reminder',
+    'adoption_pet_nearby',
+}
+
+CLINIC_NOTIFICATION_TYPES = {
+    'clinic_invite',
+    'clinic_broadcast',
+    'clinic_chat_message',
+}
+
+SYSTEM_NOTIFICATION_TYPES = {
+    'system_message',
+    'account_verification_approved',
+}
+
+
+def get_notification_category(notification_type):
+    notification_type = (notification_type or '').strip().lower()
+    if notification_type in REMINDER_NOTIFICATION_TYPES:
+        return 'reminders'
+    if notification_type in DISCOVERY_NOTIFICATION_TYPES:
+        return 'discovery'
+    if notification_type in CHAT_NOTIFICATION_TYPES:
+        return 'chat'
+    if notification_type in BREEDING_NOTIFICATION_TYPES:
+        return 'breeding'
+    if notification_type in ADOPTION_NOTIFICATION_TYPES:
+        return 'adoption'
+    if notification_type in CLINIC_NOTIFICATION_TYPES:
+        return 'clinic'
+    if notification_type in SYSTEM_NOTIFICATION_TYPES:
+        return 'system'
+    return 'transactional' if notification_type in TRANSACTIONAL_NOTIFICATION_TYPES else 'system'
+
+
+def get_notification_priority(notification_type):
+    notification_type = (notification_type or '').strip().lower()
+    if notification_type in TRANSACTIONAL_NOTIFICATION_TYPES:
+        return 'high'
+    if notification_type in REMINDER_NOTIFICATION_TYPES:
+        return 'normal'
+    if notification_type in DISCOVERY_NOTIFICATION_TYPES:
+        return 'low'
+    return 'normal'
+
+
+def _hash_user_bucket(user_id):
+    # Deterministic bucket [0, 99].
+    return ((int(user_id) * 2654435761) % 100)
+
+
+def is_user_in_variant_cohort(user):
+    if not user or not getattr(user, 'id', None):
+        return False
+
+    rollout_phase = int(getattr(settings, 'NOTIFICATION_EXPERIMENT_PHASE', 100))
+    rollout_phase = max(0, min(100, rollout_phase))
+    bucket = _hash_user_bucket(user.id)
+    return bucket < rollout_phase
+
+
+def _resolve_settings_timezone(user_settings):
+    try:
+        return ZoneInfo(user_settings.timezone or 'UTC')
+    except Exception:
+        return ZoneInfo('UTC')
+
+
+def _is_now_in_quiet_hours(user_settings, now=None):
+    now = now or django_timezone.now()
+    tz = _resolve_settings_timezone(user_settings)
+    local_now = now.astimezone(tz)
+    current_time = local_now.time()
+    start = user_settings.quiet_hours_start
+    end = user_settings.quiet_hours_end
+
+    if start == end:
+        return False
+
+    if start < end:
+        return start <= current_time < end
+    return current_time >= start or current_time < end
+
+
+def _record_delivery_attempt(notification, status, error='', metadata=None):
+    try:
+        NotificationDeliveryAttempt.objects.create(
+            notification=notification,
+            channel=NotificationDeliveryAttempt.CHANNEL_PUSH,
+            provider='fcm',
+            status=status,
+            error=error or '',
+            metadata=metadata or {},
+        )
+    except Exception:
+        logger.exception("Failed to persist notification delivery attempt for notification=%s", getattr(notification, 'id', None))
+
+
+def _can_send_non_transactional_now(user, user_settings, notification_type):
+    now = django_timezone.now()
+    category = get_notification_category(notification_type)
+
+    if not user_settings.enabled_global:
+        return False, 'global_notifications_disabled'
+
+    if _is_now_in_quiet_hours(user_settings, now=now):
+        return False, 'quiet_hours_active'
+
+    day_ago = now - timedelta(hours=24)
+    sent_today_qs = NotificationDeliveryAttempt.objects.filter(
+        notification__user=user,
+        channel=NotificationDeliveryAttempt.CHANNEL_PUSH,
+        status=NotificationDeliveryAttempt.STATUS_SENT,
+        created_at__gte=day_ago,
+    )
+    sent_count = sent_today_qs.count()
+    if sent_count >= user_settings.max_push_per_day:
+        return False, 'max_push_per_day_exceeded'
+
+    if category == 'discovery':
+        discovery_count = sent_today_qs.filter(
+            notification__type__in=DISCOVERY_NOTIFICATION_TYPES
+        ).count()
+        if discovery_count >= user_settings.max_discovery_per_day:
+            return False, 'max_discovery_per_day_exceeded'
+
+    min_gap = max(0, int(user_settings.min_minutes_between_non_transactional))
+    if min_gap > 0:
+        last_sent = sent_today_qs.exclude(
+            notification__type__in=TRANSACTIONAL_NOTIFICATION_TYPES
+        ).order_by('-created_at').values_list('created_at', flat=True).first()
+        if last_sent and (now - last_sent) < timedelta(minutes=min_gap):
+            return False, 'min_interval_not_elapsed'
+
+    return True, None
+
+
+def _is_category_enabled(user, user_settings, category):
+    if not user_settings.enabled_global:
+        return False
+    if category == 'chat':
+        return user_settings.allow_chat
+    if category == 'breeding':
+        return user_settings.allow_breeding
+    if category == 'adoption':
+        return user_settings.allow_adoption
+    if category == 'clinic':
+        return user_settings.allow_clinic
+    if category == 'discovery':
+        return user_settings.allow_discovery
+    if category == 'reminders':
+        return user_settings.allow_reminders
+    if category == 'transactional':
+        return user_settings.allow_transactional
+    return True
+
+
+def _should_deliver_push(user, notification_type):
+    """
+    Return (allowed: bool, reason: str|None, settings_obj).
+    Applies:
+    - Legacy toggles for all users.
+    - New policy controls only for users in experiment variant.
+    """
+    if not user:
+        return False, 'missing_user', None
+
+    if (notification_type in BREEDING_NOTIFICATION_TYPES) and getattr(user, 'notify_breeding_requests', True) is False:
+        return False, 'legacy_breeding_opt_out', None
+    if (notification_type in ADOPTION_NOTIFICATION_TYPES) and getattr(user, 'notify_adoption_pets', True) is False:
+        return False, 'legacy_adoption_opt_out', None
+
+    user_settings, _ = UserNotificationSettings.objects.get_or_create(user=user)
+    user_settings.sync_from_legacy_user_fields()
+
+    category = get_notification_category(notification_type)
+    if not _is_category_enabled(user, user_settings, category):
+        return False, f'category_disabled:{category}', user_settings
+
+    # Keep control cohort behavior close to legacy; variant gets full anti-fatigue policy.
+    if not is_user_in_variant_cohort(user):
+        return True, None, user_settings
+
+    if notification_type in TRANSACTIONAL_NOTIFICATION_TYPES:
+        return True, None, user_settings
+
+    allowed, reason = _can_send_non_transactional_now(user, user_settings, notification_type)
+    return allowed, reason, user_settings
 
 
 def _send_push_notification(user, title, message, data=None):
@@ -43,21 +280,95 @@ def _send_push_notification(user, title, message, data=None):
         return False
 
 
-def _send_push_if_allowed(user, title, message, data=None, category=None):
-    """Respect user notification preferences before sending push."""
+def _send_push_if_allowed(user, title, message, data=None, category=None, notification=None, notification_type=None):
+    """
+    Respect legacy + granular policy preferences before sending push.
+    Returns bool delivery status.
+    """
     if not user:
+        _record_delivery_attempt(notification, NotificationDeliveryAttempt.STATUS_SUPPRESSED, error='missing_user')
         return False
-    if category == 'breeding' and getattr(user, 'notify_breeding_requests', True) is False:
-        logger.info("Breeding push suppressed for user %s (opted out)", user.id)
+
+    resolved_type = (notification_type or (notification.type if notification else '') or '').strip().lower()
+    allowed, reason, _ = _should_deliver_push(user, resolved_type)
+    if not allowed:
+        logger.info("Push suppressed for user %s reason=%s type=%s", user.id, reason, resolved_type)
+        _record_delivery_attempt(
+            notification,
+            NotificationDeliveryAttempt.STATUS_SUPPRESSED,
+            error=reason or 'suppressed',
+            metadata={'type': resolved_type, 'category': category or get_notification_category(resolved_type)},
+        )
         return False
-    if category == 'adoption' and getattr(user, 'notify_adoption_pets', True) is False:
-        logger.info("Adoption push suppressed for user %s (opted out)", user.id)
+
+    payload = dict(data or {})
+    if notification and notification.id and not payload.get('notification_id'):
+        payload['notification_id'] = str(notification.id)
+    if resolved_type and not payload.get('type'):
+        payload['type'] = resolved_type
+
+    if not user.fcm_token:
+        _record_delivery_attempt(
+            notification,
+            NotificationDeliveryAttempt.STATUS_SUPPRESSED,
+            error='missing_fcm_token',
+            metadata={'type': resolved_type, 'category': category or get_notification_category(resolved_type), 'payload': payload},
+        )
         return False
-    return _send_push_notification(user, title, message, data)
+
+    if not firebase_service.is_initialized:
+        _record_delivery_attempt(
+            notification,
+            NotificationDeliveryAttempt.STATUS_SUPPRESSED,
+            error='firebase_not_initialized',
+            metadata={'type': resolved_type, 'category': category or get_notification_category(resolved_type), 'payload': payload},
+        )
+        return False
+
+    delivered = _send_push_notification(user, title, message, payload)
+    _record_delivery_attempt(
+        notification,
+        NotificationDeliveryAttempt.STATUS_SENT if delivered else NotificationDeliveryAttempt.STATUS_FAILED,
+        error='' if delivered else 'provider_delivery_failed',
+        metadata={'type': resolved_type, 'category': category or get_notification_category(resolved_type), 'payload': payload},
+    )
+    return delivered
 
 
 def _adoption_notifications_enabled(user):
     return getattr(user, 'notify_adoption_pets', True) is not False
+
+
+def deliver_outbox_notification_push(notification, title=None, message=None, push_payload=None, push_type=None):
+    """
+    Push delivery helper for outbox handlers.
+    Applies policy checks + delivery attempt tracking.
+    """
+    if not notification:
+        return False
+
+    resolved_type = (push_type or notification.type or '').strip().lower()
+    payload = attach_push_targets(
+        dict(push_payload or {}),
+        resolved_type,
+        context={
+            **(notification.extra_data or {}),
+            'pet_id': getattr(notification, 'related_pet_id', None),
+            'breeding_request_id': getattr(notification, 'related_breeding_request_id', None),
+            'chat_room_id': getattr(notification, 'related_chat_room_id', None),
+        },
+    )
+    payload.setdefault('type', resolved_type)
+
+    return _send_push_if_allowed(
+        user=notification.user,
+        title=title or notification.title,
+        message=message or notification.message,
+        data=payload,
+        category=get_notification_category(resolved_type),
+        notification=notification,
+        notification_type=resolved_type,
+    )
 
 def create_notification(
     user,
@@ -66,7 +377,9 @@ def create_notification(
     message,
     related_pet=None,
     related_breeding_request=None,
-    extra_data=None
+    related_chat_room=None,
+    extra_data=None,
+    event_key=None,
 ):
     """
     إنشاء إشعار جديد
@@ -88,12 +401,58 @@ def create_notification(
         type=notification_type,
         title=title,
         message=message,
+        event_key=event_key,
         related_pet=related_pet,
         related_breeding_request=related_breeding_request,
+        related_chat_room=related_chat_room,
         extra_data=extra_data or {}
     )
 
-def notify_breeding_request_received(breeding_request):
+
+def create_notification_once(
+    user,
+    notification_type,
+    title,
+    message,
+    related_pet=None,
+    related_breeding_request=None,
+    related_chat_room=None,
+    extra_data=None,
+    event_key=None,
+):
+    if not event_key:
+        return create_notification(
+            user=user,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            related_pet=related_pet,
+            related_breeding_request=related_breeding_request,
+            related_chat_room=related_chat_room,
+            extra_data=extra_data,
+        ), True
+
+    defaults = {
+        'type': notification_type,
+        'title': title,
+        'message': message,
+        'related_pet': related_pet,
+        'related_breeding_request': related_breeding_request,
+        'related_chat_room': related_chat_room,
+        'extra_data': extra_data or {},
+    }
+    try:
+        notification, created = Notification.objects.get_or_create(
+            user=user,
+            event_key=event_key,
+            defaults=defaults,
+        )
+        return notification, created
+    except IntegrityError:
+        notification = Notification.objects.get(user=user, event_key=event_key)
+        return notification, False
+
+def notify_breeding_request_received(breeding_request, event_key=None):
     """إشعار باستلام طلب مقابلة جديد"""
     receiver = breeding_request.receiver
     target_pet = breeding_request.target_pet
@@ -123,31 +482,87 @@ def notify_breeding_request_received(breeding_request):
         message += " (مكان المقابلة سيتم تحديده لاحقاً)"
 
     # إنشاء الإشعار
-    notification = create_notification(
+    notification, created = create_notification_once(
         user=receiver,
         notification_type='breeding_request_received',
         title=title,
         message=message,
         related_pet=target_pet,
         related_breeding_request=breeding_request,
-        extra_data=extra_data
+        extra_data=extra_data,
+        event_key=event_key,
     )
 
-    # إرسال إيميل
-    send_breeding_request_email(breeding_request)
+    if created:
+        # إرسال إيميل
+        send_breeding_request_email(breeding_request)
 
-    # إرسال إشعار دفع
-    push_payload = {
-        'type': 'breeding_request_received',
-        'breeding_request_id': str(breeding_request.id),
-        'pet_id': str(target_pet.id),
-    }
-    _send_push_if_allowed(receiver, title, message, push_payload, category='breeding')
+        # إرسال إشعار دفع
+        push_payload = attach_push_targets({
+            'type': 'breeding_request_received',
+            'breeding_request_id': str(breeding_request.id),
+            'pet_id': str(target_pet.id),
+        }, 'breeding_request_received')
+        _send_push_if_allowed(
+            receiver,
+            title,
+            message,
+            push_payload,
+            category='breeding',
+            notification=notification,
+            notification_type='breeding_request_received',
+        )
 
     return notification
 
 
-def notify_breeding_request_approved(breeding_request):
+def notify_chat_message_received(recipient_user, sender_user, chat_room, message_content, event_key=None):
+    """Create chat-message notification and optionally deliver push."""
+    if not recipient_user or not sender_user or not chat_room:
+        return None
+    if recipient_user.id == sender_user.id:
+        return None
+
+    message_content = (message_content or '').strip() or 'رسالة جديدة'
+    title = f"رسالة جديدة من {sender_user.get_full_name()}"
+    message = f"{message_content[:100]}..." if len(message_content) > 100 else message_content
+
+    notification, created = create_notification_once(
+        user=recipient_user,
+        notification_type='chat_message_received',
+        title=title,
+        message=message,
+        related_chat_room=chat_room,
+        extra_data={
+            'sender_name': sender_user.get_full_name(),
+            'sender_id': sender_user.id,
+            'chat_id': chat_room.firebase_chat_id,
+            'message_preview': message_content[:50],
+        },
+        event_key=event_key,
+    )
+
+    if created:
+        push_payload = attach_push_targets({
+            'type': 'chat_message_received',
+            'chat_id': chat_room.firebase_chat_id,
+            'sender_id': str(sender_user.id),
+            'sender_name': sender_user.get_full_name(),
+        }, 'chat_message_received')
+        _send_push_if_allowed(
+            recipient_user,
+            title,
+            message,
+            push_payload,
+            category='chat',
+            notification=notification,
+            notification_type='chat_message_received',
+        )
+
+    return notification
+
+
+def notify_breeding_request_approved(breeding_request, event_key=None):
     """إشعار بقبول طلب المقابلة"""
     requester = breeding_request.requester
     target_pet = breeding_request.target_pet
@@ -176,30 +591,40 @@ def notify_breeding_request_approved(breeding_request):
         extra_data['meeting_date'] = meeting_date_value
 
     # إنشاء الإشعار
-    notification = create_notification(
+    notification, created = create_notification_once(
         user=requester,
         notification_type='breeding_request_approved',
         title=title,
         message=message,
         related_pet=target_pet,
         related_breeding_request=breeding_request,
-        extra_data=extra_data
+        extra_data=extra_data,
+        event_key=event_key,
     )
 
-    # إرسال إيميل
-    send_breeding_request_approved_email(breeding_request)
+    if created:
+        # إرسال إيميل
+        send_breeding_request_approved_email(breeding_request)
 
-    push_payload = {
-        'type': 'breeding_request_approved',
-        'breeding_request_id': str(breeding_request.id),
-        'pet_id': str(target_pet.id),
-    }
-    _send_push_if_allowed(requester, title, message, push_payload, category='breeding')
+        push_payload = attach_push_targets({
+            'type': 'breeding_request_approved',
+            'breeding_request_id': str(breeding_request.id),
+            'pet_id': str(target_pet.id),
+        }, 'breeding_request_approved')
+        _send_push_if_allowed(
+            requester,
+            title,
+            message,
+            push_payload,
+            category='breeding',
+            notification=notification,
+            notification_type='breeding_request_approved',
+        )
 
     return notification
 
 
-def notify_breeding_request_rejected(breeding_request):
+def notify_breeding_request_rejected(breeding_request, event_key=None):
     """إشعار برفض طلب المقابلة"""
     requester = breeding_request.requester
     target_pet = breeding_request.target_pet
@@ -207,7 +632,7 @@ def notify_breeding_request_rejected(breeding_request):
     title = f"تم رفض طلب مقابلتك مع {target_pet.name}"
     message = f"نأسف، تم رفض طلب المقابلة الخاص بك. يمكنك البحث عن حيوانات أخرى للتزاوج."
     
-    notification = create_notification(
+    notification, created = create_notification_once(
         user=requester,
         notification_type='breeding_request_rejected',
         title=title,
@@ -216,15 +641,25 @@ def notify_breeding_request_rejected(breeding_request):
         related_breeding_request=breeding_request,
         extra_data={
             'rejection_reason': breeding_request.response_message or ''
-        }
+        },
+        event_key=event_key,
     )
 
-    push_payload = {
-        'type': 'breeding_request_rejected',
-        'breeding_request_id': str(breeding_request.id),
-        'pet_id': str(target_pet.id),
-    }
-    _send_push_if_allowed(requester, title, message, push_payload, category='breeding')
+    if created:
+        push_payload = attach_push_targets({
+            'type': 'breeding_request_rejected',
+            'breeding_request_id': str(breeding_request.id),
+            'pet_id': str(target_pet.id),
+        }, 'breeding_request_rejected')
+        _send_push_if_allowed(
+            requester,
+            title,
+            message,
+            push_payload,
+            category='breeding',
+            notification=notification,
+            notification_type='breeding_request_rejected',
+        )
 
     return notification
 
@@ -257,12 +692,20 @@ def notify_breeding_request_pending_reminder(breeding_request):
         },
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'breeding_request_pending_reminder',
         'breeding_request_id': str(breeding_request.id),
         'pet_id': str(target_pet.id),
-    }
-    _send_push_if_allowed(receiver, title, message, push_payload, category='breeding')
+    }, 'breeding_request_pending_reminder')
+    _send_push_if_allowed(
+        receiver,
+        title,
+        message,
+        push_payload,
+        category='reminders',
+        notification=notification,
+        notification_type='breeding_request_pending_reminder',
+    )
 
     return notification
 
@@ -298,12 +741,20 @@ def notify_adoption_request_pending_reminder(adoption_request):
         },
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'adoption_request_pending_reminder',
         'adoption_request_id': str(adoption_request.id),
         'pet_id': str(pet.id),
-    }
-    _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
+    }, 'adoption_request_pending_reminder')
+    _send_push_if_allowed(
+        pet_owner,
+        title,
+        message,
+        push_payload,
+        category='reminders',
+        notification=notification,
+        notification_type='adoption_request_pending_reminder',
+    )
 
     return notification
 
@@ -328,11 +779,19 @@ def notify_breeding_request_completed(breeding_request):
         )
         notifications.append(notification)
 
-        push_payload = {
+        push_payload = attach_push_targets({
             'type': 'breeding_request_completed',
             'breeding_request_id': str(breeding_request.id),
-        }
-        _send_push_if_allowed(user, title, message, push_payload, category='breeding')
+        }, 'breeding_request_completed')
+        _send_push_if_allowed(
+            user,
+            title,
+            message,
+            push_payload,
+            category='breeding',
+            notification=notification,
+            notification_type='breeding_request_completed',
+        )
 
     return notifications
 
@@ -376,13 +835,21 @@ def notify_pet_status_changed(pet, old_status, new_status):
         }
     )
 
-    push_payload = {
+    push_payload = attach_push_targets({
         'type': 'pet_status_changed',
         'pet_id': str(pet.id),
         'old_status': old_status,
         'new_status': new_status,
-    }
-    _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
+    }, 'pet_status_changed')
+    _send_push_if_allowed(
+        pet_owner,
+        title,
+        message,
+        push_payload,
+        category='adoption',
+        notification=notification,
+        notification_type='pet_status_changed',
+    )
 
     if new_status == 'available_for_adoption':
         try:
@@ -416,10 +883,10 @@ def _haversine_km(lat1, lng1, lat2, lng2):
     return earth_radius_km * c
 
 
-def notify_new_pet_added(pet, radius_km=30):
+def notify_new_pet_added(pet, radius_km=30, event_key_prefix=None):
     """إرسال إشعار عند إضافة حيوان جديد للمستخدمين القريبين أو في نفس المدينة."""
     if pet.status == 'available_for_adoption':
-        return notify_new_adoption_pet(pet, radius_km=10)
+        return notify_new_adoption_pet(pet, radius_km=10, event_key_prefix=event_key_prefix)
 
     if pet.status != 'available':
         logger.info("Skipping nearby pet notifications for pet %s with status %s", pet.id, pet.status)
@@ -465,29 +932,40 @@ def notify_new_pet_added(pet, radius_km=30):
     }
 
     for user in users:
-        notification = create_notification(
+        event_key = f"{event_key_prefix}:{user.id}" if event_key_prefix else None
+        notification, created = create_notification_once(
             user=user,
             notification_type='pet_nearby',
             title=title,
             message=message,
             related_pet=pet,
-            extra_data=extra
+            extra_data=extra,
+            event_key=event_key,
         )
         notifications.append(notification)
 
-        push_payload = {
-            'type': 'pet_nearby',
-            'pet_id': str(pet.id),
-            'pet_name': pet.name,
-            'location': location_text,
-        }
-        _send_push_if_allowed(user, title, message, push_payload, category='breeding')
+        if created:
+            push_payload = attach_push_targets({
+                'type': 'pet_nearby',
+                'pet_id': str(pet.id),
+                'pet_name': pet.name,
+                'location': location_text,
+            }, 'pet_nearby')
+            _send_push_if_allowed(
+                user,
+                title,
+                message,
+                push_payload,
+                category='discovery',
+                notification=notification,
+                notification_type='pet_nearby',
+            )
 
     logger.info("Sent nearby pet notifications for pet %s to %d users", pet.id, len(notifications))
     return notifications
 
 
-def notify_new_adoption_pet(pet, radius_km=10):
+def notify_new_adoption_pet(pet, radius_km=10, event_key_prefix=None):
     """إرسال إشعار عند توفر حيوان للتبني للمستخدمين القريبين."""
     if pet.status != 'available_for_adoption':
         logger.info("Skipping adoption notifications for pet %s with status %s", pet.id, pet.status)
@@ -570,24 +1048,35 @@ def notify_new_adoption_pet(pet, radius_km=10):
             'location': location_text,
         }
 
-        notification = create_notification(
+        event_key = f"{event_key_prefix}:{user.id}" if event_key_prefix else None
+        notification, created = create_notification_once(
             user=user,
             notification_type='adoption_pet_nearby',
             title=title,
             message=message,
             related_pet=pet,
-            extra_data=extra
+            extra_data=extra,
+            event_key=event_key,
         )
         notifications.append(notification)
 
-        push_payload = {
-            'type': 'adoption_pet_nearby',
-            'pet_id': str(pet.id),
-            'pet_name': pet.name,
-            'distance_km': extra['distance_km'],
-            'location': location_text,
-        }
-        _send_push_if_allowed(user, title, message, push_payload, category='adoption')
+        if created:
+            push_payload = attach_push_targets({
+                'type': 'adoption_pet_nearby',
+                'pet_id': str(pet.id),
+                'pet_name': pet.name,
+                'distance_km': extra['distance_km'],
+                'location': location_text,
+            }, 'adoption_pet_nearby')
+            _send_push_if_allowed(
+                user,
+                title,
+                message,
+                push_payload,
+                category='discovery',
+                notification=notification,
+                notification_type='adoption_pet_nearby',
+            )
 
     logger.info("Sent adoption pet notifications for pet %s to %d users", pet.id, len(notifications))
     return notifications
@@ -602,14 +1091,11 @@ def send_system_message(user, title, message, extra_data=None):
         extra_data=extra_data or {}
     )
 
-def notify_adoption_request_received(adoption_request):
+def notify_adoption_request_received(adoption_request, event_key=None):
     """إشعار باستلام طلب تبني جديد"""
-    from .email_notifications import send_adoption_request_email
-    
+
     pet_owner = adoption_request.pet.owner
     pet = adoption_request.pet
-    adopter = adoption_request.adopter
-    
     title = f"طلب تبني جديد لحيوانك {pet.name}"
     message = f"يريد {adoption_request.adopter_name} تبني حيوانك {pet.name}"
     
@@ -625,31 +1111,40 @@ def notify_adoption_request_received(adoption_request):
         logger.info("Adoption notifications disabled for user %s", pet_owner.id)
         return None
 
-    notification = create_notification(
+    notification, created = create_notification_once(
         user=pet_owner,
         notification_type='adoption_request_received',
         title=title,
         message=message,
         related_pet=pet,
-        extra_data=extra_data
+        extra_data=extra_data,
+        event_key=event_key,
     )
 
-    push_payload = {
-        'type': 'adoption_request_received',
-        'adoption_request_id': str(adoption_request.id),
-        'pet_id': str(pet.id),
-    }
-    _send_push_if_allowed(pet_owner, title, message, push_payload, category='adoption')
+    if created:
+        push_payload = attach_push_targets({
+            'type': 'adoption_request_received',
+            'adoption_request_id': str(adoption_request.id),
+            'pet_id': str(pet.id),
+        }, 'adoption_request_received')
+        _send_push_if_allowed(
+            pet_owner,
+            title,
+            message,
+            push_payload,
+            category='adoption',
+            notification=notification,
+            notification_type='adoption_request_received',
+        )
 
-    # إرسال إيميل
-    send_adoption_request_email(adoption_request)
+        # إرسال إيميل
+        send_adoption_request_email(adoption_request)
 
     return notification
 
-def notify_adoption_request_approved(adoption_request):
+def notify_adoption_request_approved(adoption_request, event_key=None):
     """إشعار بقبول طلب التبني"""
-    from .email_notifications import send_adoption_request_approved_email
-    
+
     adopter = adoption_request.adopter
     pet = adoption_request.pet
     
@@ -661,7 +1156,7 @@ def notify_adoption_request_approved(adoption_request):
         logger.info("Adoption notifications disabled for user %s", adopter.id)
         return None
 
-    notification = create_notification(
+    notification, created = create_notification_once(
         user=adopter,
         notification_type='adoption_request_approved',
         title=title,
@@ -671,17 +1166,27 @@ def notify_adoption_request_approved(adoption_request):
             'pet_owner_name': pet.owner.get_full_name(),
             'pet_owner_phone': pet.owner.phone,
             'adoption_request_id': adoption_request.id,
-        }
+        },
+        event_key=event_key,
     )
 
-    # إرسال إيميل
-    send_adoption_request_approved_email(adoption_request)
+    if created:
+        # إرسال إيميل
+        send_adoption_request_approved_email(adoption_request)
 
-    push_payload = {
-        'type': 'adoption_request_approved',
-        'adoption_request_id': str(adoption_request.id),
-        'pet_id': str(pet.id),
-    }
-    _send_push_if_allowed(adopter, title, message, push_payload, category='adoption')
+        push_payload = attach_push_targets({
+            'type': 'adoption_request_approved',
+            'adoption_request_id': str(adoption_request.id),
+            'pet_id': str(pet.id),
+        }, 'adoption_request_approved')
+        _send_push_if_allowed(
+            adopter,
+            title,
+            message,
+            push_payload,
+            category='adoption',
+            notification=notification,
+            notification_type='adoption_request_approved',
+        )
 
     return notification 

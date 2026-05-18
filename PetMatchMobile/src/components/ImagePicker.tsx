@@ -9,20 +9,30 @@ import {
   ScrollView,
   Dimensions,
 } from 'react-native';
-import { launchImageLibrary, launchCamera, ImagePickerResponse, MediaType } from 'react-native-image-picker';
+import {
+  launchImageLibrary,
+  launchCamera,
+  ImagePickerResponse,
+  MediaType,
+  Asset,
+} from 'react-native-image-picker';
 
 interface ImagePickerProps {
-  images: string[];
-  onImagesChange: (images: string[]) => void;
+  images?: string[];
+  onImagesChange?: (images: string[]) => void;
+  onImageSelected?: (asset: Asset) => void;
   maxImages?: number;
   title?: string;
+  placeholder?: string;
 }
 
 const ImagePicker: React.FC<ImagePickerProps> = ({ 
   images = [], 
   onImagesChange, 
+  onImageSelected,
   maxImages = 4,
-  title = 'الصور'
+  title,
+  placeholder = 'إضافة صورة'
 }) => {
   const [isLoading, setIsLoading] = useState(false);
 
@@ -71,9 +81,9 @@ const ImagePicker: React.FC<ImagePickerProps> = ({
       
       if (response.assets && response.assets.length > 0) {
         const asset = response.assets[0];
-        if (asset.uri) {
+        if (asset?.uri) {
           console.log('Image selected from camera:', asset.uri);
-          addImage(asset.uri);
+          handleAssets([asset]);
         }
       }
     });
@@ -89,7 +99,7 @@ const ImagePicker: React.FC<ImagePickerProps> = ({
       maxHeight: 2000,
       maxWidth: 2000,
       quality: 0.8,
-      selectionLimit: maxImages - images.length,
+      selectionLimit: onImagesChange ? Math.max(1, maxImages - images.length) : 1,
     };
 
     launchImageLibrary(options, (response: ImagePickerResponse) => {
@@ -109,34 +119,16 @@ const ImagePicker: React.FC<ImagePickerProps> = ({
       
       if (response.assets && response.assets.length > 0) {
         console.log('Images selected from gallery:', response.assets.length);
-        const newImages = response.assets.map(asset => asset.uri).filter(uri => uri) as string[];
-        addImages(newImages);
+        handleAssets(response.assets);
       }
     });
   };
 
-  const addImage = (uri: string) => {
-    if (images.length >= maxImages) {
-      Alert.alert('تحذير', `يمكنك إضافة ${maxImages} صور فقط`);
-      return;
-    }
-    
-    const newImages = [...images, uri];
-    onImagesChange(newImages);
-  };
-
-  const addImages = (newImages: string[]) => {
-    const totalImages = images.length + newImages.length;
-    if (totalImages > maxImages) {
-      Alert.alert('تحذير', `يمكنك إضافة ${maxImages} صور فقط`);
-      return;
-    }
-    
-    const updatedImages = [...images, ...newImages];
-    onImagesChange(updatedImages);
-  };
-
   const removeImage = (index: number) => {
+    if (!onImagesChange) {
+      return;
+    }
+
     const newImages = images.filter((_, i) => i !== index);
     onImagesChange(newImages);
   };
@@ -144,21 +136,52 @@ const ImagePicker: React.FC<ImagePickerProps> = ({
   const { width } = Dimensions.get('window');
   const imageSize = (width - 60) / 3;
 
+  const handleAssets = (assets: Asset[]) => {
+    const validAssets = assets.filter(asset => asset?.uri);
+    if (!validAssets.length) {
+      return;
+    }
+
+    if (onImagesChange) {
+      const newUris = validAssets
+        .map(asset => asset.uri)
+        .filter((uri): uri is string => Boolean(uri));
+
+      const totalImages = images.length + newUris.length;
+      if (totalImages > maxImages) {
+        Alert.alert('تحذير', `يمكنك إضافة ${maxImages} صور فقط`);
+        return;
+      }
+
+      onImagesChange([...images, ...newUris]);
+    }
+
+    if (onImageSelected) {
+      onImageSelected(validAssets[0]);
+    }
+  };
+
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>{title}</Text>
+      {title ? <Text style={styles.title}>{title}</Text> : null}
       
       <TouchableOpacity 
         style={styles.addButton} 
         onPress={showImagePicker}
-        disabled={isLoading || images.length >= maxImages}
+        disabled={
+          isLoading || (onImagesChange ? images.length >= maxImages : false)
+        }
       >
         <Text style={styles.addButtonText}>
-          {isLoading ? 'جاري التحميل...' : `+ إضافة صورة (${images.length}/${maxImages})`}
+          {isLoading
+            ? 'جاري التحميل...'
+            : onImagesChange
+            ? `+ إضافة صورة (${images.length}/${maxImages})`
+            : placeholder}
         </Text>
       </TouchableOpacity>
 
-      {images.length > 0 && (
+      {onImagesChange && images.length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagesContainer}>
           {images.map((uri, index) => (
             <View key={index} style={styles.imageWrapper}>

@@ -9,6 +9,7 @@ from django.db import transaction
 from accounts.models import User
 from accounts.firebase_service import firebase_service
 from pets.notifications import create_notification
+from pets.push_targets import attach_push_targets
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class Command(BaseCommand):
             'action': 'open_store',
             'feature': 'adoption',
         }
+        notification_extra_data = attach_push_targets(extra_data, 'app_update')
 
         users = User.objects.filter(fcm_token__isnull=False).exclude(fcm_token='').distinct()
         total = users.count()
@@ -57,10 +59,10 @@ class Command(BaseCommand):
                         notification_type='system_message',
                         title=title,
                         message=body,
-                        extra_data=extra_data,
+                        extra_data=notification_extra_data,
                     )
 
-                payload = extra_data.copy()
+                payload = notification_extra_data.copy()
                 payload.update({
                     'title': title,
                     'body': body,

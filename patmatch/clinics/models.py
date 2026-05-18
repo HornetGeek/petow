@@ -1,7 +1,9 @@
 import uuid
 
 from django.conf import settings
+from django.contrib.gis.geos import Point
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 from django.utils import timezone
 
 
@@ -21,6 +23,7 @@ class Clinic(models.Model):
     address = models.TextField()
     phone = models.CharField(max_length=20)
     emergency_phone = models.CharField(max_length=20, blank=True, null=True)
+    whatsapp_phone = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     website = models.URLField(blank=True, null=True)
     logo = models.ImageField(upload_to='clinics/logos/', blank=True, null=True)
@@ -35,6 +38,7 @@ class Clinic(models.Model):
     # معلومات إضافية
     latitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
 
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -42,6 +46,13 @@ class Clinic(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        if self.latitude is not None and self.longitude is not None:
+            self.location_point = Point(float(self.longitude), float(self.latitude), srid=4326)
+        else:
+            self.location_point = None
+        super().save(*args, **kwargs)
 
     class Meta:
         verbose_name = "عيادة بيطرية"
@@ -165,6 +176,10 @@ class ClinicService(models.Model):
         verbose_name = "خدمة طبية"
         verbose_name_plural = "الخدمات الطبية"
         ordering = ['clinic', 'display_order', 'name']
+        indexes = [
+            models.Index(fields=['category', 'is_active', 'display_order']),
+            models.Index(fields=['is_featured', 'base_price']),
+        ]
 
     def __str__(self):
         return f"{self.name} - {self.clinic.name}"
@@ -289,6 +304,17 @@ class StorefrontOrderItem(models.Model):
 class StorefrontBooking(models.Model):
     """حجوزات خدمات المتجر الإلكتروني"""
 
+    REQUEST_TYPE_CHOICES = [
+        ('inquiry', 'استفسار'),
+        ('appointment', 'موعد'),
+    ]
+
+    CONTACT_CHANNEL_CHOICES = [
+        ('whatsapp', 'واتساب'),
+        ('phone', 'هاتف'),
+        ('app', 'التطبيق'),
+    ]
+
     STATUS_CHOICES = [
         ('new', 'جديد'),
         ('confirmed', 'مؤكد'),
@@ -306,6 +332,9 @@ class StorefrontBooking(models.Model):
     preferred_date = models.DateField(blank=True, null=True)
     preferred_time = models.TimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
+    request_type = models.CharField(max_length=20, choices=REQUEST_TYPE_CHOICES, default='appointment')
+    source = models.CharField(max_length=80, default='PetMatch')
+    contact_channel = models.CharField(max_length=20, choices=CONTACT_CHANNEL_CHOICES, default='app')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
     quoted_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -750,6 +779,8 @@ class VeterinaryAppointment(models.Model):
     APPOINTMENT_TYPE_CHOICES = [
         ('checkup', 'فحص دوري'),
         ('vaccination', 'تطعيم'),
+        ('dental', 'تنظيف أسنان'),
+        ('follow-up', 'متابعة'),
         ('breeding_consultation', 'استشارة تزاوج'),
         ('pregnancy_check', 'فحص حمل'),
         ('emergency', 'طوارئ'),

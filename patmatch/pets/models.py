@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
 from accounts.models import User
@@ -122,6 +123,7 @@ class Pet(models.Model):
     location = models.CharField(max_length=200, help_text="الموقع (المدينة/الحي)")
     latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
     
     # معلومات التبني
     is_free = models.BooleanField(default=True, help_text="هل التبني مجاني؟")
@@ -257,6 +259,9 @@ class Pet(models.Model):
         verbose_name = "حيوان أليف"
         verbose_name_plural = "الحيوانات الأليفة"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at'], name='pets_pet_status_5ce6d5_idx'),
+        ]
 
 class PetImage(models.Model):
     """صور إضافية للحيوانات"""
@@ -337,6 +342,11 @@ class BreedingRequest(models.Model):
         verbose_name = "طلب مقابلة"
         verbose_name_plural = "طلبات المقابلة"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['requester', 'created_at'], name='pets_breedi_request_55bc14_idx'),
+            models.Index(fields=['receiver', 'created_at'], name='pets_breedi_receive_f0df09_idx'),
+            models.Index(fields=['status', 'created_at'], name='pets_breedi_status_2c575a_idx'),
+        ]
 
     def create_chat_room(self):
         """إنشاء غرفة محادثة عند قبول الطلب"""
@@ -378,6 +388,7 @@ class Notification(models.Model):
         ('adoption_request_received', 'تم استلام طلب تبني جديد'),
         ('adoption_request_approved', 'تم قبول طلب التبني'),
         ('adoption_request_pending_reminder', 'تذكير بطلب تبني معلق'),
+        ('account_verification_approved', 'تم اعتماد التحقق من الحساب'),
     ]
     
     user = models.ForeignKey(
@@ -393,6 +404,13 @@ class Notification(models.Model):
     )
     title = models.CharField(max_length=200, help_text="عنوان الإشعار")
     message = models.TextField(help_text="محتوى الإشعار")
+    event_key = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="مفتاح idempotency لمنع تكرار نفس الإشعار"
+    )
     
     # معلومات إضافية
     related_pet = models.ForeignKey(
@@ -438,6 +456,16 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['user', 'is_read']),
+            models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notifi_user_id_82b9a5_idx'),
+            models.Index(fields=['user', 'type', '-created_at'], name='pets_notifi_user_id_8d5d81_idx'),
+            models.Index(fields=['user', 'type', 'is_read', 'related_chat_room'], name='pets_notifi_user_id_a8a6dd_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'event_key'],
+                condition=models.Q(event_key__isnull=False),
+                name='pets_notification_user_event_key_uniq',
+            ),
         ]
     
     def __str__(self):
@@ -452,36 +480,234 @@ class Notification(models.Model):
     
     @classmethod
     def create_chat_message_notification(cls, recipient_user, sender_user, chat_room, message_content):
-        """إنشاء إشعار رسالة جديدة مع إرسال إشعار دفع."""
-        # لا نرسل إشعار للمرسل نفسه
-        if recipient_user.id == sender_user.id:
-            return None
-            
-        notification = cls.objects.create(
-            user=recipient_user,
-            type='chat_message_received',
-            title=f'رسالة جديدة من {sender_user.get_full_name()}',
-            message=f'{message_content[:100]}...' if len(message_content) > 100 else message_content,
-            related_chat_room=chat_room,
-            extra_data={
-                'sender_name': sender_user.get_full_name(),
-                'sender_id': sender_user.id,
-                'chat_id': chat_room.firebase_chat_id,
-                'message_preview': message_content[:50]
-            }
+        """إنشاء إشعار رسالة جديدة."""
+        from .notifications import notify_chat_message_received  # local import to avoid circular dependency
+        return notify_chat_message_received(
+            recipient_user=recipient_user,
+            sender_user=sender_user,
+            chat_room=chat_room,
+            message_content=message_content,
         )
 
-        from .notifications import _send_push_notification  # local import to avoid circular dependency
 
-        push_payload = {
-            'type': 'chat_message_received',
-            'chat_id': chat_room.firebase_chat_id,
-            'sender_id': str(sender_user.id),
-            'sender_name': sender_user.get_full_name(),
-        }
-        _send_push_notification(recipient_user, notification.title, notification.message, push_payload)
+class NotificationInteractionEvent(models.Model):
+    EVENT_OPENED = 'opened'
+    EVENT_ACTIONED = 'actioned'
+    EVENT_DISMISSED = 'dismissed'
+    EVENT_TYPE_CHOICES = [
+        (EVENT_OPENED, 'Opened'),
+        (EVENT_ACTIONED, 'Actioned'),
+        (EVENT_DISMISSED, 'Dismissed'),
+    ]
 
-        return notification
+    SOURCE_MOBILE_PUSH = 'mobile_push'
+    SOURCE_WEB_PUSH = 'web_push'
+    SOURCE_IN_APP = 'in_app'
+    SOURCE_CHOICES = [
+        (SOURCE_MOBILE_PUSH, 'Mobile Push'),
+        (SOURCE_WEB_PUSH, 'Web Push'),
+        (SOURCE_IN_APP, 'In App'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='notification_interaction_events',
+    )
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name='interaction_events',
+        null=True,
+        blank=True,
+    )
+    event_type = models.CharField(max_length=16, choices=EVENT_TYPE_CHOICES)
+    source = models.CharField(max_length=24, choices=SOURCE_CHOICES)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حدث تفاعل إشعار"
+        verbose_name_plural = "أحداث تفاعل الإشعارات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'event_type', '-created_at'], name='pets_notifi_user_id_7e1b2e_idx'),
+            models.Index(fields=['notification', 'event_type'], name='pets_notifi_notific_b252b3_idx'),
+        ]
+
+    def __str__(self):
+        return f"Interaction({self.user_id}, {self.event_type}, {self.source})"
+
+
+class NotificationDeliveryAttempt(models.Model):
+    CHANNEL_PUSH = 'push'
+    CHANNEL_IN_APP = 'in_app'
+    CHANNEL_EMAIL = 'email'
+    CHANNEL_CHOICES = [
+        (CHANNEL_PUSH, 'Push'),
+        (CHANNEL_IN_APP, 'In App'),
+        (CHANNEL_EMAIL, 'Email'),
+    ]
+
+    STATUS_QUEUED = 'queued'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_SUPPRESSED = 'suppressed'
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, 'Queued'),
+        (STATUS_SENT, 'Sent'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_SUPPRESSED, 'Suppressed'),
+    ]
+
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name='delivery_attempts',
+        null=True,
+        blank=True,
+    )
+    channel = models.CharField(max_length=16, choices=CHANNEL_CHOICES, default=CHANNEL_PUSH)
+    provider = models.CharField(max_length=32, default='fcm')
+    provider_message_id = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    error = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "محاولة تسليم إشعار"
+        verbose_name_plural = "محاولات تسليم الإشعارات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['channel', 'status', '-created_at'], name='pets_notifi_channel_5bc52d_idx'),
+            models.Index(fields=['notification', 'channel'], name='pets_notifi_notific_c59c19_idx'),
+        ]
+
+    def __str__(self):
+        return f"DeliveryAttempt(notification={self.notification_id}, status={self.status})"
+
+
+class EmailReminderDispatch(models.Model):
+    REMINDER_DAILY_UNREAD_MESSAGES = 'daily_unread_messages'
+    REMINDER_CHOICES = [
+        (REMINDER_DAILY_UNREAD_MESSAGES, 'Daily unread messages'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROCESSING = 'processing'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROCESSING, 'Processing'),
+        (STATUS_SENT, 'Sent'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='email_reminder_dispatches',
+    )
+    reminder_key = models.CharField(
+        max_length=64,
+        choices=REMINDER_CHOICES,
+        default=REMINDER_DAILY_UNREAD_MESSAGES,
+    )
+    target_date = models.DateField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    recipient_email = models.EmailField(blank=True, default='')
+    last_error = models.TextField(blank=True, default='')
+    sent_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "سجل إرسال تذكير بريدي"
+        verbose_name_plural = "سجلات إرسال التذكيرات البريدية"
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'reminder_key', 'target_date'],
+                name='pets_email_reminder_user_key_date_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['reminder_key', 'target_date', 'status'], name='pets_eml_rem_key_dt_st_idx'),
+            models.Index(fields=['user', 'target_date'], name='pets_eml_rem_usr_dt_idx'),
+        ]
+
+    def __str__(self):
+        return f"EmailReminderDispatch(user={self.user_id}, key={self.reminder_key}, date={self.target_date}, status={self.status})"
+
+
+class NotificationOutbox(models.Model):
+    EVENT_PET_CREATED = 'pet_created'
+    EVENT_BREEDING_REQUEST_RECEIVED = 'breeding_request_received'
+    EVENT_BREEDING_REQUEST_APPROVED = 'breeding_request_approved'
+    EVENT_BREEDING_REQUEST_REJECTED = 'breeding_request_rejected'
+    EVENT_ADOPTION_REQUEST_RECEIVED = 'adoption_request_received'
+    EVENT_ADOPTION_REQUEST_APPROVED = 'adoption_request_approved'
+    EVENT_CHAT_MESSAGE_RECEIVED = 'chat_message_received'
+    EVENT_CLINIC_INVITE_PUSH = 'clinic_invite_push'
+    EVENT_CLINIC_BROADCAST_PUSH = 'clinic_broadcast_push'
+    EVENT_CLINIC_CHAT_MESSAGE_PUSH = 'clinic_chat_message_push'
+    EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH = 'account_verification_approved_push'
+
+    EVENT_TYPE_CHOICES = [
+        (EVENT_PET_CREATED, 'Pet created'),
+        (EVENT_BREEDING_REQUEST_RECEIVED, 'Breeding request received'),
+        (EVENT_BREEDING_REQUEST_APPROVED, 'Breeding request approved'),
+        (EVENT_BREEDING_REQUEST_REJECTED, 'Breeding request rejected'),
+        (EVENT_ADOPTION_REQUEST_RECEIVED, 'Adoption request received'),
+        (EVENT_ADOPTION_REQUEST_APPROVED, 'Adoption request approved'),
+        (EVENT_CHAT_MESSAGE_RECEIVED, 'Chat message received'),
+        (EVENT_CLINIC_INVITE_PUSH, 'Clinic invite push'),
+        (EVENT_CLINIC_BROADCAST_PUSH, 'Clinic broadcast push'),
+        (EVENT_CLINIC_CHAT_MESSAGE_PUSH, 'Clinic chat message push'),
+        (EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH, 'Account verification approved push'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROCESSING = 'processing'
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROCESSING, 'Processing'),
+        (STATUS_SUCCEEDED, 'Succeeded'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    event_type = models.CharField(max_length=64, choices=EVENT_TYPE_CHOICES)
+    object_id = models.PositiveBigIntegerField()
+    payload = models.JSONField(default=dict, blank=True)
+    dedupe_key = models.CharField(max_length=255, unique=True)
+
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Notification Outbox Event"
+        verbose_name_plural = "Notification Outbox Events"
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['status', 'next_attempt_at'], name='pets_notifi_status_d39f19_idx'),
+            models.Index(fields=['event_type', 'status'], name='pets_notifi_event_t_629f6d_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type}#{self.object_id} ({self.status})"
+
 
 class ChatRoom(models.Model):
     """غرفة محادثة بين مالكين حيوانات - metadata فقط، الرسائل في Firebase"""
@@ -658,6 +884,8 @@ class ChatRoom(models.Model):
                 if not pet:
                     return {}
                 
+                requester_pet = breeding_request.requester_pet
+                veterinary_clinic = breeding_request.veterinary_clinic
                 return {
                     'chat_id': self.firebase_chat_id,
                     'type': 'breeding',
@@ -666,6 +894,19 @@ class ChatRoom(models.Model):
                         'status': breeding_request.status,
                         'created_at': breeding_request.created_at.isoformat(),
                         'message': breeding_request.message,
+                        # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
+                        'meeting_date': breeding_request.meeting_date.isoformat() if breeding_request.meeting_date else None,
+                        'contact_phone': breeding_request.contact_phone,
+                        'agreed_fee': str(breeding_request.agreed_fee) if breeding_request.agreed_fee else None,
+                        'fee_paid_by': breeding_request.fee_paid_by,
+                        'veterinary_clinic_name': veterinary_clinic.name if veterinary_clinic else None,
+                        'requester_pet': {
+                            'id': requester_pet.id,
+                            'name': requester_pet.name,
+                            'breed_name': requester_pet.breed.name if requester_pet.breed else None,
+                            'pet_type_display': requester_pet.pet_type_display,
+                            'main_image': requester_pet.main_image.url if requester_pet.main_image else None,
+                        } if requester_pet else None,
                     },
                     'pet': {
                         'id': pet.id,
@@ -688,7 +929,7 @@ class ChatRoom(models.Model):
                 pet = adoption_request.pet
                 if not pet:
                     return {}
-                
+
                 return {
                     'chat_id': self.firebase_chat_id,
                     'type': 'adoption',
@@ -697,6 +938,23 @@ class ChatRoom(models.Model):
                         'status': adoption_request.status,
                         'created_at': adoption_request.created_at.isoformat(),
                         'adopter_name': adoption_request.adopter_name,
+                        # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
+                        'adopter_age': adoption_request.adopter_age,
+                        'adopter_phone': adoption_request.adopter_phone,
+                        'housing_type': adoption_request.housing_type,
+                        'family_members': adoption_request.family_members,
+                        'experience_level': adoption_request.experience_level,
+                        'time_availability': adoption_request.time_availability,
+                        'reason_for_adoption': adoption_request.reason_for_adoption,
+                        'feeding_plan': adoption_request.feeding_plan,
+                        'exercise_plan': adoption_request.exercise_plan,
+                        'vet_care_plan': adoption_request.vet_care_plan,
+                        'emergency_plan': adoption_request.emergency_plan,
+                        'notes': adoption_request.notes,
+                        'family_agreement': adoption_request.family_agreement,
+                        'agrees_to_follow_up': adoption_request.agrees_to_follow_up,
+                        'agrees_to_vet_care': adoption_request.agrees_to_vet_care,
+                        'agrees_to_training': adoption_request.agrees_to_training,
                     },
                     'pet': {
                         'id': pet.id,
@@ -776,6 +1034,8 @@ class ChatRoom(models.Model):
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
             'breeding_request__target_pet',
+            'breeding_request__requester_pet',
+            'breeding_request__requester_pet__owner',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
             'adoption_request__pet',
@@ -798,6 +1058,8 @@ class ChatRoom(models.Model):
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
             'breeding_request__target_pet',
+            'breeding_request__requester_pet',
+            'breeding_request__requester_pet__owner',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
             'adoption_request__pet',
@@ -810,6 +1072,9 @@ class ChatRoom(models.Model):
         verbose_name = "غرفة محادثة"
         verbose_name_plural = "غرف المحادثة"
         ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['is_active', 'updated_at'], name='pets_chatro_is_acti_6cab74_idx'),
+        ]
 
 
 class AdoptionRequest(models.Model):
@@ -965,3 +1230,7 @@ class AdoptionRequest(models.Model):
         verbose_name_plural = "طلبات التبني"
         ordering = ['-created_at']
         unique_together = ['adopter', 'pet', 'status']  # منع الطلبات المكررة
+        indexes = [
+            models.Index(fields=['adopter', 'created_at'], name='pets_adopti_adopter_e507df_idx'),
+            models.Index(fields=['pet', 'status', 'created_at'], name='pets_adopti_pet_id_5cc999_idx'),
+        ]
