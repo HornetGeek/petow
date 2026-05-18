@@ -24,7 +24,7 @@ from .tasks import (
     run_daily_unread_email_reminders,
     run_lifecycle_engagement_reminders,
 )
-from .views import PetMapMarkersView
+from .views import PetMapMarkersView, chat_room_by_firebase_id, upload_chat_image
 
 
 class NotifyNewPetAddedTests(TestCase):
@@ -582,6 +582,14 @@ class ChatOtherPetDisplayTests(TestCase):
             first_name='Receiver',
             last_name='User',
         )
+        self.outsider = User.objects.create_user(
+            username='outsider1',
+            email='outsider@example.com',
+            password='testpass123',
+            phone='3000000000',
+            first_name='Outside',
+            last_name='User',
+        )
         self.breed = Breed.objects.create(name='Chat Breed', pet_type='cats')
 
         self.pet_a = Pet.objects.create(
@@ -651,3 +659,69 @@ class ChatOtherPetDisplayTests(TestCase):
         ctx = self._serialize_context(self.user_b)
         self.assertEqual(ctx['pet']['id'], self.pet_a.id)
         self.assertEqual(ctx['pet']['main_image'], self.pet_a.main_image.url)
+
+    def test_upload_chat_image_requires_authentication(self):
+        request = self.factory.post(
+            '/api/pets/chat/upload-image/',
+            {
+                'chat_id': self.chat_room.firebase_chat_id,
+                'image': self._test_image('chat_upload.jpg'),
+            },
+            format='multipart',
+        )
+
+        response = upload_chat_image(request)
+
+        self.assertIn(response.status_code, [401, 403])
+
+    def test_upload_chat_image_rejects_non_participant(self):
+        request = self.factory.post(
+            '/api/pets/chat/upload-image/',
+            {
+                'chat_id': self.chat_room.firebase_chat_id,
+                'image': self._test_image('chat_upload.jpg'),
+            },
+            format='multipart',
+        )
+        force_authenticate(request, user=self.outsider)
+
+        response = upload_chat_image(request)
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch('pets.views.default_storage.url', return_value='/media/chat_images/chat_upload.jpg')
+    @patch('pets.views.default_storage.save', return_value='chat_images/chat_upload.jpg')
+    def test_upload_chat_image_allows_participant(self, _mock_save, _mock_url):
+        request = self.factory.post(
+            '/api/pets/chat/upload-image/',
+            {
+                'chat_id': self.chat_room.firebase_chat_id,
+                'image': self._test_image('chat_upload.jpg'),
+            },
+            format='multipart',
+        )
+        force_authenticate(request, user=self.user_a)
+
+        response = upload_chat_image(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['image_url'], '/media/chat_images/chat_upload.jpg')
+
+    def test_inactive_chat_can_be_fetched_by_participant_via_firebase_id(self):
+        self.chat_room.archive()
+        request = self.factory.get(f'/api/pets/chat/firebase/{self.chat_room.firebase_chat_id}/')
+        force_authenticate(request, user=self.user_a)
+
+        response = chat_room_by_firebase_id(request, self.chat_room.firebase_chat_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['is_active'])
+
+    def test_inactive_chat_still_blocks_non_participant_via_firebase_id(self):
+        self.chat_room.archive()
+        request = self.factory.get(f'/api/pets/chat/firebase/{self.chat_room.firebase_chat_id}/')
+        force_authenticate(request, user=self.outsider)
+
+        response = chat_room_by_firebase_id(request, self.chat_room.firebase_chat_id)
+
+        self.assertEqual(response.status_code, 403)

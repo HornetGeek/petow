@@ -254,164 +254,206 @@ class ClinicMapMarkersView(APIView):
         if cached_payload is not None:
             return Response(cached_payload)
 
-        bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
-        bbox.srid = 4326
+        try:
+            bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
+            bbox.srid = 4326
 
-        queryset = (
-            Clinic.objects
-            .filter(is_active=True)
-            .annotate(staff_count=Count('staff_members', distinct=True))
-            .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
-            .distinct()
-            .annotate(
-                effective_point_geom=Cast(
-                    'location_point',
-                    output_field=gis_models.PointField(srid=4326),
+            queryset = (
+                Clinic.objects
+                .filter(is_active=True)
+                .annotate(staff_count=Count('staff_members', distinct=True))
+                .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
+                .distinct()
+                .annotate(
+                    effective_point_geom=Cast(
+                        'location_point',
+                        output_field=gis_models.PointField(srid=4326),
+                    )
+                )
+                .exclude(location_point__isnull=True)
+                .filter(location_point__intersects=bbox)
+                .annotate(
+                    map_latitude=Cast(
+                        Func(F('effective_point_geom'), function='ST_Y'),
+                        FloatField(),
+                    ),
+                    map_longitude=Cast(
+                        Func(F('effective_point_geom'), function='ST_X'),
+                        FloatField(),
+                    ),
                 )
             )
-            .exclude(location_point__isnull=True)
-            .filter(location_point__intersects=bbox)
-            .annotate(
-                map_latitude=Cast(Func(F('effective_point_geom'), function='ST_Y'), FloatField()),
-                map_longitude=Cast(Func(F('effective_point_geom'), function='ST_X'), FloatField()),
+
+            category_filter = _build_service_category_filter(service_category)
+            if category_filter is not None:
+                queryset = queryset.filter(category_filter)
+
+            if search_term:
+                queryset = queryset.filter(
+                    Q(name__icontains=search_term) |
+                    Q(address__icontains=search_term) |
+                    Q(phone__icontains=search_term) |
+                    Q(email__icontains=search_term) |
+                    Q(services__icontains=search_term)
+                )
+
+            user_point = (
+                Point(user_lng, user_lat, srid=4326)
+                if user_lat is not None and user_lng is not None
+                else None
             )
-        )
+            if user_point is not None:
+                queryset = queryset.annotate(map_distance_m=Distance('location_point', user_point))
 
-        category_filter = _build_service_category_filter(service_category)
-        if category_filter is not None:
-            queryset = queryset.filter(category_filter)
+            total_matched = queryset.count()
+            clusters_payload = []
+            points_queryset = queryset
 
-        if search_term:
-            queryset = queryset.filter(
-                Q(name__icontains=search_term) |
-                Q(address__icontains=search_term) |
-                Q(phone__icontains=search_term) |
-                Q(email__icontains=search_term) |
-                Q(services__icontains=search_term)
-            )
-
-        user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
-        if user_point is not None:
-            queryset = queryset.annotate(map_distance_m=Distance('location_point', user_point))
-
-        total_matched = queryset.count()
-        clusters_payload = []
-        points_queryset = queryset
-
-        use_clusters = cluster_enabled and zoom < MAP_CLUSTER_ZOOM_THRESHOLD
-        if use_clusters:
-            cell_size_meters = _cell_size_meters_for_zoom(zoom)
-            clustered_queryset = queryset.annotate(
-                point_mercator=Transform('effective_point_geom', 3857),
-            ).annotate(
-                grid_x=Cast(
-                    Floor(
-                        ExpressionWrapper(
-                            Func(F('point_mercator'), function='ST_X') / Value(cell_size_meters),
-                            output_field=FloatField(),
-                        )
+            use_clusters = cluster_enabled and zoom < MAP_CLUSTER_ZOOM_THRESHOLD
+            if use_clusters:
+                cell_size_meters = _cell_size_meters_for_zoom(zoom)
+                clustered_queryset = queryset.annotate(
+                    point_mercator=Transform('effective_point_geom', 3857),
+                ).annotate(
+                    grid_x=Cast(
+                        Floor(
+                            ExpressionWrapper(
+                                Func(F('point_mercator'), function='ST_X') /
+                                Value(cell_size_meters),
+                                output_field=FloatField(),
+                            )
+                        ),
+                        IntegerField(),
                     ),
-                    IntegerField(),
-                ),
-                grid_y=Cast(
-                    Floor(
-                        ExpressionWrapper(
-                            Func(F('point_mercator'), function='ST_Y') / Value(cell_size_meters),
-                            output_field=FloatField(),
-                        )
+                    grid_y=Cast(
+                        Floor(
+                            ExpressionWrapper(
+                                Func(F('point_mercator'), function='ST_Y') /
+                                Value(cell_size_meters),
+                                output_field=FloatField(),
+                            )
+                        ),
+                        IntegerField(),
                     ),
-                    IntegerField(),
-                ),
-            )
+                )
 
-            grouped = clustered_queryset.values('grid_x', 'grid_y').annotate(
-                bucket_count=Count('id'),
-                latitude=Avg('map_latitude'),
-                longitude=Avg('map_longitude'),
-                point_id=Min('id'),
-            )
+                grouped = clustered_queryset.values('grid_x', 'grid_y').annotate(
+                    bucket_count=Count('id'),
+                    latitude=Avg('map_latitude'),
+                    longitude=Avg('map_longitude'),
+                    point_id=Min('id'),
+                )
 
-            cluster_rows = list(grouped.filter(bucket_count__gt=1).order_by('-bucket_count'))
-            clusters_payload = [
-                {
-                    'id': f"clinic-{zoom}-{row['grid_x']}-{row['grid_y']}",
-                    'latitude': float(row['latitude']) if row['latitude'] is not None else None,
-                    'longitude': float(row['longitude']) if row['longitude'] is not None else None,
-                    'count': int(row['bucket_count']),
-                    'entity_type': 'clinic',
-                }
-                for row in cluster_rows
-            ]
+                cluster_rows = list(grouped.filter(bucket_count__gt=1).order_by('-bucket_count'))
+                clusters_payload = [
+                    {
+                        'id': f"clinic-{zoom}-{row['grid_x']}-{row['grid_y']}",
+                        'latitude': float(row['latitude']) if row['latitude'] is not None else None,
+                        'longitude': float(row['longitude']) if row['longitude'] is not None else None,
+                        'count': int(row['bucket_count']),
+                        'entity_type': 'clinic',
+                    }
+                    for row in cluster_rows
+                ]
 
-            singleton_groups = grouped.filter(bucket_count=1)
-            singleton_total = singleton_groups.count()
-            if user_point is not None:
-                singleton_groups = singleton_groups.annotate(sort_distance=Min('map_distance_m')).order_by('sort_distance', '-point_id')
+                singleton_groups = grouped.filter(bucket_count=1)
+                singleton_total = singleton_groups.count()
+                if user_point is not None:
+                    singleton_groups = singleton_groups.annotate(
+                        sort_distance=Min('map_distance_m'),
+                    ).order_by('sort_distance', '-point_id')
+                else:
+                    singleton_groups = singleton_groups.order_by('-point_id')
+
+                point_ids = [row['point_id'] for row in singleton_groups[:limit_points]]
+                points_queryset = queryset.filter(id__in=point_ids)
+                if user_point is not None:
+                    points_queryset = points_queryset.order_by('map_distance_m', 'name')
+                else:
+                    points_queryset = points_queryset.order_by('name')
+                truncated = singleton_total > len(point_ids)
             else:
-                singleton_groups = singleton_groups.order_by('-point_id')
+                if user_point is not None:
+                    points_queryset = queryset.order_by('map_distance_m', 'name')
+                else:
+                    points_queryset = queryset.order_by('name')
+                points_queryset = points_queryset[:limit_points]
+                truncated = total_matched > limit_points
 
-            point_ids = [row['point_id'] for row in singleton_groups[:limit_points]]
-            points_queryset = queryset.filter(id__in=point_ids)
-            if user_point is not None:
-                points_queryset = points_queryset.order_by('map_distance_m', 'name')
-            else:
-                points_queryset = points_queryset.order_by('name')
-            truncated = singleton_total > len(point_ids)
-        else:
-            if user_point is not None:
-                points_queryset = queryset.order_by('map_distance_m', 'name')
-            else:
-                points_queryset = queryset.order_by('name')
-            points_queryset = points_queryset[:limit_points]
-            truncated = total_matched > limit_points
-
-        points_queryset = points_queryset.prefetch_related(
-            models.Prefetch(
-                'services_list',
-                queryset=ClinicService.objects.filter(is_active=True).only('category', 'clinic_id')
+            points_queryset = points_queryset.prefetch_related(
+                models.Prefetch(
+                    'services_list',
+                    queryset=ClinicService.objects.filter(is_active=True).only(
+                        'category',
+                        'clinic_id',
+                    )
+                )
             )
-        )
-        points = list(points_queryset)
-        serializer = ClinicMapPointSerializer(points, many=True, context={'request': request})
-        points_payload = list(serializer.data)
+            points = list(points_queryset)
+            serializer = ClinicMapPointSerializer(points, many=True, context={'request': request})
+            points_payload = list(serializer.data)
 
-        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
-        request_summary = {
-            'bbox': request.query_params.get('bbox'),
-            'zoom': zoom,
-            'cluster': use_clusters,
-            'service_category': service_category,
-            'search': search_term,
-        }
-        logger.info(
-            "clinics_map_markers params=%s total=%s clusters=%s points=%s truncated=%s duration_ms=%s",
-            request_summary,
-            total_matched,
-            len(clusters_payload),
-            len(points_payload),
-            truncated,
-            duration_ms,
-        )
-
-        payload = {
-            'clusters': clusters_payload,
-            'points': points_payload,
-            'meta': {
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            request_summary = {
+                'bbox': request.query_params.get('bbox'),
                 'zoom': zoom,
-                'bbox': {
-                    'min_lng': min_lng,
-                    'min_lat': min_lat,
-                    'max_lng': max_lng,
-                    'max_lat': max_lat,
-                },
-                'total_matched': total_matched,
-                'returned_clusters': len(clusters_payload),
-                'returned_points': len(points_payload),
-                'truncated': bool(truncated),
+                'cluster': use_clusters,
+                'service_category': service_category,
+                'search': search_term,
             }
-        }
-        cache.set(cache_key, payload, timeout=max(1, int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30))))
-        return Response(payload)
+            logger.info(
+                "clinics_map_markers params=%s total=%s clusters=%s points=%s truncated=%s duration_ms=%s",
+                request_summary,
+                total_matched,
+                len(clusters_payload),
+                len(points_payload),
+                truncated,
+                duration_ms,
+            )
+
+            payload = {
+                'clusters': clusters_payload,
+                'points': points_payload,
+                'meta': {
+                    'zoom': zoom,
+                    'bbox': {
+                        'min_lng': min_lng,
+                        'min_lat': min_lat,
+                        'max_lng': max_lng,
+                        'max_lat': max_lat,
+                    },
+                    'total_matched': total_matched,
+                    'returned_clusters': len(clusters_payload),
+                    'returned_points': len(points_payload),
+                    'truncated': bool(truncated),
+                }
+            }
+            cache.set(
+                cache_key,
+                payload,
+                timeout=max(
+                    1,
+                    int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30)),
+                ),
+            )
+            return Response(payload)
+        except Exception:
+            logger.exception(
+                "clinics_map_markers failed release_marker=%s bbox=%s zoom=%s cluster=%s service_category=%s search=%s",
+                "clinic-map-json-error-v2",
+                request.query_params.get('bbox'),
+                zoom,
+                cluster_enabled,
+                service_category,
+                search_term,
+            )
+            return Response(
+                {
+                    'error': 'تعذر تحميل الخدمات على الخريطة. حاول مرة أخرى لاحقاً.',
+                    'release_marker': 'clinic-map-json-error-v2',
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):

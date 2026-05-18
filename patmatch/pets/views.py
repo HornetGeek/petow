@@ -1205,8 +1205,7 @@ def chat_room_by_firebase_id(request, firebase_chat_id):
         chat_room = ChatRoom.objects.select_related(
             *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).get(
-            firebase_chat_id=firebase_chat_id,
-            is_active=True
+            firebase_chat_id=firebase_chat_id
         )
         
         # التحقق من أن المستخدم مشارك في المحادثة
@@ -1622,11 +1621,35 @@ def reactivate_chat_room(request, chat_id):
         )
 
 @api_view(['POST'])
-@permission_classes([AllowAny])  # Allow any user temporarily for testing
+@permission_classes([IsAuthenticated])
 def upload_chat_image(request):
     """رفع صورة للمحادثة"""
     try:
         logger.info("Upload chat image request user_id=%s", getattr(getattr(request, 'user', None), 'id', None))
+
+        chat_identifier = request.data.get('chat_id') or request.data.get('firebase_chat_id')
+        if not chat_identifier:
+            return Response(
+                {'error': 'معرف المحادثة مطلوب'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        chat_lookup = Q(firebase_chat_id=str(chat_identifier))
+        if str(chat_identifier).isdigit():
+            chat_lookup |= Q(id=int(chat_identifier))
+        chat_room = ChatRoom.objects.filter(chat_lookup).select_related(
+            *CHAT_ROOM_SELECT_RELATED_FIELDS
+        ).first()
+        if not chat_room:
+            return Response(
+                {'error': 'المحادثة غير موجودة'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        if not chat_room.can_user_access(request.user):
+            return Response(
+                {'error': 'غير مسموح لك بإرسال صور في هذه المحادثة'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         
         if 'image' not in request.FILES:
             logger.warning("No image file in request")

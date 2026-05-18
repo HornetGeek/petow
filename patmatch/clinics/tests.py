@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 from rest_framework.test import APIRequestFactory
 
@@ -29,3 +31,18 @@ class ClinicMapMarkersValidationTests(SimpleTestCase):
         })
         response = self.view(request)
         self.assertEqual(response.status_code, 400)
+
+    @patch('clinics.views.Polygon.from_bbox', side_effect=RuntimeError('boom'))
+    def test_service_category_failures_return_json_500(self, _from_bbox):
+        request = self.factory.get('/api/clinics/map/markers/', {
+            'bbox': '30,30,31,31',
+            'zoom': '10',
+            'service_category': 'general,vaccination,diagnostic',
+        })
+        response = self.view(request)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.data.get('error'),
+            'تعذر تحميل الخدمات على الخريطة. حاول مرة أخرى لاحقاً.',
+        )
+        self.assertEqual(response.data.get('release_marker'), 'clinic-map-json-error-v2')
