@@ -1,3 +1,6 @@
+import base64
+import shutil
+import tempfile
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -6,15 +9,15 @@ from django.conf import settings
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models.signals import post_save
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
-from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from accounts.models import User, UserNotificationSettings
 from clinics.signals import claim_invites_when_user_updates
 
 from .email_notifications import send_adoption_request_email, send_daily_unread_messages_reminder
-from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, EmailReminderDispatch, Notification, NotificationDeliveryAttempt, NotificationOutbox, Pet
+from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, EmailReminderDispatch, Notification, NotificationDeliveryAttempt, NotificationOutbox, Pet, Story, StoryReport, StoryView
 from .notification_events import enqueue_notification_event
 from .notifications import notify_new_adoption_pet, notify_new_pet_added
 from .serializers import ChatContextSerializer, ChatRoomListSerializer
@@ -182,6 +185,223 @@ class PetMapMarkersValidationTests(SimpleTestCase):
         )
         response = self.view(request)
         self.assertEqual(response.status_code, 400)
+
+
+class StoryApiTests(TestCase):
+    PNG_BYTES = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZdEwQAAAABJRU5ErkJggg=='
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        post_save.disconnect(receiver=claim_invites_when_user_updates, sender=User)
+        cls._media_dir = tempfile.mkdtemp()
+        cls._override = override_settings(MEDIA_ROOT=cls._media_dir)
+        cls._override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._override.disable()
+        shutil.rmtree(cls._media_dir, ignore_errors=True)
+        post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = User.objects.create_user(
+            username='story-owner',
+            email='story-owner@example.com',
+            password='testpass123',
+            phone='1111111111',
+            first_name='Story',
+            last_name='Owner',
+        )
+        self.viewer = User.objects.create_user(
+            username='story-viewer',
+            email='story-viewer@example.com',
+            password='testpass123',
+            phone='2222222222',
+            first_name='Story',
+            last_name='Viewer',
+        )
+        self.breed = Breed.objects.create(name='Story Breed', pet_type='cats')
+        self.pet = Pet.objects.create(
+            owner=self.owner,
+            name='Story Pet',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=8,
+            gender='F',
+            description='Story pet',
+            main_image=self._image('pet.png'),
+            status='available',
+            location='Riyadh',
+            is_free=True,
+        )
+        self.other_pet = Pet.objects.create(
+            owner=self.viewer,
+            name='Other Pet',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=9,
+            gender='M',
+            description='Other pet',
+            main_image=self._image('other_pet.png'),
+            status='available',
+            location='Riyadh',
+            is_free=True,
+        )
+
+    def _image(self, name='story.png', content_type='image/png'):
+        return SimpleUploadedFile(name, self.PNG_BYTES, content_type=content_type)
+
+    def _story(self, author=None, **overrides):
+        defaults = {
+            'author': author or self.viewer,
+            'image': self._image(f"story_{Story.objects.count() + 1}.png"),
+            'caption': 'Active story',
+            'expires_at': timezone.now() + timedelta(hours=1),
+        }
+        defaults.update(overrides)
+        return Story.objects.create(**defaults)
+
+    @staticmethod
+    def _results(response):
+        data = response.data
+        return data.get('results', data) if isinstance(data, dict) else data
+
+    def test_create_story_with_owned_pet(self):
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            '/api/pets/stories/',
+            {'image': self._image('create.png'), 'caption': '  صباح الخير  ', 'pet': self.pet.id},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['caption'], 'صباح الخير')
+        self.assertEqual(response.data['pet']['id'], self.pet.id)
+        self.assertTrue(response.data['is_mine'])
+        self.assertTrue(response.data['has_viewed'])
+        story = Story.objects.get(id=response.data['id'])
+        self.assertEqual(story.author, self.owner)
+        self.assertGreater(story.expires_at, timezone.now() + timedelta(hours=23))
+
+    def test_create_story_rejects_unowned_pet(self):
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.post(
+            '/api/pets/stories/',
+            {'image': self._image('unowned.png'), 'pet': self.other_pet.id},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('pet', response.data)
+
+    def test_create_story_rejects_non_photo_upload(self):
+        self.client.force_authenticate(self.owner)
+        text_file = SimpleUploadedFile('story.txt', b'not-image', content_type='text/plain')
+
+        response = self.client.post(
+            '/api/pets/stories/',
+            {'image': text_file},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('image', response.data)
+
+    def test_list_excludes_hidden_deleted_and_expired_stories(self):
+        active_story = self._story(author=self.viewer)
+        hidden_story = self._story(author=self.viewer, is_hidden=True)
+        deleted_story = self._story(author=self.viewer, deleted_at=timezone.now())
+        expired_story = self._story(
+            author=self.viewer,
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.get('/api/pets/stories/')
+
+        self.assertEqual(response.status_code, 200)
+        ids = {item['id'] for item in self._results(response)}
+        self.assertIn(active_story.id, ids)
+        self.assertNotIn(hidden_story.id, ids)
+        self.assertNotIn(deleted_story.id, ids)
+        self.assertNotIn(expired_story.id, ids)
+
+    def test_list_marks_viewed_and_mine_flags(self):
+        own_story = self._story(author=self.owner)
+        other_story = self._story(author=self.viewer)
+        StoryView.objects.create(story=other_story, user=self.owner)
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.get('/api/pets/stories/')
+
+        self.assertEqual(response.status_code, 200)
+        by_id = {item['id']: item for item in self._results(response)}
+        self.assertTrue(by_id[own_story.id]['is_mine'])
+        self.assertTrue(by_id[own_story.id]['has_viewed'])
+        self.assertFalse(by_id[other_story.id]['is_mine'])
+        self.assertTrue(by_id[other_story.id]['has_viewed'])
+        self.assertEqual(by_id[other_story.id]['author']['full_name'], 'Story Viewer')
+
+    def test_delete_soft_deletes_only_owner_story(self):
+        story = self._story(author=self.owner)
+        self.client.force_authenticate(self.viewer)
+
+        forbidden = self.client.delete(f'/api/pets/stories/{story.id}/')
+
+        self.assertEqual(forbidden.status_code, 404)
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.delete(f'/api/pets/stories/{story.id}/')
+
+        self.assertEqual(response.status_code, 204)
+        story.refresh_from_db()
+        self.assertIsNotNone(story.deleted_at)
+
+    def test_mark_story_viewed_is_idempotent(self):
+        story = self._story(author=self.viewer)
+        self.client.force_authenticate(self.owner)
+
+        first = self.client.post(f'/api/pets/stories/{story.id}/view/')
+        second = self.client.post(f'/api/pets/stories/{story.id}/view/')
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(StoryView.objects.filter(story=story, user=self.owner).count(), 1)
+
+    def test_report_story_is_duplicate_safe_and_blocks_own_story(self):
+        other_story = self._story(author=self.viewer)
+        own_story = self._story(author=self.owner)
+        self.client.force_authenticate(self.owner)
+
+        first = self.client.post(
+            f'/api/pets/stories/{other_story.id}/report/',
+            {'reason': StoryReport.REASON_SPAM, 'details': 'ad'},
+            format='json',
+        )
+        second = self.client.post(
+            f'/api/pets/stories/{other_story.id}/report/',
+            {'reason': StoryReport.REASON_OTHER, 'details': 'still visible'},
+            format='json',
+        )
+        blocked = self.client.post(
+            f'/api/pets/stories/{own_story.id}/report/',
+            {'reason': StoryReport.REASON_OTHER},
+            format='json',
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(StoryReport.objects.filter(story=other_story, reporter=self.owner).count(), 1)
+        report = StoryReport.objects.get(story=other_story, reporter=self.owner)
+        self.assertEqual(report.reason, StoryReport.REASON_OTHER)
 
 
 class NotificationOutboxTests(TestCase):

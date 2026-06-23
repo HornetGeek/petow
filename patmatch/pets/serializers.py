@@ -13,6 +13,9 @@ from .models import (
     NotificationInteractionEvent,
     ChatRoom,
     AdoptionRequest,
+    Story,
+    StoryView,
+    StoryReport,
 )
 from .notifications import get_notification_category, get_notification_priority
 from .push_targets import build_mobile_deep_link, build_web_url
@@ -54,6 +57,21 @@ class PetImageSerializer(serializers.ModelSerializer):
         fields = ['id', 'image', 'caption']
 
 
+def _absolute_file_url(file_field, request=None):
+    if not file_field:
+        return None
+    try:
+        raw_name = getattr(file_field, 'name', '') or ''
+        if raw_name.startswith('https://') or raw_name.startswith('http://'):
+            return raw_name
+        url = file_field.url
+    except Exception:
+        return None
+    if request and url and not url.startswith('http'):
+        return request.build_absolute_uri(url)
+    return url
+
+
 class PublicPetSerializer(serializers.ModelSerializer):
     breed_name = serializers.CharField(source='breed.name', read_only=True)
     age_display = serializers.CharField(read_only=True)
@@ -66,6 +84,113 @@ class PublicPetSerializer(serializers.ModelSerializer):
             'status', 'main_image'
         ]
         read_only_fields = fields
+
+
+class StorySerializer(serializers.ModelSerializer):
+    author = serializers.SerializerMethodField()
+    pet = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+    is_mine = serializers.SerializerMethodField()
+    has_viewed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Story
+        fields = [
+            'id',
+            'author',
+            'pet',
+            'image',
+            'caption',
+            'created_at',
+            'expires_at',
+            'is_mine',
+            'has_viewed',
+        ]
+        read_only_fields = fields
+
+    def get_author(self, obj):
+        author = obj.author
+        full_name = author.get_full_name() or author.email
+        request = self.context.get('request')
+        return {
+            'id': author.id,
+            'full_name': full_name,
+            'profile_picture': _absolute_file_url(getattr(author, 'profile_picture', None), request),
+            'is_verified': getattr(author, 'is_verified', False),
+        }
+
+    def get_pet(self, obj):
+        pet = obj.pet
+        if not pet:
+            return None
+        request = self.context.get('request')
+        return {
+            'id': pet.id,
+            'name': pet.name,
+            'main_image': _absolute_file_url(getattr(pet, 'main_image', None), request),
+            'breed_name': pet.breed.name if getattr(pet, 'breed', None) else None,
+        }
+
+    def get_image(self, obj):
+        return _absolute_file_url(obj.image, self.context.get('request'))
+
+    def get_is_mine(self, obj):
+        request = self.context.get('request')
+        return bool(request and request.user.is_authenticated and obj.author_id == request.user.id)
+
+    def get_has_viewed(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        if obj.author_id == request.user.id:
+            return True
+        viewed_story_ids = self.context.get('viewed_story_ids')
+        if viewed_story_ids is not None:
+            return obj.id in viewed_story_ids
+        return StoryView.objects.filter(story=obj, user=request.user).exists()
+
+
+class StoryCreateSerializer(serializers.ModelSerializer):
+    pet = serializers.PrimaryKeyRelatedField(
+        queryset=Pet.objects.none(),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = Story
+        fields = ['image', 'caption', 'pet']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            self.fields['pet'].queryset = Pet.objects.filter(owner=request.user)
+
+    def validate_image(self, value):
+        content_type = (getattr(value, 'content_type', '') or '').lower()
+        allowed_types = {'image/jpeg', 'image/jpg', 'image/png', 'image/webp'}
+        if content_type not in allowed_types:
+            raise serializers.ValidationError('يجب أن تكون القصة صورة JPG أو PNG أو WEBP')
+        if getattr(value, 'size', 0) > 5 * 1024 * 1024:
+            raise serializers.ValidationError('حجم الصورة يجب أن يكون أقل من 5 ميجابايت')
+        return value
+
+    def validate_caption(self, value):
+        return (value or '').strip()
+
+    def create(self, validated_data):
+        request = self.context['request']
+        return Story.objects.create(author=request.user, **validated_data)
+
+
+class StoryReportCreateSerializer(serializers.Serializer):
+    reason = serializers.ChoiceField(choices=StoryReport.REASON_CHOICES)
+    details = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+    def validate_details(self, value):
+        return (value or '').strip()
+
 
 class PetSerializer(serializers.ModelSerializer):
     latitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
