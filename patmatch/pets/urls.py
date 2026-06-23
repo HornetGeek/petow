@@ -10,6 +10,11 @@ urlpatterns = [
     # الحيوانات
     path('', views.PetListCreateView.as_view(), name='pet-list-create'),
     path('map/markers/', views.PetMapMarkersView.as_view(), name='pet-map-markers'),
+    path('stories/', views.StoryListCreateView.as_view(), name='story-list-create'),
+    path('stories/my/', views.MyStoriesView.as_view(), name='my-stories'),
+    path('stories/<int:pk>/', views.StoryDeleteView.as_view(), name='story-delete'),
+    path('stories/<int:story_id>/view/', views.mark_story_viewed, name='story-view'),
+    path('stories/<int:story_id>/report/', views.report_story, name='story-report'),
     path('<int:pk>/', views.PetDetailView.as_view(), name='pet-detail'),
     path('my/', views.MyPetsView.as_view(), name='my-pets'),
     

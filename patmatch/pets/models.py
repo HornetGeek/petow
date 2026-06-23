@@ -3,6 +3,12 @@ from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
 from accounts.models import User
+from datetime import timedelta
+
+
+def story_image_upload_path(instance, filename):
+    now = timezone.now()
+    return f"stories/{now:%Y/%m/%d}/{filename}"
 
 class Breed(models.Model):
     """نموذج السلالات"""
@@ -271,6 +277,150 @@ class PetImage(models.Model):
     
     def __str__(self):
         return f"صورة {self.pet.name}"
+
+
+class Story(models.Model):
+    """قصة صورة مؤقتة تظهر لمدة 24 ساعة."""
+
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='stories',
+    )
+    pet = models.ForeignKey(
+        Pet,
+        on_delete=models.SET_NULL,
+        related_name='stories',
+        null=True,
+        blank=True,
+    )
+    image = models.ImageField(upload_to=story_image_upload_path)
+    caption = models.CharField(max_length=160, blank=True, default='')
+    expires_at = models.DateTimeField(db_index=True)
+    is_hidden = models.BooleanField(default=False, db_index=True)
+    hidden_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='hidden_stories',
+        null=True,
+        blank=True,
+    )
+    hidden_reason = models.TextField(blank=True, default='')
+    hidden_at = models.DateTimeField(null=True, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "قصة"
+        verbose_name_plural = "القصص"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['is_hidden', 'deleted_at', 'expires_at'], name='pets_story_active_idx'),
+            models.Index(fields=['author', '-created_at'], name='pets_story_author_idx'),
+        ]
+
+    def __str__(self):
+        return f"Story #{self.id} by {self.author_id}"
+
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(hours=24)
+        super().save(*args, **kwargs)
+
+    @property
+    def is_active(self):
+        return not self.is_hidden and self.deleted_at is None and self.expires_at > timezone.now()
+
+    def soft_delete(self):
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['deleted_at', 'updated_at'])
+
+    def hide(self, moderator=None, reason=''):
+        self.is_hidden = True
+        self.hidden_by = moderator
+        self.hidden_reason = reason or ''
+        self.hidden_at = timezone.now()
+        self.save(update_fields=['is_hidden', 'hidden_by', 'hidden_reason', 'hidden_at', 'updated_at'])
+
+    def unhide(self):
+        self.is_hidden = False
+        self.hidden_by = None
+        self.hidden_reason = ''
+        self.hidden_at = None
+        self.save(update_fields=['is_hidden', 'hidden_by', 'hidden_reason', 'hidden_at', 'updated_at'])
+
+
+class StoryView(models.Model):
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='views')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='story_views')
+    viewed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "مشاهدة قصة"
+        verbose_name_plural = "مشاهدات القصص"
+        ordering = ['-viewed_at']
+        constraints = [
+            models.UniqueConstraint(fields=['story', 'user'], name='pets_storyview_user_story_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-viewed_at'], name='pets_storyview_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"StoryView(story={self.story_id}, user={self.user_id})"
+
+
+class StoryReport(models.Model):
+    REASON_INAPPROPRIATE = 'inappropriate'
+    REASON_SPAM = 'spam'
+    REASON_SAFETY = 'safety'
+    REASON_OTHER = 'other'
+    REASON_CHOICES = [
+        (REASON_INAPPROPRIATE, 'محتوى غير مناسب'),
+        (REASON_SPAM, 'إزعاج أو إعلان'),
+        (REASON_SAFETY, 'مشكلة أمان'),
+        (REASON_OTHER, 'سبب آخر'),
+    ]
+
+    STATUS_OPEN = 'open'
+    STATUS_REVIEWED = 'reviewed'
+    STATUS_DISMISSED = 'dismissed'
+    STATUS_CHOICES = [
+        (STATUS_OPEN, 'مفتوح'),
+        (STATUS_REVIEWED, 'تمت المراجعة'),
+        (STATUS_DISMISSED, 'تم التجاهل'),
+    ]
+
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='reports')
+    reporter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='story_reports')
+    reason = models.CharField(max_length=32, choices=REASON_CHOICES)
+    details = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='reviewed_story_reports',
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "بلاغ قصة"
+        verbose_name_plural = "بلاغات القصص"
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['story', 'reporter'], name='pets_storyrep_usr_story_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['status', '-created_at'], name='pets_storyrep_status_idx'),
+        ]
+
+    def __str__(self):
+        return f"StoryReport(story={self.story_id}, reporter={self.reporter_id})"
 
 class VeterinaryClinic(models.Model):
     """نموذج العيادات البيطرية"""

@@ -3,12 +3,14 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
 from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser
 import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Q
 from django.db import transaction
+from django.utils import timezone
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
@@ -22,6 +24,9 @@ from .models import (
     ChatRoom,
     AdoptionRequest,
     NotificationOutbox,
+    Story,
+    StoryView,
+    StoryReport,
 )
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, PetMapPointSerializer,
@@ -30,7 +35,8 @@ from .serializers import (
     NotificationPreferencesSerializer, NotificationInteractionEventCreateSerializer,
     ChatContextSerializer, ChatStatusSerializer, ChatCreationSerializer,
     AdoptionRequestSerializer, AdoptionRequestCreateSerializer, 
-    AdoptionRequestListSerializer, AdoptionRequestResponseSerializer
+    AdoptionRequestListSerializer, AdoptionRequestResponseSerializer,
+    StorySerializer, StoryCreateSerializer, StoryReportCreateSerializer,
 )
 from .notification_events import enqueue_notification_event
 from accounts.models import UserNotificationSettings
@@ -470,6 +476,124 @@ class BreedListView(generics.ListAPIView):
     serializer_class = BreedSerializer
     permission_classes = []
     authentication_classes = []  # No authentication needed
+
+
+def active_story_queryset():
+    return (
+        Story.objects
+        .filter(is_hidden=False, deleted_at__isnull=True, expires_at__gt=timezone.now())
+        .select_related('author', 'pet', 'pet__breed')
+        .order_by('-created_at')
+    )
+
+
+class StoryListCreateView(generics.ListCreateAPIView):
+    """قائمة القصص النشطة وإنشاء قصة جديدة."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        return active_story_queryset()
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return StoryCreateSerializer
+        return StorySerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if self.request.user.is_authenticated and self.request.method == 'GET':
+            context['viewed_story_ids'] = set(
+                StoryView.objects
+                .filter(user=self.request.user, story__in=self.get_queryset())
+                .values_list('story_id', flat=True)
+            )
+        return context
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        story = serializer.save()
+        data = StorySerializer(story, context=self.get_serializer_context()).data
+        headers = self.get_success_headers(data)
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+class MyStoriesView(generics.ListAPIView):
+    """قصصي النشطة للمستخدم الحالي."""
+    serializer_class = StorySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return active_story_queryset().filter(author=self.request.user)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['viewed_story_ids'] = set(self.get_queryset().values_list('id', flat=True))
+        return context
+
+
+class StoryDeleteView(generics.DestroyAPIView):
+    """حذف قصة المستخدم حذفاً ناعماً."""
+    serializer_class = StorySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Story.objects.filter(author=self.request.user, deleted_at__isnull=True)
+
+    def destroy(self, request, *args, **kwargs):
+        story = self.get_object()
+        story.soft_delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def mark_story_viewed(request, story_id):
+    try:
+        story = active_story_queryset().get(pk=story_id)
+    except Story.DoesNotExist:
+        return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+
+    StoryView.objects.get_or_create(story=story, user=request.user)
+    return Response({'success': True, 'has_viewed': True})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def report_story(request, story_id):
+    try:
+        story = active_story_queryset().get(pk=story_id)
+    except Story.DoesNotExist:
+        return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+
+    if story.author_id == request.user.id:
+        return Response(
+            {'error': 'لا يمكنك الإبلاغ عن قصتك'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    serializer = StoryReportCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    report, created = StoryReport.objects.update_or_create(
+        story=story,
+        reporter=request.user,
+        defaults={
+            'reason': serializer.validated_data['reason'],
+            'details': serializer.validated_data.get('details', ''),
+            'status': StoryReport.STATUS_OPEN,
+            'reviewed_by': None,
+            'reviewed_at': None,
+        },
+    )
+    return Response(
+        {
+            'success': True,
+            'report_id': report.id,
+            'status': report.status,
+        },
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )
 
 class PetFilterSet(django_filters.FilterSet):
     """
