@@ -89,9 +89,10 @@ class StorefrontOrderAdmin(admin.ModelAdmin):
 
 @admin.register(StorefrontBooking)
 class StorefrontBookingAdmin(admin.ModelAdmin):
-    list_display = ('public_id', 'clinic', 'service', 'customer_name', 'customer_phone', 'status', 'created_at')
+    list_display = ('public_id', 'clinic', 'service', 'customer_name', 'customer_user', 'customer_phone', 'status', 'created_at')
     list_filter = ('clinic', 'status', 'created_at')
-    search_fields = ('public_id', 'customer_name', 'customer_phone')
+    search_fields = ('public_id', 'customer_name', 'customer_phone', 'customer_user__email')
+    raw_id_fields = ('customer_user',)
     readonly_fields = ('public_id', 'quoted_price', 'created_at')
 
 

@@ -518,13 +518,13 @@ class StorefrontBookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = StorefrontBooking
         fields = [
-            'public_id', 'clinic', 'service', 'service_name',
+            'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
             'status', 'quoted_price', 'created_at'
         ]
-        read_only_fields = ['public_id', 'clinic', 'status', 'quoted_price', 'created_at', 'service_name']
+        read_only_fields = ['public_id', 'clinic', 'customer_user', 'status', 'quoted_price', 'created_at', 'service_name']
 
 
 class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
@@ -533,14 +533,14 @@ class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = StorefrontBooking
         fields = [
-            'public_id', 'clinic', 'service', 'service_name',
+            'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
             'status', 'quoted_price', 'created_at'
         ]
         read_only_fields = [
-            'public_id', 'clinic', 'service', 'service_name',
+            'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel', 'quoted_price', 'created_at'

@@ -1106,6 +1106,7 @@ class PublicStorefrontBookingView(APIView):
         booking = StorefrontBooking.objects.create(
             clinic=clinic,
             service=service,
+            customer_user=request.user if request.user.is_authenticated else None,
             customer_name=data['customer_name'],
             customer_phone=data['customer_phone'],
             customer_email=data.get('customer_email'),

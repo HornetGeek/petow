@@ -422,6 +422,180 @@ class StoryReport(models.Model):
     def __str__(self):
         return f"StoryReport(story={self.story_id}, reporter={self.reporter_id})"
 
+
+class StoryReaction(models.Model):
+    REACTION_HEART = 'heart'
+    REACTION_CUTE = 'cute'
+    REACTION_HELPFUL = 'helpful'
+    REACTION_INTERESTED = 'interested'
+    REACTION_CHOICES = [
+        (REACTION_HEART, 'أعجبني'),
+        (REACTION_CUTE, 'لطيف'),
+        (REACTION_HELPFUL, 'مفيد'),
+        (REACTION_INTERESTED, 'مهتم'),
+    ]
+
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='reactions')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='story_reactions')
+    reaction = models.CharField(max_length=20, choices=REACTION_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "تفاعل قصة"
+        verbose_name_plural = "تفاعلات القصص"
+        ordering = ['-updated_at']
+        constraints = [
+            models.UniqueConstraint(fields=['story', 'user'], name='pets_strreact_user_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['story', 'reaction'], name='pets_storyreact_summary_idx'),
+            models.Index(fields=['user', '-updated_at'], name='pets_storyreact_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"StoryReaction(story={self.story_id}, user={self.user_id}, reaction={self.reaction})"
+
+
+class EngagementEvent(models.Model):
+    EVENT_PET_LIKE = 'pet_like'
+    EVENT_PET_UNLIKE = 'pet_unlike'
+    EVENT_STORY_REACTION = 'story_reaction'
+    EVENT_STORY_REACTION_REMOVED = 'story_reaction_removed'
+    EVENT_STORY_VIEW = 'story_view'
+    EVENT_CTA_TAP = 'cta_tap'
+    EVENT_FAVORITE = 'favorite'
+    EVENT_UNFAVORITE = 'unfavorite'
+    EVENT_TYPE_CHOICES = [
+        (EVENT_PET_LIKE, 'إعجاب بحيوان'),
+        (EVENT_PET_UNLIKE, 'إزالة إعجاب بحيوان'),
+        (EVENT_STORY_REACTION, 'تفاعل مع قصة'),
+        (EVENT_STORY_REACTION_REMOVED, 'إزالة تفاعل قصة'),
+        (EVENT_STORY_VIEW, 'مشاهدة قصة'),
+        (EVENT_CTA_TAP, 'ضغط دعوة لاتخاذ إجراء'),
+        (EVENT_FAVORITE, 'إضافة للمفضلة'),
+        (EVENT_UNFAVORITE, 'إزالة من المفضلة'),
+    ]
+
+    TARGET_PET = 'pet'
+    TARGET_STORY = 'story'
+    TARGET_CLINIC = 'clinic'
+    TARGET_SERVICE = 'service'
+    TARGET_TYPE_CHOICES = [
+        (TARGET_PET, 'حيوان'),
+        (TARGET_STORY, 'قصة'),
+        (TARGET_CLINIC, 'عيادة'),
+        (TARGET_SERVICE, 'خدمة'),
+    ]
+
+    SOURCE_PET_CARD = 'pet_card'
+    SOURCE_PET_DETAILS = 'pet_details'
+    SOURCE_STORY_VIEWER = 'story_viewer'
+    SOURCE_HOME_STORY_RAIL = 'home_story_rail'
+    SOURCE_NOTIFICATION = 'notification'
+    SOURCE_OTHER = 'other'
+    SOURCE_CHOICES = [
+        (SOURCE_PET_CARD, 'بطاقة الحيوان'),
+        (SOURCE_PET_DETAILS, 'تفاصيل الحيوان'),
+        (SOURCE_STORY_VIEWER, 'عارض القصص'),
+        (SOURCE_HOME_STORY_RAIL, 'شريط القصص'),
+        (SOURCE_NOTIFICATION, 'إشعار'),
+        (SOURCE_OTHER, 'مصدر آخر'),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='engagement_events')
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPE_CHOICES)
+    source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_OTHER)
+    target_type = models.CharField(max_length=24, choices=TARGET_TYPE_CHOICES)
+    pet = models.ForeignKey(Pet, on_delete=models.SET_NULL, related_name='engagement_events', null=True, blank=True)
+    story = models.ForeignKey(Story, on_delete=models.SET_NULL, related_name='engagement_events', null=True, blank=True)
+    metadata = models.JSONField(blank=True, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حدث تفاعل"
+        verbose_name_plural = "أحداث التفاعل"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['event_type', '-created_at'], name='pets_engage_event_idx'),
+            models.Index(fields=['target_type', '-created_at'], name='pets_engage_target_idx'),
+            models.Index(fields=['user', '-created_at'], name='pets_engage_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"EngagementEvent({self.event_type}, {self.target_type}, user={self.user_id})"
+
+
+class SavedSearch(models.Model):
+    """بحث محفوظ للمستخدم مع فلاتر قابلة للتنبيه."""
+
+    TARGET_PET = 'pet'
+    TARGET_ADOPTION = 'adoption_pet'
+    TARGET_BREEDING = 'breeding_pet'
+    TARGET_SERVICE = 'service'
+    TARGET_TYPE_CHOICES = [
+        (TARGET_PET, 'حيوانات'),
+        (TARGET_ADOPTION, 'حيوانات للتبني'),
+        (TARGET_BREEDING, 'حيوانات للتزاوج'),
+        (TARGET_SERVICE, 'خدمات'),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='saved_searches')
+    name = models.CharField(max_length=120)
+    target_type = models.CharField(max_length=24, choices=TARGET_TYPE_CHOICES, default=TARGET_PET)
+    filters = models.JSONField(default=dict, blank=True)
+    city = models.CharField(max_length=120, blank=True, default='')
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
+    radius_km = models.PositiveIntegerField(default=25)
+    alerts_enabled = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    last_notified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "بحث محفوظ"
+        verbose_name_plural = "البحوث المحفوظة"
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['user', 'is_active', '-updated_at'], name='pets_saved_user_active_idx'),
+            models.Index(fields=['target_type', 'is_active'], name='pets_saved_target_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.user_id})"
+
+
+class SavedSearchMatch(models.Model):
+    """نتيجة مطابقة لبحث محفوظ، مع dedupe للتنبيهات."""
+
+    saved_search = models.ForeignKey(SavedSearch, on_delete=models.CASCADE, related_name='matches')
+    target_type = models.CharField(max_length=24)
+    target_id = models.PositiveBigIntegerField()
+    matched_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = "نتيجة بحث محفوظ"
+        verbose_name_plural = "نتائج البحوث المحفوظة"
+        ordering = ['-matched_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['saved_search', 'target_type', 'target_id'],
+                name='pets_saved_match_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['saved_search', '-matched_at'], name='pets_saved_match_idx'),
+            models.Index(fields=['target_type', 'target_id'], name='pets_saved_target_id_idx'),
+        ]
+
+    def __str__(self):
+        return f"SavedSearchMatch(search={self.saved_search_id}, target={self.target_type}:{self.target_id})"
+
 class VeterinaryClinic(models.Model):
     """نموذج العيادات البيطرية"""
     
@@ -519,6 +693,26 @@ class Favorite(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.pet.name}"
 
+
+class PetLike(models.Model):
+    """إعجاب خفيف بالحيوان؛ المفضلة تبقى للحفظ والمتابعة."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='pet_likes')
+    pet = models.ForeignKey(Pet, on_delete=models.CASCADE, related_name='liked_by')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'pet')
+        verbose_name = "إعجاب حيوان"
+        verbose_name_plural = "إعجابات الحيوانات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['pet', '-created_at'], name='pets_petlike_pet_idx'),
+            models.Index(fields=['user', '-created_at'], name='pets_petlike_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} likes {self.pet.name}"
+
 class Notification(models.Model):
     """نموذج الإشعارات"""
     NOTIFICATION_TYPES = [
@@ -532,6 +726,7 @@ class Notification(models.Model):
         ('chat_message_received', 'تم استلام رسالة جديدة'),
         ('pet_nearby', 'حيوان جديد بالقرب منك'),
         ('adoption_pet_nearby', 'حيوان للتبني بالقرب منك'),
+        ('saved_search_match', 'نتيجة جديدة لبحث محفوظ'),
         ('clinic_broadcast', 'إشعار من العيادة'),
         ('clinic_invite', 'دعوة ربط عيادة'),
         ('breeding_request_pending_reminder', 'تذكير بطلب مقابلة معلق'),
