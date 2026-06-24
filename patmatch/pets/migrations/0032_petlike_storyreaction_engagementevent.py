@@ -7,7 +7,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('pets', '0031_story_storyview_storyreport'),
+        ('pets', '0031_story_storyreport_storyview_and_more'),
     ]
 
     operations = [
