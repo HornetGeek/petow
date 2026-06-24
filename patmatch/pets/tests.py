@@ -21,7 +21,7 @@ from .email_notifications import send_adoption_request_email, send_daily_unread_
 from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, EmailReminderDispatch, EngagementEvent, Notification, NotificationDeliveryAttempt, NotificationOutbox, Pet, PetLike, SavedSearch, SavedSearchMatch, Story, StoryReaction, StoryReport, StoryView
 from .notification_events import enqueue_notification_event
 from .notifications import notify_new_adoption_pet, notify_new_pet_added
-from .serializers import ChatContextSerializer, ChatRoomListSerializer
+from .serializers import ChatContextSerializer, ChatRoomListSerializer, PetListSerializer, PetSerializer
 from .tasks import (
     process_notification_outbox_event,
     run_auto_manage_requests,
@@ -78,6 +78,91 @@ class NotifyNewPetAddedTests(TestCase):
 
         self.assertEqual(result, [])
         self.assertEqual(Notification.objects.count(), 0)
+
+
+class PetEngagementSerializerRegressionTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        post_save.disconnect(receiver=claim_invites_when_user_updates, sender=User)
+
+    @classmethod
+    def tearDownClass(cls):
+        post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.owner = User.objects.create_user(
+            username='engagement-owner',
+            email='engagement-owner@example.com',
+            password='testpass123',
+            phone='1000000001',
+            first_name='Engagement',
+            last_name='Owner',
+        )
+        self.viewer = User.objects.create_user(
+            username='engagement-viewer',
+            email='engagement-viewer@example.com',
+            password='testpass123',
+            phone='1000000002',
+            first_name='Engagement',
+            last_name='Viewer',
+        )
+        self.breed = Breed.objects.create(name='Engagement Breed', pet_type='cats')
+        self.pet = Pet.objects.create(
+            owner=self.owner,
+            name='Engagement Cat',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=14,
+            gender='F',
+            description='Serializer regression pet',
+            hosting_preference='flexible',
+            main_image=SimpleUploadedFile('engagement.jpg', b'\xff\xd8\xff', content_type='image/jpeg'),
+            status='available_for_adoption',
+            location='Riyadh',
+            latitude=Decimal('24.71360000'),
+            longitude=Decimal('46.67530000'),
+            is_free=True,
+        )
+
+    def _request(self):
+        request = self.factory.get('/api/pets/')
+        request.user = self.viewer
+        return request
+
+    def test_pet_list_serializer_engagement_fields_without_annotation(self):
+        data = PetListSerializer(
+            self.pet,
+            context={'request': self._request(), 'liked_pet_ids': set()},
+        ).data
+
+        self.assertEqual(data['likes_count'], 0)
+        self.assertFalse(data['is_liked'])
+
+    def test_pet_list_serializer_engagement_fields_with_annotation(self):
+        PetLike.objects.create(user=self.viewer, pet=self.pet)
+        pet = Pet.objects.annotate(likes_count=Count('liked_by', distinct=True)).get(pk=self.pet.pk)
+
+        data = PetListSerializer(
+            pet,
+            context={'request': self._request(), 'liked_pet_ids': {self.pet.id}},
+        ).data
+
+        self.assertEqual(data['likes_count'], 1)
+        self.assertTrue(data['is_liked'])
+
+    def test_pet_detail_serializer_engagement_fields(self):
+        pet = Pet.objects.annotate(likes_count=Count('liked_by', distinct=True)).get(pk=self.pet.pk)
+
+        data = PetSerializer(
+            pet,
+            context={'request': self._request(), 'liked_pet_ids': set()},
+        ).data
+
+        self.assertEqual(data['likes_count'], 0)
+        self.assertFalse(data['is_liked'])
 
 
 class AdoptionPushPayloadRegressionTests(TestCase):
