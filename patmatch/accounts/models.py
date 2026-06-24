@@ -430,6 +430,9 @@ class MobileAppConfig(models.Model):
     clinic_home_enabled = models.BooleanField(default=True)
     clinic_map_enabled = models.BooleanField(default=True)
     server_map_clustering_enabled = models.BooleanField(default=True)
+    request_center_enabled = models.BooleanField(default=True)
+    saved_searches_enabled = models.BooleanField(default=True)
+    home_digest_enabled = models.BooleanField(default=True)
     android_min_supported_version = models.CharField(
         max_length=32, blank=True, default=""
     )

@@ -325,6 +325,14 @@ class StorefrontBooking(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='storefront_bookings')
     service = models.ForeignKey(ClinicService, on_delete=models.CASCADE, related_name='bookings')
+    customer_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='storefront_bookings',
+        blank=True,
+        null=True,
+        help_text="المستخدم صاحب الطلب عند إنشائه من التطبيق"
+    )
     customer_name = models.CharField(max_length=150)
     customer_phone = models.CharField(max_length=30)
     customer_email = models.EmailField(blank=True, null=True)

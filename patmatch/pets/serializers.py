@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from django.contrib.gis.geos import Point
+from django.db.models import Count
 import re
 from .models import (
     Breed,
@@ -8,6 +9,7 @@ from .models import (
     PetImage,
     BreedingRequest,
     Favorite,
+    PetLike,
     VeterinaryClinic,
     Notification,
     NotificationInteractionEvent,
@@ -16,6 +18,10 @@ from .models import (
     Story,
     StoryView,
     StoryReport,
+    StoryReaction,
+    EngagementEvent,
+    SavedSearch,
+    SavedSearchMatch,
 )
 from .notifications import get_notification_category, get_notification_priority
 from .push_targets import build_mobile_deep_link, build_web_url
@@ -92,6 +98,10 @@ class StorySerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     is_mine = serializers.SerializerMethodField()
     has_viewed = serializers.SerializerMethodField()
+    my_reaction = serializers.SerializerMethodField()
+    reactions_summary = serializers.SerializerMethodField()
+    reaction_count = serializers.SerializerMethodField()
+    reactions = serializers.SerializerMethodField()
 
     class Meta:
         model = Story
@@ -105,6 +115,10 @@ class StorySerializer(serializers.ModelSerializer):
             'expires_at',
             'is_mine',
             'has_viewed',
+            'my_reaction',
+            'reactions_summary',
+            'reaction_count',
+            'reactions',
         ]
         read_only_fields = fields
 
@@ -149,6 +163,53 @@ class StorySerializer(serializers.ModelSerializer):
             return obj.id in viewed_story_ids
         return StoryView.objects.filter(story=obj, user=request.user).exists()
 
+    def get_my_reaction(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+        my_story_reactions = self.context.get('my_story_reactions')
+        if my_story_reactions is not None:
+            return my_story_reactions.get(obj.id)
+        reaction = StoryReaction.objects.filter(story=obj, user=request.user).first()
+        return reaction.reaction if reaction else None
+
+    def get_reactions_summary(self, obj):
+        summary = {choice[0]: 0 for choice in StoryReaction.REACTION_CHOICES}
+        rows = obj.reactions.values('reaction').annotate(total=Count('id'))
+        for row in rows:
+            summary[row['reaction']] = row['total']
+        return summary
+
+    def get_reaction_count(self, obj):
+        annotated = getattr(obj, 'reaction_count', None)
+        if annotated is not None:
+            return int(annotated)
+        return obj.reactions.count()
+
+    def get_reactions(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated or obj.author_id != request.user.id:
+            return []
+        reactions = obj.reactions.select_related('user').order_by('-updated_at')[:100]
+        return [
+            {
+                'id': reaction.id,
+                'reaction': reaction.reaction,
+                'created_at': reaction.created_at,
+                'updated_at': reaction.updated_at,
+                'user': {
+                    'id': reaction.user_id,
+                    'full_name': reaction.user.get_full_name() or reaction.user.email,
+                    'profile_picture': _absolute_file_url(
+                        getattr(reaction.user, 'profile_picture', None),
+                        request,
+                    ),
+                    'is_verified': getattr(reaction.user, 'is_verified', False),
+                },
+            }
+            for reaction in reactions
+        ]
+
 
 class StoryCreateSerializer(serializers.ModelSerializer):
     pet = serializers.PrimaryKeyRelatedField(
@@ -192,7 +253,171 @@ class StoryReportCreateSerializer(serializers.Serializer):
         return (value or '').strip()
 
 
-class PetSerializer(serializers.ModelSerializer):
+class StoryReactionCreateSerializer(serializers.Serializer):
+    reaction = serializers.ChoiceField(choices=StoryReaction.REACTION_CHOICES)
+
+
+class EngagementEventCreateSerializer(serializers.Serializer):
+    event_type = serializers.ChoiceField(choices=EngagementEvent.EVENT_TYPE_CHOICES)
+    source = serializers.ChoiceField(choices=EngagementEvent.SOURCE_CHOICES, required=False)
+    target_type = serializers.ChoiceField(choices=EngagementEvent.TARGET_TYPE_CHOICES)
+    pet_id = serializers.IntegerField(required=False, allow_null=True)
+    story_id = serializers.IntegerField(required=False, allow_null=True)
+    metadata = serializers.JSONField(required=False)
+
+    def validate_metadata(self, value):
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('metadata يجب أن يكون كائناً')
+        return value
+
+    def validate(self, attrs):
+        target_type = attrs['target_type']
+        pet_id = attrs.get('pet_id')
+        story_id = attrs.get('story_id')
+
+        if target_type == EngagementEvent.TARGET_PET:
+            if not pet_id:
+                raise serializers.ValidationError({'pet_id': 'pet_id مطلوب لهذا الحدث'})
+            try:
+                attrs['pet'] = Pet.objects.get(pk=pet_id)
+            except Pet.DoesNotExist:
+                raise serializers.ValidationError({'pet_id': 'الحيوان غير موجود'})
+            attrs['story'] = None
+        elif target_type == EngagementEvent.TARGET_STORY:
+            if not story_id:
+                raise serializers.ValidationError({'story_id': 'story_id مطلوب لهذا الحدث'})
+            try:
+                attrs['story'] = Story.objects.get(pk=story_id)
+            except Story.DoesNotExist:
+                raise serializers.ValidationError({'story_id': 'القصة غير موجودة'})
+            attrs['pet'] = None
+        else:
+            attrs['pet'] = None
+            attrs['story'] = None
+
+        attrs.setdefault('source', EngagementEvent.SOURCE_OTHER)
+        attrs.setdefault('metadata', {})
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context['request']
+        return EngagementEvent.objects.create(
+            user=request.user,
+            event_type=validated_data['event_type'],
+            source=validated_data['source'],
+            target_type=validated_data['target_type'],
+            pet=validated_data.get('pet'),
+            story=validated_data.get('story'),
+            metadata=validated_data.get('metadata', {}),
+        )
+
+
+class SavedSearchSerializer(serializers.ModelSerializer):
+    matches_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SavedSearch
+        fields = [
+            'id',
+            'name',
+            'target_type',
+            'filters',
+            'city',
+            'latitude',
+            'longitude',
+            'radius_km',
+            'alerts_enabled',
+            'is_active',
+            'last_checked_at',
+            'last_notified_at',
+            'created_at',
+            'updated_at',
+            'matches_count',
+        ]
+        read_only_fields = [
+            'id',
+            'last_checked_at',
+            'last_notified_at',
+            'created_at',
+            'updated_at',
+            'matches_count',
+        ]
+
+    def get_matches_count(self, obj):
+        annotated = getattr(obj, 'matches_count', None)
+        if annotated is not None:
+            return int(annotated)
+        return obj.matches.count()
+
+    def validate_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('اسم البحث مطلوب')
+        return value
+
+    def validate_filters(self, value):
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('filters يجب أن يكون كائناً')
+        return value
+
+    def validate_radius_km(self, value):
+        if value < 1 or value > 500:
+            raise serializers.ValidationError('نطاق البحث يجب أن يكون بين 1 و 500 كم')
+        return value
+
+    def create(self, validated_data):
+        validated_data['user'] = self.context['request'].user
+        return super().create(validated_data)
+
+
+class SavedSearchPreviewSerializer(serializers.Serializer):
+    target_type = serializers.ChoiceField(choices=SavedSearch.TARGET_TYPE_CHOICES)
+    filters = serializers.JSONField(required=False, default=dict)
+    city = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    latitude = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=8)
+    longitude = serializers.DecimalField(required=False, allow_null=True, max_digits=11, decimal_places=8)
+    radius_km = serializers.IntegerField(required=False, min_value=1, max_value=500, default=25)
+
+    def validate_filters(self, value):
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('filters يجب أن يكون كائناً')
+        return value
+
+
+class SavedSearchMatchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SavedSearchMatch
+        fields = ['id', 'saved_search', 'target_type', 'target_id', 'matched_at', 'notified_at', 'metadata']
+        read_only_fields = fields
+
+
+class PetEngagementMixin:
+    likes_count = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
+
+    def get_likes_count(self, obj):
+        annotated = getattr(obj, 'likes_count', None)
+        if annotated is not None:
+            return int(annotated)
+        return obj.liked_by.count()
+
+    def get_is_liked(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        liked_pet_ids = self.context.get('liked_pet_ids')
+        if liked_pet_ids is not None:
+            return obj.id in liked_pet_ids
+        return PetLike.objects.filter(user=request.user, pet=obj).exists()
+
+
+class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
     latitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     longitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
@@ -287,6 +512,7 @@ class PetSerializer(serializers.ModelSerializer):
             'vaccination_certificate', 'health_certificate', 'disease_free_certificate', 'additional_certificate',
             'status', 'status_display', 'location', 
             'latitude', 'longitude', 'is_free', 'owner_name', 'owner_email', 'owner_is_verified',
+            'likes_count', 'is_liked',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['owner', 'created_at', 'updated_at']
@@ -372,7 +598,7 @@ class PetSerializer(serializers.ModelSerializer):
 
         return super().update(instance, validated_data)
 
-class PetListSerializer(serializers.ModelSerializer):
+class PetListSerializer(PetEngagementMixin, serializers.ModelSerializer):
     """سيريلايزر مبسط لقائمة الحيوانات"""
     breed_name = serializers.CharField(source='breed.name', read_only=True)
     pet_type_display = serializers.CharField(read_only=True)
@@ -478,7 +704,8 @@ class PetListSerializer(serializers.ModelSerializer):
             'age_display', 'age_months', 'gender', 'gender_display', 'description', 'main_image', 
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 'owner_is_verified',
-            'has_health_certificates', 'hosting_preference', 'created_at', 'updated_at'
+            'has_health_certificates', 'hosting_preference', 'likes_count', 'is_liked',
+            'created_at', 'updated_at'
         ]
 
 

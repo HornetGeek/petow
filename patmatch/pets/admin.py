@@ -7,6 +7,7 @@ from .models import (
     PetImage,
     BreedingRequest,
     Favorite,
+    PetLike,
     VeterinaryClinic,
     Notification,
     NotificationOutbox,
@@ -16,6 +17,10 @@ from .models import (
     Story,
     StoryView,
     StoryReport,
+    StoryReaction,
+    EngagementEvent,
+    SavedSearch,
+    SavedSearchMatch,
 )
 
 @admin.register(Breed)
@@ -155,6 +160,15 @@ class StoryViewAdmin(admin.ModelAdmin):
     readonly_fields = ['viewed_at']
 
 
+@admin.register(StoryReaction)
+class StoryReactionAdmin(admin.ModelAdmin):
+    list_display = ['id', 'story', 'user', 'reaction', 'updated_at', 'created_at']
+    list_filter = ['reaction', 'created_at', 'updated_at']
+    search_fields = ['story__caption', 'user__email', 'user__first_name', 'user__last_name']
+    raw_id_fields = ['story', 'user']
+    readonly_fields = ['created_at', 'updated_at']
+
+
 @admin.register(StoryReport)
 class StoryReportAdmin(admin.ModelAdmin):
     list_display = ['id', 'story', 'reporter', 'reason', 'status', 'created_at']
@@ -289,6 +303,45 @@ class FavoriteAdmin(admin.ModelAdmin):
     list_display = ['user', 'pet', 'created_at']
     list_filter = ['created_at']
     search_fields = ['user__email', 'pet__name']
+
+
+@admin.register(PetLike)
+class PetLikeAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'pet', 'created_at']
+    list_filter = ['created_at']
+    search_fields = ['user__email', 'user__first_name', 'user__last_name', 'pet__name']
+    raw_id_fields = ['user', 'pet']
+
+
+@admin.register(EngagementEvent)
+class EngagementEventAdmin(admin.ModelAdmin):
+    list_display = ['id', 'event_type', 'source', 'target_type', 'user', 'pet', 'story', 'created_at']
+    list_filter = ['event_type', 'source', 'target_type', 'created_at']
+    search_fields = [
+        'user__email', 'user__first_name', 'user__last_name',
+        'pet__name', 'story__caption',
+    ]
+    raw_id_fields = ['user', 'pet', 'story']
+    readonly_fields = ['created_at']
+
+
+@admin.register(SavedSearch)
+class SavedSearchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'name', 'user', 'target_type', 'city', 'alerts_enabled', 'is_active', 'last_notified_at', 'updated_at']
+    list_filter = ['target_type', 'alerts_enabled', 'is_active', 'created_at', 'last_notified_at']
+    search_fields = ['name', 'user__email', 'user__first_name', 'user__last_name', 'city']
+    raw_id_fields = ['user']
+    readonly_fields = ['last_checked_at', 'last_notified_at', 'created_at', 'updated_at']
+
+
+@admin.register(SavedSearchMatch)
+class SavedSearchMatchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'saved_search', 'target_type', 'target_id', 'matched_at', 'notified_at']
+    list_filter = ['target_type', 'matched_at', 'notified_at']
+    search_fields = ['saved_search__name', 'saved_search__user__email', 'target_id']
+    raw_id_fields = ['saved_search']
+    readonly_fields = ['matched_at', 'notified_at']
+
 
 @admin.register(ChatRoom)
 class ChatRoomAdmin(admin.ModelAdmin):

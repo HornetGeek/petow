@@ -41,6 +41,7 @@ TRANSACTIONAL_NOTIFICATION_TYPES = {
 DISCOVERY_NOTIFICATION_TYPES = {
     'pet_nearby',
     'adoption_pet_nearby',
+    'saved_search_match',
 }
 
 REMINDER_NOTIFICATION_TYPES = {

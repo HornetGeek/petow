@@ -20,6 +20,7 @@ ADOPTION_REQUEST_TYPES = {
 PET_DETAIL_TYPES = {
     'pet_nearby',
     'adoption_pet_nearby',
+    'saved_search_match',
     'pet_status_changed',
 }
 
@@ -83,7 +84,10 @@ def build_mobile_deep_link(notification_type: Any, context: Optional[Dict[str, A
 
     if n_type in PET_DETAIL_TYPES:
         pet_id = _pick_value(ctx, ('pet_id', 'related_pet', 'target_id'))
-        return _with_query('petow://pet-details', 'pet_id', pet_id)
+        if pet_id:
+            return _with_query('petow://pet-details', 'pet_id', pet_id)
+        saved_search_id = _pick_value(ctx, ('saved_search_id',))
+        return _with_query('petow://saved-search', 'saved_search_id', saved_search_id)
 
     if n_type in CHAT_TYPES:
         chat_id = _pick_value(ctx, ('firebase_chat_id', 'chat_id', 'chat_room_id'))
@@ -114,6 +118,8 @@ def build_web_url(notification_type: Any, context: Optional[Dict[str, Any]] = No
         pet_id = _pick_value(ctx, ('pet_id', 'related_pet', 'target_id'))
         if pet_id:
             return '/pets/{pet_id}'.format(pet_id=quote(pet_id))
+        if n_type == 'saved_search_match':
+            return '/profile'
         return '/profile'
 
     if n_type in CHAT_TYPES:

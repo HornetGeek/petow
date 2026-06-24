@@ -8,6 +8,7 @@ import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
+from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
@@ -19,6 +20,7 @@ from .models import (
     Pet,
     BreedingRequest,
     Favorite,
+    PetLike,
     VeterinaryClinic,
     Notification,
     ChatRoom,
@@ -27,6 +29,10 @@ from .models import (
     Story,
     StoryView,
     StoryReport,
+    StoryReaction,
+    EngagementEvent,
+    SavedSearch,
+    SavedSearchMatch,
 )
 from .serializers import (
     BreedSerializer, PetSerializer, PetListSerializer, PetMapPointSerializer,
@@ -37,10 +43,18 @@ from .serializers import (
     AdoptionRequestSerializer, AdoptionRequestCreateSerializer, 
     AdoptionRequestListSerializer, AdoptionRequestResponseSerializer,
     StorySerializer, StoryCreateSerializer, StoryReportCreateSerializer,
+    StoryReactionCreateSerializer, EngagementEventCreateSerializer,
+    SavedSearchSerializer, SavedSearchPreviewSerializer,
 )
 from .notification_events import enqueue_notification_event
+from .saved_searches import (
+    get_saved_search_queryset,
+    serialize_saved_search_results,
+    serialize_service_card,
+)
 from accounts.models import UserNotificationSettings
 from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
+from clinics.models import StorefrontBooking, ClinicService
 import logging
 import time
 import hashlib
@@ -108,6 +122,403 @@ CHAT_ROOM_SELECT_RELATED_FIELDS = (
     'clinic_patient__owner',
     'clinic_patient__linked_user',
 )
+
+REQUEST_STATUS_LABELS = {
+    'pending': 'قيد المراجعة',
+    'approved': 'تم القبول',
+    'accepted': 'تم القبول',
+    'rejected': 'تم الرفض',
+    'completed': 'مكتمل',
+    'cancelled': 'ملغي',
+    'new': 'جديد',
+    'confirmed': 'مؤكد',
+}
+
+
+def _absolute_url(request, value):
+    if not value:
+        return None
+    try:
+        url = value.url if hasattr(value, 'url') else str(value)
+    except Exception:
+        return None
+    if request and url and not url.startswith('http'):
+        return request.build_absolute_uri(url)
+    return url
+
+
+def _status_label(status_value):
+    return REQUEST_STATUS_LABELS.get(status_value or '', status_value or 'جارٍ المتابعة')
+
+
+def _request_card_priority(card):
+    if card.get('requires_action'):
+        return 0
+    if card.get('kind') == 'chat_unread':
+        return 1
+    if card.get('status') == 'pending':
+        return 2
+    if card.get('kind') in {'provider_inquiry', 'provider_booking'} and card.get('status') in {'new', 'confirmed'}:
+        return 3
+    return 4
+
+
+def _pet_image(request, pet):
+    return _absolute_url(request, getattr(pet, 'main_image', None)) if pet else None
+
+
+def _build_adoption_card(adoption_request, request, direction):
+    pet = adoption_request.pet
+    is_received = direction == 'received'
+    status_value = adoption_request.status
+    requires_action = is_received and status_value == 'pending'
+    title = 'طلب تبني وارد' if is_received else 'طلب تبني مرسل'
+    actor_name = (
+        adoption_request.adopter.get_full_name()
+        if is_received
+        else getattr(getattr(pet, 'owner', None), 'get_full_name', lambda: '')()
+    ) or adoption_request.adopter_email or 'مستخدم'
+    subtitle = f"{pet.name if pet else 'حيوان'} • {actor_name}"
+    return {
+        'id': f'adoption_{direction}_{adoption_request.id}',
+        'object_id': adoption_request.id,
+        'kind': f'adoption_{direction}',
+        'status': status_value,
+        'status_label': _status_label(status_value),
+        'title': title,
+        'subtitle': subtitle,
+        'primary_image': _pet_image(request, pet),
+        'created_at': adoption_request.created_at,
+        'updated_at': adoption_request.updated_at,
+        'requires_action': requires_action,
+        'action_label': 'راجع طلب التبني' if requires_action else 'عرض الطلب',
+        'deep_link': f'petow://adoption-requests?adoption_request_id={adoption_request.id}',
+        'metadata': {
+            'adoption_request_id': adoption_request.id,
+            'pet_id': pet.id if pet else None,
+            'direction': direction,
+        },
+    }
+
+
+def _build_breeding_card(breeding_request, request, direction):
+    is_received = direction == 'received'
+    status_value = breeding_request.status
+    partner_pet = breeding_request.requester_pet if is_received else breeding_request.target_pet
+    my_pet = breeding_request.target_pet if is_received else breeding_request.requester_pet
+    requires_action = is_received and status_value == 'pending'
+    title = 'طلب تزاوج وارد' if is_received else 'طلب تزاوج مرسل'
+    subtitle = f"{partner_pet.name if partner_pet else 'حيوان'} مع {my_pet.name if my_pet else 'حيوانك'}"
+    return {
+        'id': f'breeding_{direction}_{breeding_request.id}',
+        'object_id': breeding_request.id,
+        'kind': f'breeding_{direction}',
+        'status': status_value,
+        'status_label': _status_label(status_value),
+        'title': title,
+        'subtitle': subtitle,
+        'primary_image': _pet_image(request, partner_pet),
+        'created_at': breeding_request.created_at,
+        'updated_at': breeding_request.updated_at,
+        'requires_action': requires_action,
+        'action_label': 'راجع طلب التزاوج' if requires_action else 'عرض الطلب',
+        'deep_link': f'petow://breeding-requests?breeding_request_id={breeding_request.id}',
+        'metadata': {
+            'breeding_request_id': breeding_request.id,
+            'pet_id': partner_pet.id if partner_pet else None,
+            'direction': direction,
+        },
+    }
+
+
+def _build_chat_card(chat_room, unread_count, request):
+    pet = None
+    try:
+        if chat_room.adoption_request:
+            pet = chat_room.adoption_request.pet
+        elif chat_room.breeding_request:
+            if chat_room.breeding_request.requester_id == request.user.id:
+                pet = chat_room.breeding_request.target_pet
+            else:
+                pet = chat_room.breeding_request.requester_pet
+    except Exception:
+        pet = None
+
+    other = chat_room.get_other_participant(request.user)
+    title = 'رسائل جديدة'
+    subtitle = other.get_full_name() if other else None
+    if not subtitle and getattr(chat_room, 'clinic_patient', None) and chat_room.clinic_patient.clinic:
+        subtitle = chat_room.clinic_patient.clinic.name
+    if pet:
+        subtitle = f"{subtitle or 'محادثة'} • {pet.name}"
+    return {
+        'id': f'chat_{chat_room.id}',
+        'object_id': chat_room.id,
+        'kind': 'chat_unread',
+        'status': 'unread',
+        'status_label': f'{unread_count} غير مقروء',
+        'title': title,
+        'subtitle': subtitle or 'محادثة نشطة',
+        'primary_image': _pet_image(request, pet),
+        'created_at': chat_room.created_at,
+        'updated_at': chat_room.updated_at,
+        'requires_action': unread_count > 0,
+        'action_label': 'فتح المحادثة',
+        'deep_link': f'petow://clinic-chat?firebase_chat_id={chat_room.firebase_chat_id}',
+        'metadata': {
+            'chat_room_id': chat_room.id,
+            'firebase_chat_id': chat_room.firebase_chat_id,
+            'unread_count': unread_count,
+        },
+    }
+
+
+def _build_storefront_booking_card(booking, request):
+    is_inquiry = booking.request_type == 'inquiry'
+    status_value = booking.status
+    service_name = booking.service.name if booking.service else 'خدمة'
+    clinic_name = booking.clinic.name if booking.clinic else 'عيادة'
+    return {
+        'id': f'storefront_booking_{booking.id}',
+        'object_id': booking.id,
+        'kind': 'provider_inquiry' if is_inquiry else 'provider_booking',
+        'status': status_value,
+        'status_label': _status_label(status_value),
+        'title': 'استفسار خدمة' if is_inquiry else 'حجز خدمة',
+        'subtitle': f'{service_name} • {clinic_name}',
+        'primary_image': _absolute_url(request, getattr(booking.clinic, 'logo', None)),
+        'created_at': booking.created_at,
+        'updated_at': booking.created_at,
+        'requires_action': status_value in {'new', 'confirmed'},
+        'action_label': 'متابعة الاستفسار' if is_inquiry else 'متابعة الحجز',
+        'deep_link': f'petow://services?booking_id={booking.id}',
+        'metadata': {
+            'booking_id': booking.id,
+            'public_id': str(booking.public_id),
+            'clinic_id': booking.clinic_id,
+            'service_id': booking.service_id,
+            'request_type': booking.request_type,
+        },
+    }
+
+
+def _get_user_storefront_bookings(user):
+    query = Q(customer_user=user)
+    email = (getattr(user, 'email', '') or '').strip()
+    phone = (getattr(user, 'phone', '') or '').strip()
+    if email:
+        query |= Q(customer_email__iexact=email)
+    if phone:
+        query |= Q(customer_phone__iexact=phone)
+    return StorefrontBooking.objects.filter(query).select_related('clinic', 'service').order_by('-created_at')
+
+
+def build_request_center_cards(request):
+    user = request.user
+    cards = []
+    adoption_sent = AdoptionRequest.objects.filter(adopter=user).select_related(*ADOPTION_REQUEST_SELECT_RELATED_FIELDS)
+    adoption_received = AdoptionRequest.objects.filter(pet__owner=user).select_related(*ADOPTION_REQUEST_SELECT_RELATED_FIELDS)
+    breeding_sent = BreedingRequest.objects.filter(requester=user).select_related(*BREEDING_REQUEST_SELECT_RELATED_FIELDS)
+    breeding_received = BreedingRequest.objects.filter(receiver=user).select_related(*BREEDING_REQUEST_SELECT_RELATED_FIELDS)
+
+    cards.extend(_build_adoption_card(item, request, 'sent') for item in adoption_sent[:50])
+    cards.extend(_build_adoption_card(item, request, 'received') for item in adoption_received[:50])
+    cards.extend(_build_breeding_card(item, request, 'sent') for item in breeding_sent[:50])
+    cards.extend(_build_breeding_card(item, request, 'received') for item in breeding_received[:50])
+
+    unread_rows = (
+        Notification.objects
+        .filter(user=user, type='chat_message_received', is_read=False, related_chat_room__isnull=False)
+        .values('related_chat_room')
+        .annotate(total=Count('id'))
+    )
+    unread_by_room = {row['related_chat_room']: row['total'] for row in unread_rows}
+    chat_ids = list(unread_by_room.keys())
+    if chat_ids:
+        chats = ChatRoom.objects.filter(id__in=chat_ids, is_active=True).select_related(*CHAT_ROOM_SELECT_RELATED_FIELDS)
+        cards.extend(_build_chat_card(chat, unread_by_room.get(chat.id, 0), request) for chat in chats)
+
+    cards.extend(_build_storefront_booking_card(item, request) for item in _get_user_storefront_bookings(user)[:30])
+    cards.sort(key=lambda card: (_request_card_priority(card), -(card.get('updated_at') or card.get('created_at')).timestamp()))
+    return cards
+
+
+class RequestCenterView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        cards = build_request_center_cards(request)
+        kind = request.query_params.get('kind')
+        if kind:
+            cards = [card for card in cards if card.get('kind') == kind]
+        requires_action = request.query_params.get('requires_action')
+        if requires_action in {'1', 'true', 'yes'}:
+            cards = [card for card in cards if card.get('requires_action')]
+        return Response({'count': len(cards), 'results': cards})
+
+
+class SavedSearchListCreateView(generics.ListCreateAPIView):
+    serializer_class = SavedSearchSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            SavedSearch.objects
+            .filter(user=self.request.user)
+            .annotate(matches_count=Count('matches'))
+            .order_by('-updated_at')
+        )
+
+
+class SavedSearchDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = SavedSearchSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return SavedSearch.objects.filter(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.alerts_enabled = False
+        instance.save(update_fields=['is_active', 'alerts_enabled', 'updated_at'])
+
+
+class SavedSearchPreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        saved_search = get_object_or_404(SavedSearch, pk=pk, user=request.user)
+        return Response(serialize_saved_search_results(saved_search, request=request, limit=10))
+
+
+class UnsavedSearchPreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = SavedSearchPreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = serializer.validated_data
+        saved_search = SavedSearch(
+            user=request.user,
+            name='preview',
+            target_type=payload['target_type'],
+            filters=payload.get('filters') or {},
+            city=payload.get('city') or '',
+            latitude=payload.get('latitude'),
+            longitude=payload.get('longitude'),
+            radius_km=payload.get('radius_km') or 25,
+        )
+        return Response(serialize_saved_search_results(saved_search, request=request, limit=10))
+
+
+def _digest_module(key, title, items, deep_link=None):
+    return {
+        'key': key,
+        'title': title,
+        'count': len(items),
+        'items': items,
+        'deep_link': deep_link,
+    }
+
+
+def _serialize_saved_search_match(match, request):
+    search = match.saved_search
+    target_type = match.target_type
+    item = None
+    title = search.name
+    subtitle = 'نتيجة جديدة لبحث محفوظ'
+    image = None
+    deep_link = f'petow://saved-search?saved_search_id={search.id}'
+
+    if target_type in {SavedSearch.TARGET_PET, SavedSearch.TARGET_ADOPTION, SavedSearch.TARGET_BREEDING, 'pet'}:
+        pet = Pet.objects.select_related('breed', 'owner').filter(id=match.target_id).first()
+        if pet:
+            item = PetListSerializer(pet, context={'request': request}).data
+            title = pet.name
+            subtitle = search.name
+            image = item.get('main_image')
+            deep_link = f'petow://pet-details?pet_id={pet.id}&saved_search_id={search.id}'
+    elif target_type == SavedSearch.TARGET_SERVICE:
+        service = ClinicService.objects.select_related('clinic').filter(id=match.target_id).first()
+        if service:
+            item = serialize_service_card(service, request=request)
+            title = service.name
+            subtitle = f"{search.name} • {service.clinic.name}"
+            image = item.get('service_image') or item.get('clinic', {}).get('logo')
+
+    return {
+        'id': match.id,
+        'saved_search_id': search.id,
+        'target_type': target_type,
+        'target_id': match.target_id,
+        'title': title,
+        'subtitle': subtitle,
+        'image': image,
+        'matched_at': match.matched_at,
+        'deep_link': deep_link,
+        'item': item,
+    }
+
+
+class HomeDigestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        request_cards = build_request_center_cards(request)
+        action_items = [card for card in request_cards if card.get('requires_action')][:5]
+        unread_chat_items = [card for card in request_cards if card.get('kind') == 'chat_unread'][:5]
+
+        saved_matches = (
+            SavedSearchMatch.objects
+            .filter(saved_search__user=request.user, saved_search__is_active=True)
+            .select_related('saved_search')
+            .order_by('-matched_at')[:8]
+        )
+        saved_match_items = [_serialize_saved_search_match(match, request) for match in saved_matches]
+
+        pets_queryset = (
+            Pet.objects
+            .exclude(owner=request.user)
+            .exclude(status__in=['unavailable', 'adopted'])
+            .select_related('breed', 'owner')
+            .order_by('-created_at')[:6]
+        )
+        pet_items = PetListSerializer(pets_queryset, many=True, context={'request': request}).data
+
+        services_queryset = (
+            ClinicService.objects
+            .filter(is_active=True, clinic__is_active=True)
+            .select_related('clinic')
+            .order_by('-is_featured', 'display_order', 'base_price')[:6]
+        )
+        service_items = [serialize_service_card(service, request=request) for service in services_queryset]
+
+        active_stories = (
+            Story.objects
+            .filter(is_hidden=False, deleted_at__isnull=True, expires_at__gt=timezone.now())
+            .select_related('author', 'pet', 'pet__breed')
+            .order_by('-created_at')[:6]
+        )
+        story_items = StorySerializer(active_stories, many=True, context={'request': request}).data
+
+        modules = [
+            _digest_module('pending_actions', 'يتطلب انتباهك', action_items, 'petow://request-center?filter=requires_action'),
+            _digest_module('unread_chats', 'رسائل جديدة', unread_chat_items, 'petow://clinic-chat'),
+            _digest_module('saved_search_matches', 'نتائج مناسبة لبحثك', saved_match_items, 'petow://saved-search'),
+            _digest_module('recommended_pets', 'حيوانات قد تهمك', list(pet_items), 'petow://matches'),
+            _digest_module('nearby_services', 'خدمات قريبة', service_items, 'petow://services'),
+            _digest_module('active_stories', 'قصص نشطة', list(story_items), 'petow://stories'),
+        ]
+
+        return Response({
+            'generated_at': timezone.now(),
+            'request_center_summary': {
+                'total': len(request_cards),
+                'requires_action': len([card for card in request_cards if card.get('requires_action')]),
+                'unread_chats': len(unread_chat_items),
+            },
+            'modules': [module for module in modules if module['items']],
+        })
 
 
 def _parse_bool_param(raw_value, default=True):
@@ -483,8 +894,50 @@ def active_story_queryset():
         Story.objects
         .filter(is_hidden=False, deleted_at__isnull=True, expires_at__gt=timezone.now())
         .select_related('author', 'pet', 'pet__breed')
+        .prefetch_related('reactions__user')
+        .annotate(reaction_count=Count('reactions', distinct=True))
         .order_by('-created_at')
     )
+
+
+def _story_reaction_payload(story, user):
+    summary = {choice[0]: 0 for choice in StoryReaction.REACTION_CHOICES}
+    rows = story.reactions.values('reaction').annotate(total=Count('id'))
+    for row in rows:
+        summary[row['reaction']] = row['total']
+    my_reaction = (
+        StoryReaction.objects
+        .filter(story=story, user=user)
+        .values_list('reaction', flat=True)
+        .first()
+    )
+    return {
+        'success': True,
+        'story_id': story.id,
+        'my_reaction': my_reaction,
+        'reaction_count': sum(summary.values()),
+        'reactions_summary': summary,
+    }
+
+
+def _record_engagement_event(user, event_type, source, target_type, pet=None, story=None, metadata=None):
+    try:
+        EngagementEvent.objects.create(
+            user=user,
+            event_type=event_type,
+            source=source,
+            target_type=target_type,
+            pet=pet,
+            story=story,
+            metadata=metadata or {},
+        )
+    except Exception:
+        logger.exception(
+            "Failed to record engagement event user_id=%s event_type=%s target_type=%s",
+            getattr(user, 'id', None),
+            event_type,
+            target_type,
+        )
 
 
 class StoryListCreateView(generics.ListCreateAPIView):
@@ -503,10 +956,16 @@ class StoryListCreateView(generics.ListCreateAPIView):
     def get_serializer_context(self):
         context = super().get_serializer_context()
         if self.request.user.is_authenticated and self.request.method == 'GET':
+            queryset = self.get_queryset()
             context['viewed_story_ids'] = set(
                 StoryView.objects
-                .filter(user=self.request.user, story__in=self.get_queryset())
+                .filter(user=self.request.user, story__in=queryset)
                 .values_list('story_id', flat=True)
+            )
+            context['my_story_reactions'] = dict(
+                StoryReaction.objects
+                .filter(user=self.request.user, story__in=queryset)
+                .values_list('story_id', 'reaction')
             )
         return context
 
@@ -555,7 +1014,15 @@ def mark_story_viewed(request, story_id):
     except Story.DoesNotExist:
         return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
 
-    StoryView.objects.get_or_create(story=story, user=request.user)
+    _, created = StoryView.objects.get_or_create(story=story, user=request.user)
+    if created:
+        _record_engagement_event(
+            request.user,
+            EngagementEvent.EVENT_STORY_VIEW,
+            EngagementEvent.SOURCE_STORY_VIEWER,
+            EngagementEvent.TARGET_STORY,
+            story=story,
+        )
     return Response({'success': True, 'has_viewed': True})
 
 
@@ -594,6 +1061,81 @@ def report_story(request, story_id):
         },
         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
     )
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def react_to_story(request, story_id):
+    try:
+        story = active_story_queryset().get(pk=story_id)
+    except Story.DoesNotExist:
+        return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+
+    if story.author_id == request.user.id:
+        return Response(
+            {'error': 'لا يمكنك التفاعل مع قصتك'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if request.method == 'DELETE':
+        deleted, _ = StoryReaction.objects.filter(story=story, user=request.user).delete()
+        if deleted:
+            _record_engagement_event(
+                request.user,
+                EngagementEvent.EVENT_STORY_REACTION_REMOVED,
+                EngagementEvent.SOURCE_STORY_VIEWER,
+                EngagementEvent.TARGET_STORY,
+                story=story,
+            )
+        return Response(_story_reaction_payload(story, request.user))
+
+    serializer = StoryReactionCreateSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    reaction, _ = StoryReaction.objects.update_or_create(
+        story=story,
+        user=request.user,
+        defaults={'reaction': serializer.validated_data['reaction']},
+    )
+    _record_engagement_event(
+        request.user,
+        EngagementEvent.EVENT_STORY_REACTION,
+        EngagementEvent.SOURCE_STORY_VIEWER,
+        EngagementEvent.TARGET_STORY,
+        story=story,
+        metadata={'reaction': reaction.reaction},
+    )
+    return Response(_story_reaction_payload(story, request.user))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def story_reactions(request, story_id):
+    try:
+        story = Story.objects.get(pk=story_id, author=request.user, deleted_at__isnull=True)
+    except Story.DoesNotExist:
+        return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
+
+    reactions = story.reactions.select_related('user').order_by('-updated_at')
+    data = [
+        {
+            'id': reaction.id,
+            'reaction': reaction.reaction,
+            'created_at': reaction.created_at,
+            'updated_at': reaction.updated_at,
+            'user': {
+                'id': reaction.user_id,
+                'full_name': reaction.user.get_full_name() or reaction.user.email,
+                'profile_picture': (
+                    request.build_absolute_uri(reaction.user.profile_picture.url)
+                    if getattr(reaction.user, 'profile_picture', None)
+                    else None
+                ),
+                'is_verified': getattr(reaction.user, 'is_verified', False),
+            },
+        }
+        for reaction in reactions
+    ]
+    return Response({'count': len(data), 'results': data})
 
 class PetFilterSet(django_filters.FilterSet):
     """
@@ -662,7 +1204,11 @@ class PetListCreateView(generics.ListCreateAPIView):
     
     def get_queryset(self):
         # Start with all pets
-        queryset = Pet.objects.select_related('breed', 'owner')
+        queryset = (
+            Pet.objects
+            .select_related('breed', 'owner')
+            .annotate(likes_count=Count('liked_by', distinct=True))
+        )
         
         # Handle status filtering
         status_param = self.request.query_params.get('status')
@@ -774,6 +1320,12 @@ class PetListCreateView(generics.ListCreateAPIView):
     def get_serializer_context(self):
         """تمرير context إضافي للسيريلايزر"""
         context = super().get_serializer_context()
+        if self.request.user.is_authenticated:
+            context['liked_pet_ids'] = set(
+                PetLike.objects
+                .filter(user=self.request.user)
+                .values_list('pet_id', flat=True)
+            )
         
         # إضافة إحداثيات المستخدم من query parameters
         user_lat = self.request.query_params.get('user_lat')
@@ -794,7 +1346,12 @@ class PetListCreateView(generics.ListCreateAPIView):
 
 class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
     """تفاصيل الحيوان"""
-    queryset = Pet.objects.select_related('breed', 'owner').prefetch_related('additional_images')
+    queryset = (
+        Pet.objects
+        .select_related('breed', 'owner')
+        .prefetch_related('additional_images')
+        .annotate(likes_count=Count('liked_by', distinct=True))
+    )
     serializer_class = PetSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     
@@ -819,8 +1376,27 @@ class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
             # المالك فقط يمكنه التعديل أو الحذف
-            return Pet.objects.filter(owner=self.request.user).select_related('breed', 'owner')
-        return Pet.objects.select_related('breed', 'owner')
+            return (
+                Pet.objects
+                .filter(owner=self.request.user)
+                .select_related('breed', 'owner')
+                .annotate(likes_count=Count('liked_by', distinct=True))
+            )
+        return (
+            Pet.objects
+            .select_related('breed', 'owner')
+            .annotate(likes_count=Count('liked_by', distinct=True))
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if self.request.user.is_authenticated:
+            context['liked_pet_ids'] = set(
+                PetLike.objects
+                .filter(user=self.request.user)
+                .values_list('pet_id', flat=True)
+            )
+        return context
 
 class MyPetsView(generics.ListAPIView):
     """حيواناتي الأليفة"""
@@ -828,7 +1404,21 @@ class MyPetsView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return Pet.objects.filter(owner=self.request.user).select_related('breed')
+        return (
+            Pet.objects
+            .filter(owner=self.request.user)
+            .select_related('breed')
+            .annotate(likes_count=Count('liked_by', distinct=True))
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['liked_pet_ids'] = set(
+            PetLike.objects
+            .filter(user=self.request.user)
+            .values_list('pet_id', flat=True)
+        )
+        return context
 
 class FavoriteListCreateView(generics.ListCreateAPIView):
     """قائمة المفضلات وإضافة للمفضلات"""
@@ -864,9 +1454,89 @@ def toggle_favorite(request, pet_id):
     
     if not created:
         favorite.delete()
-        return Response({'favorited': False})
+        _record_engagement_event(
+            request.user,
+            EngagementEvent.EVENT_UNFAVORITE,
+            EngagementEvent.SOURCE_OTHER,
+            EngagementEvent.TARGET_PET,
+            pet=pet,
+        )
+        return Response({'favorited': False, 'is_favorite': False})
     
-    return Response({'favorited': True})
+    _record_engagement_event(
+        request.user,
+        EngagementEvent.EVENT_FAVORITE,
+        EngagementEvent.SOURCE_OTHER,
+        EngagementEvent.TARGET_PET,
+        pet=pet,
+    )
+    return Response({'favorited': True, 'is_favorite': True})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def toggle_pet_like(request, pet_id):
+    """إعجاب خفيف بالحيوان، منفصل عن المفضلة."""
+    try:
+        pet = Pet.objects.get(pk=pet_id)
+    except Pet.DoesNotExist:
+        return Response(
+            {'error': 'الحيوان غير موجود'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    source = request.data.get('source') if hasattr(request, 'data') else None
+    valid_sources = {choice[0] for choice in EngagementEvent.SOURCE_CHOICES}
+    if source not in valid_sources:
+        source = EngagementEvent.SOURCE_PET_CARD
+
+    like, created = PetLike.objects.get_or_create(user=request.user, pet=pet)
+    if created:
+        _record_engagement_event(
+            request.user,
+            EngagementEvent.EVENT_PET_LIKE,
+            source,
+            EngagementEvent.TARGET_PET,
+            pet=pet,
+        )
+        is_liked = True
+    else:
+        like.delete()
+        _record_engagement_event(
+            request.user,
+            EngagementEvent.EVENT_PET_UNLIKE,
+            source,
+            EngagementEvent.TARGET_PET,
+            pet=pet,
+        )
+        is_liked = False
+
+    return Response({
+        'success': True,
+        'pet_id': pet.id,
+        'is_liked': is_liked,
+        'likes_count': PetLike.objects.filter(pet=pet).count(),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_engagement_event(request):
+    serializer = EngagementEventCreateSerializer(
+        data=request.data,
+        context={'request': request},
+    )
+    serializer.is_valid(raise_exception=True)
+    event = serializer.save()
+    return Response(
+        {
+            'success': True,
+            'id': event.id,
+            'event_type': event.event_type,
+            'target_type': event.target_type,
+        },
+        status=status.HTTP_201_CREATED,
+    )
 
 @api_view(['GET'])
 @permission_classes([])

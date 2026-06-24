@@ -14,9 +14,18 @@ urlpatterns = [
     path('stories/my/', views.MyStoriesView.as_view(), name='my-stories'),
     path('stories/<int:pk>/', views.StoryDeleteView.as_view(), name='story-delete'),
     path('stories/<int:story_id>/view/', views.mark_story_viewed, name='story-view'),
+    path('stories/<int:story_id>/react/', views.react_to_story, name='story-react'),
+    path('stories/<int:story_id>/reactions/', views.story_reactions, name='story-reactions'),
     path('stories/<int:story_id>/report/', views.report_story, name='story-report'),
+    path('request-center/', views.RequestCenterView.as_view(), name='request-center'),
+    path('saved-searches/', views.SavedSearchListCreateView.as_view(), name='saved-search-list-create'),
+    path('saved-searches/preview/', views.UnsavedSearchPreviewView.as_view(), name='saved-search-preview-unsaved'),
+    path('saved-searches/<int:pk>/', views.SavedSearchDetailView.as_view(), name='saved-search-detail'),
+    path('saved-searches/<int:pk>/preview/', views.SavedSearchPreviewView.as_view(), name='saved-search-preview'),
+    path('home/digest/', views.HomeDigestView.as_view(), name='home-digest'),
     path('<int:pk>/', views.PetDetailView.as_view(), name='pet-detail'),
     path('my/', views.MyPetsView.as_view(), name='my-pets'),
+    path('engagement-events/', views.create_engagement_event, name='engagement-events'),
     
     # العيادات البيطرية
     path('veterinary-clinics/', views.VeterinaryClinicListView.as_view(), name='veterinary-clinic-list'),
@@ -42,6 +51,7 @@ urlpatterns = [
     path('favorites/', views.FavoriteListCreateView.as_view(), name='favorite-list-create'),
     path('favorites/<int:pk>/', views.FavoriteDetailView.as_view(), name='favorite-detail'),
     path('<int:pet_id>/toggle-favorite/', views.toggle_favorite, name='toggle-favorite'),
+    path('<int:pet_id>/toggle-like/', views.toggle_pet_like, name='toggle-pet-like'),
     
     # إحصائيات
     path('stats/', views.pet_stats, name='pet-stats'),
