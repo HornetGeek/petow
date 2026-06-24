@@ -1328,6 +1328,101 @@ class RequestCenterSavedSearchDigestTests(TestCase):
         self.assertIn('chat_unread', kinds)
         self.assertTrue(any(item['requires_action'] for item in response.data['results']))
 
+    def test_pending_adoption_chat_create_is_idempotent_and_context_has_viewer_role(self):
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            '/api/pets/chat/create/',
+            {'adoption_request_id': self.adoption_request.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['context']['viewer_role'], 'owner')
+        self.assertEqual(response.data['context']['adoption_request']['status'], 'pending')
+
+        second_response = self.client.post(
+            '/api/pets/chat/create/',
+            {'adoption_request_id': self.adoption_request.id},
+            format='json',
+        )
+
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(
+            second_response.data['chat_room']['id'],
+            response.data['chat_room']['id'],
+        )
+
+        self.client.force_authenticate(self.requester)
+        context_response = self.client.get(
+            f"/api/pets/chat/rooms/{response.data['chat_room']['id']}/context/"
+        )
+
+        self.assertEqual(context_response.status_code, 200)
+        self.assertEqual(context_response.data['chat_context']['viewer_role'], 'requester')
+
+    def test_pending_breeding_chat_create_is_allowed_and_unrelated_user_is_rejected(self):
+        target_pet = self._pet(self.owner, 'Second Target Cat', 'F', 'available')
+        requester_pet = self._pet(self.requester, 'Second Requester Cat', 'M', 'available')
+        breeding_request = BreedingRequest.objects.create(
+            target_pet=target_pet,
+            requester_pet=requester_pet,
+            requester=self.requester,
+            receiver=self.owner,
+            message='Another match?',
+            contact_phone=self.requester.phone,
+            status='pending',
+        )
+
+        self.client.force_authenticate(self.requester)
+        response = self.client.post(
+            '/api/pets/chat/create/',
+            {'breeding_request_id': breeding_request.id},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['context']['viewer_role'], 'requester')
+        self.assertEqual(response.data['context']['breeding_request']['status'], 'pending')
+
+        unrelated = User.objects.create_user(
+            username='unrelated-chat-user',
+            email='unrelated-chat@example.com',
+            password='testpass123',
+            phone='+201000000099',
+        )
+        self.client.force_authenticate(unrelated)
+        rejected_response = self.client.post(
+            '/api/pets/chat/create/',
+            {'breeding_request_id': breeding_request.id},
+            format='json',
+        )
+
+        self.assertEqual(rejected_response.status_code, 400)
+
+    def test_chat_room_status_is_generic_for_adoption_and_breeding(self):
+        self.client.force_authenticate(self.owner)
+        adoption_create = self.client.post(
+            '/api/pets/chat/create/',
+            {'adoption_request_id': self.adoption_request.id},
+            format='json',
+        )
+        adoption_status = self.client.get(
+            f"/api/pets/chat/rooms/{adoption_create.data['chat_room']['id']}/status/"
+        )
+        breeding_status = self.client.get(f'/api/pets/chat/rooms/{self.chat_room.id}/status/')
+
+        self.assertEqual(adoption_status.status_code, 200)
+        self.assertEqual(adoption_status.data['request_kind'], 'adoption')
+        self.assertEqual(adoption_status.data['request_status'], 'pending')
+        self.assertEqual(adoption_status.data['chat_status'], 'pending')
+        self.assertEqual(adoption_status.data['viewer_role'], 'owner')
+
+        self.assertEqual(breeding_status.status_code, 200)
+        self.assertEqual(breeding_status.data['request_kind'], 'breeding')
+        self.assertEqual(breeding_status.data['request_status'], 'pending')
+        self.assertEqual(breeding_status.data['chat_status'], 'pending')
+        self.assertEqual(breeding_status.data['viewer_role'], 'owner')
+
     def test_saved_search_crud_and_preview(self):
         self.client.force_authenticate(self.owner)
         payload = {

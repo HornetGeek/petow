@@ -927,14 +927,18 @@ class PublicMarketplaceServicesView(APIView):
     def get(self, request):
         try:
             user_lat, user_lng = self._parse_coordinates(request)
-            categories = self._resolve_categories(request)
+            service_id = request.query_params.get('service_id')
+            clinic_id = request.query_params.get('clinic_id')
+            service_id_value = int(service_id) if service_id else None
+            clinic_id_value = int(clinic_id) if clinic_id else None
+            categories = None if service_id_value else self._resolve_categories(request)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             queryset = (
                 ClinicService.objects
-                .filter(is_active=True, category__in=categories, clinic__is_active=True)
+                .filter(is_active=True, clinic__is_active=True)
                 .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
                 .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
                 .annotate(
@@ -949,6 +953,12 @@ class PublicMarketplaceServicesView(APIView):
                 )
                 .select_related('clinic')
             )
+            if categories is not None:
+                queryset = queryset.filter(category__in=categories)
+            if service_id_value:
+                queryset = queryset.filter(id=service_id_value)
+            if clinic_id_value:
+                queryset = queryset.filter(clinic_id=clinic_id_value)
 
             search_term = (request.query_params.get('search') or '').strip()
             if search_term:

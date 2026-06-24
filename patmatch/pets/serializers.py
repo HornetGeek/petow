@@ -1245,6 +1245,8 @@ class ChatContextSerializer(serializers.ModelSerializer):
         if not (user and getattr(user, 'is_authenticated', False)):
             return ctx
 
+        ctx['viewer_role'] = self.get_viewer_role(obj, user)
+
         # For breeding chats, override the pet shown in the context to be the other user's pet.
         if obj.breeding_request:
             pet = _select_chat_pet_for_viewer(obj, request=request)
@@ -1261,10 +1263,44 @@ class ChatContextSerializer(serializers.ModelSerializer):
 
         return ctx
 
+    def get_viewer_role(self, obj, user):
+        """Role of the current API user in this chat."""
+        if not user:
+            return None
+        user_id = getattr(user, 'id', None)
+        try:
+            if obj.breeding_request:
+                if obj.breeding_request.requester_id == user_id:
+                    return 'requester'
+                target_pet = getattr(obj.breeding_request, 'target_pet', None)
+                if getattr(obj.breeding_request, 'receiver_id', None) == user_id:
+                    return 'owner'
+                if target_pet and getattr(target_pet, 'owner_id', None) == user_id:
+                    return 'owner'
+            if obj.adoption_request:
+                if obj.adoption_request.adopter_id == user_id:
+                    return 'requester'
+                pet = getattr(obj.adoption_request, 'pet', None)
+                if pet and getattr(pet, 'owner_id', None) == user_id:
+                    return 'owner'
+            if obj.clinic_patient:
+                if getattr(obj, 'clinic_staff_id', None) == user_id:
+                    return 'clinic_staff'
+                linked_user = getattr(obj.clinic_patient, 'linked_user_id', None)
+                if linked_user == user_id:
+                    return 'patient'
+        except Exception:
+            return None
+        return None
+
 
 class ChatStatusSerializer(serializers.ModelSerializer):
     """سيريلايزر لحالة المحادثة"""
     participants_count = serializers.SerializerMethodField()
+    request_kind = serializers.SerializerMethodField()
+    request_status = serializers.SerializerMethodField()
+    chat_status = serializers.SerializerMethodField()
+    viewer_role = serializers.SerializerMethodField()
     breeding_request_status = serializers.SerializerMethodField()
     pet_name = serializers.SerializerMethodField()
     other_participant_name = serializers.SerializerMethodField()
@@ -1273,7 +1309,8 @@ class ChatStatusSerializer(serializers.ModelSerializer):
         model = ChatRoom
         fields = [
             'id', 'firebase_chat_id', 'is_active', 'created_at', 'updated_at',
-            'participants_count', 'breeding_request_status', 'pet_name', 'other_participant_name'
+            'participants_count', 'request_kind', 'request_status', 'chat_status',
+            'viewer_role', 'breeding_request_status', 'pet_name', 'other_participant_name'
         ]
     
     def get_participants_count(self, obj):
@@ -1284,6 +1321,18 @@ class ChatStatusSerializer(serializers.ModelSerializer):
             return 0
     
     def get_breeding_request_status(self, obj):
+        return self.get_request_status(obj)
+
+    def get_request_kind(self, obj):
+        if obj.breeding_request:
+            return 'breeding'
+        if obj.adoption_request:
+            return 'adoption'
+        if obj.clinic_patient:
+            return 'clinic'
+        return None
+
+    def get_request_status(self, obj):
         """حالة المحادثة"""
         try:
             if obj.breeding_request:
@@ -1291,10 +1340,33 @@ class ChatStatusSerializer(serializers.ModelSerializer):
             if obj.adoption_request:
                 return obj.adoption_request.status
             if obj.clinic_patient:
-                return "clinic_chat"
+                return 'active' if obj.is_active else 'archived'
         except Exception:
             pass
-        return "غير محدد"
+        return None
+
+    def get_viewer_role(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        return ChatContextSerializer().get_viewer_role(obj, user)
+
+    def get_chat_status(self, obj):
+        request_kind = self.get_request_kind(obj)
+        request_status = self.get_request_status(obj)
+        viewer_role = self.get_viewer_role(obj)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        if not obj.is_active:
+            return 'rejected'
+        if request_kind == 'clinic':
+            return 'approved'
+        if request_status == 'pending':
+            return 'pending'
+        if request_status == 'rejected':
+            return 'rejected'
+        if request_kind == 'adoption' and viewer_role == 'requester' and not getattr(user, 'is_verified', False):
+            return 'approved_pending_kyc'
+        return 'approved'
     
     def get_pet_name(self, obj):
         """اسم الحيوان أو المريض"""
@@ -1352,11 +1424,13 @@ class ChatCreationSerializer(serializers.Serializer):
             except BreedingRequest.DoesNotExist:
                 raise serializers.ValidationError({'breeding_request_id': "طلب التزاوج غير موجود"})
 
-            if breeding_request.status != 'approved':
-                raise serializers.ValidationError({'breeding_request_id': "لا يمكن إنشاء محادثة إلا للطلبات المقبولة"})
+            if breeding_request.status not in ('pending', 'approved'):
+                raise serializers.ValidationError({'breeding_request_id': "لا يمكن إنشاء محادثة إلا للطلبات المعلقة أو المقبولة"})
 
             if hasattr(breeding_request, 'chat_room'):
-                raise serializers.ValidationError({'breeding_request_id': "توجد محادثة بالفعل لهذا الطلب"})
+                attrs['existing_chat_room'] = breeding_request.chat_room
+                attrs['breeding_request'] = breeding_request
+                return attrs
 
             if request and request.user not in [breeding_request.requester, breeding_request.target_pet.owner]:
                 raise serializers.ValidationError({'breeding_request_id': "غير مخول لإنشاء محادثة لهذا الطلب"})
@@ -1369,11 +1443,13 @@ class ChatCreationSerializer(serializers.Serializer):
             except AdoptionRequest.DoesNotExist:
                 raise serializers.ValidationError({'adoption_request_id': "طلب التبني غير موجود"})
 
-            if adoption_request.status not in ('approved', 'completed'):
-                raise serializers.ValidationError({'adoption_request_id': "لا يمكن إنشاء محادثة إلا للطلبات المقبولة"})
+            if adoption_request.status not in ('pending', 'approved', 'completed'):
+                raise serializers.ValidationError({'adoption_request_id': "لا يمكن إنشاء محادثة إلا للطلبات المعلقة أو المقبولة"})
 
             if hasattr(adoption_request, 'chat_room'):
-                raise serializers.ValidationError({'adoption_request_id': "توجد محادثة بالفعل لهذا الطلب"})
+                attrs['existing_chat_room'] = adoption_request.chat_room
+                attrs['adoption_request'] = adoption_request
+                return attrs
 
             if request and request.user not in [adoption_request.adopter, adoption_request.pet.owner]:
                 raise serializers.ValidationError({'adoption_request_id': "غير مخول لإنشاء محادثة لهذا الطلب"})

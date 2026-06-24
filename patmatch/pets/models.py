@@ -674,7 +674,7 @@ class BreedingRequest(models.Model):
 
     def create_chat_room(self):
         """إنشاء غرفة محادثة عند قبول الطلب"""
-        if self.status == 'accepted' and not hasattr(self, 'chat_room'):
+        if self.status == 'approved' and not hasattr(self, 'chat_room'):
             chat_room = ChatRoom.objects.create(breeding_request=self)
             return chat_room
         return getattr(self, 'chat_room', None)
@@ -1237,6 +1237,9 @@ class ChatRoom(models.Model):
                     'breeding_request': {
                         'id': breeding_request.id,
                         'status': breeding_request.status,
+                        'requester_id': breeding_request.requester_id,
+                        'receiver_id': breeding_request.receiver_id,
+                        'owner_id': pet.owner_id,
                         'created_at': breeding_request.created_at.isoformat(),
                         'message': breeding_request.message,
                         # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
@@ -1281,6 +1284,8 @@ class ChatRoom(models.Model):
                     'adoption_request': {
                         'id': adoption_request.id,
                         'status': adoption_request.status,
+                        'adopter_id': adoption_request.adopter_id,
+                        'owner_id': pet.owner_id,
                         'created_at': adoption_request.created_at.isoformat(),
                         'adopter_name': adoption_request.adopter_name,
                         # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓

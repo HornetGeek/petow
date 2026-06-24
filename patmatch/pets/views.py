@@ -339,6 +339,7 @@ def _build_storefront_booking_card(booking, request):
             'public_id': str(booking.public_id),
             'clinic_id': booking.clinic_id,
             'service_id': booking.service_id,
+            'service_category': booking.service.category if booking.service else None,
             'request_type': booking.request_type,
         },
     }
@@ -2150,6 +2151,15 @@ def create_chat_room(request):
         
         breeding_request = creation_serializer.validated_data.get('breeding_request')
         adoption_request = creation_serializer.validated_data.get('adoption_request')
+        existing_chat_room = creation_serializer.validated_data.get('existing_chat_room')
+
+        if existing_chat_room:
+            context_serializer = ChatContextSerializer(existing_chat_room, context={'request': request})
+            return Response({
+                'chat_room': ChatRoomSerializer(existing_chat_room, context={'request': request}).data,
+                'context': context_serializer.data['chat_context'],
+                'message': 'المحادثة موجودة بالفعل'
+            }, status=status.HTTP_200_OK)
         
         if breeding_request:
             chat_room = ChatRoom.objects.create(breeding_request=breeding_request)
@@ -2217,7 +2227,10 @@ def chat_room_status(request, chat_id):
     try:
         chat_room = ChatRoom.objects.select_related(
             'breeding_request__requester',
-            'breeding_request__target_pet__owner'
+            'breeding_request__target_pet__owner',
+            'adoption_request__adopter',
+            'adoption_request__pet__owner',
+            'clinic_patient__linked_user',
         ).get(id=chat_id)
         
         # التحقق من أن المستخدم مشارك في المحادثة
@@ -2228,13 +2241,56 @@ def chat_room_status(request, chat_id):
             )
         
         participants = chat_room.get_participants()
+        request_kind = None
+        request_status = None
+        viewer_role = None
+
+        if chat_room.breeding_request:
+            request_kind = 'breeding'
+            request_status = chat_room.breeding_request.status
+            if chat_room.breeding_request.requester_id == request.user.id:
+                viewer_role = 'requester'
+            else:
+                viewer_role = 'owner'
+        elif chat_room.adoption_request:
+            request_kind = 'adoption'
+            request_status = chat_room.adoption_request.status
+            if chat_room.adoption_request.adopter_id == request.user.id:
+                viewer_role = 'requester'
+            else:
+                viewer_role = 'owner'
+        elif chat_room.clinic_patient:
+            request_kind = 'clinic'
+            request_status = 'active' if chat_room.is_active else 'archived'
+            if getattr(chat_room, 'clinic_staff_id', None) == request.user.id:
+                viewer_role = 'clinic_staff'
+            else:
+                viewer_role = 'patient'
+
+        if not chat_room.is_active:
+            chat_status = 'rejected'
+        elif request_kind == 'clinic':
+            chat_status = 'approved'
+        elif request_status == 'pending':
+            chat_status = 'pending'
+        elif request_status == 'rejected':
+            chat_status = 'rejected'
+        elif request_kind == 'adoption' and viewer_role == 'requester' and not getattr(request.user, 'is_verified', False):
+            chat_status = 'approved_pending_kyc'
+        else:
+            chat_status = 'approved'
+
         return Response({
             'id': chat_room.id,
             'firebase_chat_id': chat_room.firebase_chat_id,
             'is_active': chat_room.is_active,
             'created_at': chat_room.created_at,
             'updated_at': chat_room.updated_at,
-            'breeding_request_status': chat_room.breeding_request.status,
+            'request_kind': request_kind,
+            'request_status': request_status,
+            'chat_status': chat_status,
+            'viewer_role': viewer_role,
+            'breeding_request_status': request_status,
             'participants_count': len(participants)
         })
         
