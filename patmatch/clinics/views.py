@@ -18,6 +18,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.cache import cache
 from rest_framework import generics, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -36,6 +37,7 @@ from .models import (
     StorefrontOrder,
     StorefrontOrderItem,
     StorefrontBooking,
+    StorefrontBookingProposal,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -48,7 +50,7 @@ from .models import (
 )
 from pets.models import Notification, ChatRoom, Pet, NotificationOutbox
 from pets.serializers import PublicPetSerializer
-from pets.notifications import create_notification
+from pets.notifications import create_notification, create_notification_once
 from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
 from .permissions import IsClinicStaff, IsPlatformAdmin
@@ -66,6 +68,9 @@ from .serializers import (
     StorefrontBookingSerializer,
     StorefrontBookingUpdateSerializer,
     StorefrontBookingCreateSerializer,
+    StorefrontBookingProposalCreateSerializer,
+    StorefrontBookingAcceptSerializer,
+    StorefrontBookingRejectSerializer,
     ServicePricingTierSerializer,
     ServicePackageSerializer,
     ClinicPromotionSerializer,
@@ -93,6 +98,80 @@ SERVICE_CATEGORY_APPOINTMENT_TYPE = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+PETMATCH_APP_TYPE = 'petmatch_mobile'
+CLINIC_APP_TYPE = 'clinic_app'
+
+
+def _booking_notification_payload(booking, notification_type, app_type, extra=None):
+    payload = {
+        'type': notification_type,
+        'app_type': app_type,
+        'kind': 'storefront_booking',
+        'booking_public_id': str(booking.public_id),
+        'clinic_id': str(booking.clinic_id),
+        'service_id': str(booking.service_id),
+        'status': booking.status,
+    }
+    if booking.service_id and getattr(booking, 'service', None):
+        payload['service_name'] = booking.service.name
+    if extra:
+        payload.update({key: value for key, value in extra.items() if value is not None})
+    return payload
+
+
+def _enqueue_booking_push(user, booking, notification_type, title, message, app_type, event_suffix, extra=None):
+    if not user:
+        return None
+
+    payload = _booking_notification_payload(booking, notification_type, app_type, extra)
+    event_key = f"storefront_booking:{booking.public_id}:{event_suffix}:{user.id}"
+    notification, _ = create_notification_once(
+        user=user,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        extra_data=payload,
+        event_key=event_key,
+    )
+    push_payload = attach_push_targets(payload, notification_type)
+    enqueue_notification_event(
+        event_type=NotificationOutbox.EVENT_CLINIC_BOOKING_PUSH,
+        object_id=notification.id,
+        dedupe_key=f"clinic_booking_push:{event_key}",
+        payload={
+            'title': title,
+            'message': message,
+            'push_type': notification_type,
+            'push_payload': push_payload,
+        },
+    )
+    return notification
+
+
+def _notify_clinic_staff_booking_created(booking):
+    staff_users = (
+        User.objects
+        .filter(
+            Q(id=booking.clinic.owner_id) |
+            Q(clinic_memberships__clinic=booking.clinic)
+        )
+        .filter(is_active=True)
+        .distinct()
+    )
+    title = 'طلب حجز جديد'
+    message = f"وصل طلب {booking.service.name} من {booking.customer_name}."
+    for user in staff_users:
+        _enqueue_booking_push(
+            user=user,
+            booking=booking,
+            notification_type='clinic_booking_new',
+            title=title,
+            message=message,
+            app_type=CLINIC_APP_TYPE,
+            event_suffix='new',
+        )
 
 
 class ClinicListPagination(PageNumberPagination):
@@ -1121,6 +1200,10 @@ class PublicStorefrontBookingView(APIView):
             customer_phone=data['customer_phone'],
             customer_email=data.get('customer_email'),
             pet_name=data.get('pet_name'),
+            pet_type=data.get('pet_type'),
+            pet_breed=data.get('pet_breed'),
+            pet_age=data.get('pet_age'),
+            pet_photo=data.get('pet_photo'),
             preferred_date=data.get('preferred_date'),
             preferred_time=data.get('preferred_time'),
             notes=data.get('notes'),
@@ -1204,6 +1287,8 @@ class PublicStorefrontBookingView(APIView):
 
                 booking.status = 'confirmed'
                 booking.save(update_fields=['status'])
+
+        _notify_clinic_staff_booking_created(booking)
 
         return Response(StorefrontBookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -1502,6 +1587,7 @@ class ClinicProductViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing clinic products"""
     serializer_class = ClinicProductSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -1534,12 +1620,18 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing storefront bookings in the clinic dashboard"""
     serializer_class = StorefrontBookingSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
-    http_method_names = ['get', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
     lookup_field = 'public_id'
 
     def get_queryset(self):
         clinic = self.get_clinic()
-        queryset = StorefrontBooking.objects.filter(clinic=clinic).select_related('service').order_by('-created_at')
+        queryset = (
+            StorefrontBooking.objects
+            .filter(clinic=clinic)
+            .select_related('service', 'customer_user', 'confirmed_appointment')
+            .prefetch_related('proposals')
+            .order_by('-created_at')
+        )
 
         status_param = self.request.query_params.get('status')
         if status_param:
@@ -1559,6 +1651,346 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         if self.action in ['update', 'partial_update']:
             return StorefrontBookingUpdateSerializer
         return StorefrontBookingSerializer
+
+    def _notify_customer(self, booking, title, message, event_suffix, notification_type, extra=None):
+        if not booking.customer_user_id:
+            return
+        _enqueue_booking_push(
+            user=booking.customer_user,
+            booking=booking,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            app_type=PETMATCH_APP_TYPE,
+            event_suffix=event_suffix,
+            extra=extra,
+        )
+
+    def _find_linked_pet_owner(self, booking):
+        if not booking.pet_name or not (booking.customer_phone or booking.customer_email):
+            return None, None
+
+        contact_query = Q()
+        if booking.customer_phone:
+            contact_query |= Q(owner__phone__iexact=booking.customer_phone)
+        if booking.customer_email:
+            contact_query |= Q(owner__email__iexact=booking.customer_email)
+
+        patient = (
+            ClinicPatientRecord.objects
+            .filter(clinic=booking.clinic)
+            .filter(contact_query)
+            .filter(name__iexact=booking.pet_name)
+            .select_related('linked_user', 'linked_pet', 'owner')
+            .filter(linked_user__isnull=False, linked_pet__isnull=False)
+            .first()
+        )
+        if patient:
+            return patient.linked_pet, patient.linked_user
+
+        owner_queryset = User.objects.filter(user_type='pet_owner')
+        appointment_owner = None
+        if booking.customer_phone:
+            appointment_owner = owner_queryset.filter(phone=booking.customer_phone).first()
+        if not appointment_owner and booking.customer_email:
+            appointment_owner = owner_queryset.filter(email__iexact=booking.customer_email).first()
+        if not appointment_owner:
+            return None, None
+        return Pet.objects.filter(owner=appointment_owner, name__iexact=booking.pet_name).first(), appointment_owner
+
+    def _get_or_create_booking_patient(self, booking):
+        owner_queryset = ClinicClientRecord.objects.filter(clinic=booking.clinic)
+        owner = None
+        if booking.customer_email:
+            owner = owner_queryset.filter(email__iexact=booking.customer_email).first()
+        if not owner and booking.customer_phone:
+            owner = owner_queryset.filter(phone=booking.customer_phone).first()
+        if not owner:
+            owner = ClinicClientRecord.objects.create(
+                clinic=booking.clinic,
+                full_name=booking.customer_name or 'عميل غير محدد',
+                email=booking.customer_email,
+                phone=booking.customer_phone,
+            )
+
+        patient, created = ClinicPatientRecord.objects.get_or_create(
+            clinic=booking.clinic,
+            owner=owner,
+            name=booking.pet_name or f"حيوان {booking.customer_name or booking.customer_phone}",
+            defaults={
+                'species': booking.pet_type or 'غير محدد',
+                'breed': booking.pet_breed,
+                'age_text': booking.pet_age or '',
+                'linked_user': booking.customer_user,
+                'notes': booking.notes or '',
+            },
+        )
+        if not created:
+            updates = {}
+            if booking.pet_type and not patient.species:
+                updates['species'] = booking.pet_type
+            if booking.pet_breed and not patient.breed:
+                updates['breed'] = booking.pet_breed
+            if booking.pet_age and not patient.age_text:
+                updates['age_text'] = booking.pet_age
+            if booking.customer_user_id and not patient.linked_user_id:
+                updates['linked_user'] = booking.customer_user
+            if updates:
+                for field, value in updates.items():
+                    setattr(patient, field, value)
+                patient.save(update_fields=list(updates.keys()) + ['updated_at'])
+        return patient
+
+    def _create_or_update_appointment(self, booking, scheduled_date, scheduled_time, duration_minutes=None, note=None):
+        service = booking.service
+        appointment_type = SERVICE_CATEGORY_APPOINTMENT_TYPE.get(service.category, 'other')
+        duration = duration_minutes or service.duration_minutes or 30
+        notes = booking.notes or ''
+        if note:
+            notes = f"{notes}\n{note}".strip()
+
+        appointment = booking.confirmed_appointment
+        if appointment:
+            appointment.appointment_type = appointment_type
+            appointment.scheduled_date = scheduled_date
+            appointment.scheduled_time = scheduled_time
+            appointment.duration_minutes = duration
+            appointment.reason = f"حجز متجر: {service.name}"
+            appointment.notes = notes
+            appointment.status = 'scheduled'
+            appointment.service_fee = booking.quoted_price or service.base_price
+            appointment.save(update_fields=[
+                'appointment_type', 'scheduled_date', 'scheduled_time', 'duration_minutes',
+                'reason', 'notes', 'status', 'service_fee', 'updated_at'
+            ])
+            return appointment
+
+        appointment_pet, appointment_owner = self._find_linked_pet_owner(booking)
+        lookup = {
+            'clinic': booking.clinic,
+            'scheduled_date': scheduled_date,
+            'scheduled_time': scheduled_time,
+        }
+        defaults = {
+            'appointment_type': appointment_type,
+            'duration_minutes': duration,
+            'reason': f"حجز متجر: {service.name}",
+            'notes': notes,
+            'status': 'scheduled',
+            'payment_status': 'unpaid',
+            'service_fee': booking.quoted_price or service.base_price,
+        }
+        if appointment_pet and appointment_owner:
+            lookup.update({'pet': appointment_pet, 'owner': appointment_owner})
+            defaults.update({'pet': appointment_pet, 'owner': appointment_owner})
+        else:
+            patient = self._get_or_create_booking_patient(booking)
+            lookup['clinic_patient'] = patient
+            defaults['clinic_patient'] = patient
+
+        appointment, _ = VeterinaryAppointment.objects.get_or_create(**lookup, defaults=defaults)
+        booking.confirmed_appointment = appointment
+        return appointment
+
+    def _serialize_booking(self, booking):
+        serializer = StorefrontBookingSerializer(booking, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='accept')
+    def accept(self, request, public_id=None):
+        serializer = StorefrontBookingAcceptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            scheduled_date = data.get('scheduled_date') or booking.preferred_date
+            scheduled_time = data.get('scheduled_time') or booking.preferred_time
+            if not scheduled_date or not scheduled_time:
+                raise ValidationError({'scheduled_date': 'التاريخ والوقت مطلوبان لتأكيد الطلب.'})
+            if booking.status == 'cancelled':
+                raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
+
+            appointment = self._create_or_update_appointment(
+                booking,
+                scheduled_date=scheduled_date,
+                scheduled_time=scheduled_time,
+                duration_minutes=data.get('duration_minutes'),
+                note=data.get('note'),
+            )
+            booking.confirmed_appointment = appointment
+            booking.status = 'confirmed'
+            booking.confirmed_at = timezone.now()
+            booking.cancelled_at = None
+            booking.cancelled_reason = None
+            booking.save(update_fields=[
+                'confirmed_appointment', 'status', 'confirmed_at', 'cancelled_at', 'cancelled_reason'
+            ])
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+
+        self._notify_customer(
+            booking,
+            'تم تأكيد موعدك',
+            f"تم تأكيد موعد {booking.service.name}.",
+            'accepted',
+            'clinic_booking_confirmed',
+            extra={
+                'confirmed_appointment_id': booking.confirmed_appointment_id,
+                'scheduled_date': str(scheduled_date),
+                'scheduled_time': str(scheduled_time),
+            },
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, public_id=None):
+        serializer = StorefrontBookingRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get('reason') or ''
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking.status = 'cancelled'
+            booking.cancelled_reason = reason
+            booking.cancelled_at = timezone.now()
+            booking.save(update_fields=['status', 'cancelled_reason', 'cancelled_at'])
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+        self._notify_customer(
+            booking,
+            'تعذر تأكيد الموعد',
+            reason or 'تم إلغاء طلب الموعد من العيادة.',
+            'rejected',
+            'clinic_booking_rejected',
+            extra={'reason': reason},
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='propose-time')
+    def propose_time(self, request, public_id=None):
+        serializer = StorefrontBookingProposalCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if booking.status in {'cancelled', 'completed'}:
+                raise ValidationError({'status': 'لا يمكن اقتراح موعد لهذا الطلب.'})
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+            proposal = StorefrontBookingProposal.objects.create(
+                booking=booking,
+                proposed_date=data['proposed_date'],
+                proposed_time=data['proposed_time'],
+                duration_minutes=data.get('duration_minutes') or booking.service.duration_minutes or 30,
+                note=data.get('note'),
+                proposed_by=request.user,
+            )
+            booking.status = 'counter_proposed'
+            booking.save(update_fields=['status'])
+        self._notify_customer(
+            booking,
+            'اقتراح موعد جديد',
+            f"اقترحت العيادة موعدًا بديلًا لخدمة {booking.service.name}.",
+            f'proposal:{proposal.id}',
+            'clinic_booking_counter_proposed',
+            extra={
+                'proposal_id': proposal.id,
+                'proposed_date': str(proposal.proposed_date),
+                'proposed_time': str(proposal.proposed_time),
+            },
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='complete')
+    def complete(self, request, public_id=None):
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if booking.status != 'confirmed':
+                raise ValidationError({'status': 'يجب تأكيد الطلب قبل إكماله.'})
+            booking.status = 'completed'
+            booking.completed_at = timezone.now()
+            booking.save(update_fields=['status', 'completed_at'])
+            if booking.confirmed_appointment_id:
+                booking.confirmed_appointment.status = 'completed'
+                booking.confirmed_appointment.save(update_fields=['status', 'updated_at'])
+        self._notify_customer(
+            booking,
+            'اكتمل موعدك',
+            f"تم إكمال موعد {booking.service.name}.",
+            'completed',
+            'clinic_booking_completed',
+            extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
+        )
+        return self._serialize_booking(booking)
+
+
+class PublicStorefrontBookingDetailView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, public_id):
+        booking = get_object_or_404(
+            StorefrontBooking.objects.select_related('service', 'clinic', 'confirmed_appointment').prefetch_related('proposals'),
+            public_id=public_id,
+        )
+        return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
+
+
+class PublicStorefrontBookingProposalRespondView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request, public_id, proposal_id, action_name):
+        if action_name not in {'accept', 'decline'}:
+            raise Http404()
+        viewset = ClinicStorefrontBookingViewSet()
+
+        with transaction.atomic():
+            booking = get_object_or_404(
+                StorefrontBooking.objects.select_related('service', 'clinic', 'customer_user', 'confirmed_appointment').prefetch_related('proposals').select_for_update(),
+                public_id=public_id,
+            )
+            proposal = get_object_or_404(
+                StorefrontBookingProposal.objects.select_for_update(),
+                id=proposal_id,
+                booking=booking,
+                status=StorefrontBookingProposal.STATUS_PENDING,
+            )
+            if action_name == 'decline':
+                proposal.status = StorefrontBookingProposal.STATUS_DECLINED
+                proposal.responded_at = timezone.now()
+                proposal.save(update_fields=['status', 'responded_at'])
+                if not booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).exists():
+                    booking.status = 'new'
+                    booking.save(update_fields=['status'])
+                return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
+
+            appointment = viewset._create_or_update_appointment(
+                booking,
+                scheduled_date=proposal.proposed_date,
+                scheduled_time=proposal.proposed_time,
+                duration_minutes=proposal.duration_minutes,
+                note=proposal.note,
+            )
+            proposal.status = StorefrontBookingProposal.STATUS_ACCEPTED
+            proposal.responded_at = timezone.now()
+            proposal.save(update_fields=['status', 'responded_at'])
+            booking.proposals.exclude(id=proposal.id).filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+            booking.confirmed_appointment = appointment
+            booking.status = 'confirmed'
+            booking.confirmed_at = timezone.now()
+            booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+
+        return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
 
 
 

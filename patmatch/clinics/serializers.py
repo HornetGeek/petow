@@ -1,6 +1,10 @@
+import uuid
+
 from django.contrib.auth import get_user_model
 from django.contrib.gis.geos import Point
+from django.core.files.storage import default_storage
 from django.utils import timezone
+from django.utils.text import get_valid_filename
 import json
 
 from rest_framework import serializers
@@ -15,6 +19,7 @@ from .models import (
     StorefrontOrder,
     StorefrontOrderItem,
     StorefrontBooking,
+    StorefrontBookingProposal,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -460,21 +465,47 @@ class ClinicProductSerializer(serializers.ModelSerializer):
     """Serializer for clinic storefront products"""
     category_display = serializers.CharField(source='get_category_display', read_only=True)
     image = serializers.SerializerMethodField()
+    product_image = serializers.ImageField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = ClinicProduct
         fields = [
             'id', 'clinic', 'name', 'description', 'category', 'category_display',
             'price', 'cost_price', 'stock_quantity', 'sku', 'low_stock_threshold',
-            'is_active', 'images', 'image',
+            'is_active', 'images', 'image', 'product_image',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'clinic', 'category_display', 'image', 'created_at', 'updated_at']
 
+    def _save_product_image(self, uploaded_file):
+        filename = get_valid_filename(getattr(uploaded_file, 'name', '') or 'product.jpg')
+        path = default_storage.save(f"products/{uuid.uuid4()}-{filename}", uploaded_file)
+        return default_storage.url(path)
+
     def get_image(self, obj):
         if isinstance(obj.images, list) and obj.images:
-            return obj.images[0]
+            image = obj.images[0]
+            if isinstance(image, str) and image.startswith('/'):
+                request = self.context.get('request')
+                return request.build_absolute_uri(image) if request else image
+            return image
         return None
+
+    def create(self, validated_data):
+        product_image = validated_data.pop('product_image', None)
+        instance = super().create(validated_data)
+        if product_image:
+            instance.images = [self._save_product_image(product_image)]
+            instance.save(update_fields=['images', 'updated_at'])
+        return instance
+
+    def update(self, instance, validated_data):
+        product_image = validated_data.pop('product_image', None)
+        instance = super().update(instance, validated_data)
+        if product_image:
+            instance.images = [self._save_product_image(product_image)]
+            instance.save(update_fields=['images', 'updated_at'])
+        return instance
 
 
 class StorefrontOrderItemSerializer(serializers.ModelSerializer):
@@ -512,19 +543,78 @@ class StorefrontOrderSerializer(serializers.ModelSerializer):
         read_only_fields = ['public_id', 'clinic', 'status', 'total_amount', 'created_at', 'items']
 
 
+class StorefrontBookingProposalSerializer(serializers.ModelSerializer):
+    proposed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StorefrontBookingProposal
+        fields = [
+            'id', 'booking', 'proposed_date', 'proposed_time', 'duration_minutes',
+            'note', 'status', 'proposed_by', 'proposed_by_name', 'created_at', 'responded_at'
+        ]
+        read_only_fields = [
+            'id', 'booking', 'status', 'proposed_by', 'proposed_by_name', 'created_at', 'responded_at'
+        ]
+
+    def get_proposed_by_name(self, obj):
+        user = getattr(obj, 'proposed_by', None)
+        if not user:
+            return ''
+        return user.get_full_name() or user.email or ''
+
+
 class StorefrontBookingSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source='service.name', read_only=True)
+    latest_proposal = serializers.SerializerMethodField()
+    proposals = serializers.SerializerMethodField()
+    confirmed_appointment = serializers.SerializerMethodField()
+    pet_photo_url = serializers.SerializerMethodField()
 
     class Meta:
         model = StorefrontBooking
         fields = [
             'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
-            'pet_name', 'preferred_date', 'preferred_time',
+            'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_photo', 'pet_photo_url',
+            'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
-            'status', 'quoted_price', 'created_at'
+            'status', 'quoted_price', 'confirmed_appointment', 'latest_proposal', 'proposals',
+            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
         ]
-        read_only_fields = ['public_id', 'clinic', 'customer_user', 'status', 'quoted_price', 'created_at', 'service_name']
+        read_only_fields = [
+            'public_id', 'clinic', 'customer_user', 'status', 'quoted_price', 'created_at',
+            'service_name', 'latest_proposal', 'proposals', 'confirmed_appointment', 'pet_photo_url',
+            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at'
+        ]
+
+    def get_pet_photo_url(self, obj):
+        if not obj.pet_photo:
+            return None
+        request = self.context.get('request')
+        url = obj.pet_photo.url
+        return request.build_absolute_uri(url) if request else url
+
+    def get_latest_proposal(self, obj):
+        proposal = obj.proposals.order_by('-created_at').first()
+        if not proposal:
+            return None
+        return StorefrontBookingProposalSerializer(proposal, context=self.context).data
+
+    def get_proposals(self, obj):
+        proposals = obj.proposals.order_by('-created_at')[:10]
+        return StorefrontBookingProposalSerializer(proposals, many=True, context=self.context).data
+
+    def get_confirmed_appointment(self, obj):
+        appointment = getattr(obj, 'confirmed_appointment', None)
+        if not appointment:
+            return None
+        return {
+            'id': appointment.id,
+            'scheduled_date': appointment.scheduled_date,
+            'scheduled_time': appointment.scheduled_time,
+            'status': appointment.status,
+            'reason': appointment.reason,
+        }
 
 
 class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
@@ -535,16 +625,35 @@ class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
         fields = [
             'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
-            'pet_name', 'preferred_date', 'preferred_time',
+            'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_photo', 'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
-            'status', 'quoted_price', 'created_at'
+            'status', 'quoted_price', 'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
         ]
         read_only_fields = [
             'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
-            'pet_name', 'preferred_date', 'preferred_time',
-            'notes', 'request_type', 'source', 'contact_channel', 'quoted_price', 'created_at'
+            'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_photo', 'preferred_date', 'preferred_time',
+            'notes', 'request_type', 'source', 'contact_channel', 'quoted_price',
+            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
         ]
+
+
+class StorefrontBookingProposalCreateSerializer(serializers.Serializer):
+    proposed_date = serializers.DateField()
+    proposed_time = serializers.TimeField()
+    duration_minutes = serializers.IntegerField(min_value=5, max_value=480, required=False)
+    note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class StorefrontBookingAcceptSerializer(serializers.Serializer):
+    scheduled_date = serializers.DateField(required=False, allow_null=True)
+    scheduled_time = serializers.TimeField(required=False, allow_null=True)
+    duration_minutes = serializers.IntegerField(min_value=5, max_value=480, required=False)
+    note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class StorefrontBookingRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class StorefrontBookingCreateSerializer(serializers.Serializer):
@@ -553,6 +662,10 @@ class StorefrontBookingCreateSerializer(serializers.Serializer):
     customer_phone = serializers.CharField()
     customer_email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
     pet_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    pet_type = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    pet_breed = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    pet_age = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    pet_photo = serializers.ImageField(required=False, allow_null=True)
     preferred_date = serializers.DateField(required=False, allow_null=True)
     preferred_time = serializers.TimeField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_null=True, allow_blank=True)
@@ -977,6 +1090,9 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'ownerName': instance.owner.full_name,
             'ownerPhone': owner_phone,
             'ownerEmail': instance.owner.email or '',
+            'owner_display_name': instance.owner.full_name,
+            'owner_display_phone': owner_phone,
+            'owner_display_email': instance.owner.email or '',
             'status': instance.status,
             'linked_user': instance.linked_user_id,
             'linked_pet': instance.linked_pet_id,

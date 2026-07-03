@@ -36,6 +36,11 @@ TRANSACTIONAL_NOTIFICATION_TYPES = {
     'adoption_request_received',
     'adoption_request_approved',
     'clinic_invite',
+    'clinic_booking_new',
+    'clinic_booking_confirmed',
+    'clinic_booking_rejected',
+    'clinic_booking_counter_proposed',
+    'clinic_booking_completed',
 }
 
 DISCOVERY_NOTIFICATION_TYPES = {
@@ -74,6 +79,11 @@ CLINIC_NOTIFICATION_TYPES = {
     'clinic_invite',
     'clinic_broadcast',
     'clinic_chat_message',
+    'clinic_booking_new',
+    'clinic_booking_confirmed',
+    'clinic_booking_rejected',
+    'clinic_booking_counter_proposed',
+    'clinic_booking_completed',
 }
 
 SYSTEM_NOTIFICATION_TYPES = {

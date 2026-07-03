@@ -1000,6 +1000,7 @@ class NotificationOutbox(models.Model):
     EVENT_CLINIC_INVITE_PUSH = 'clinic_invite_push'
     EVENT_CLINIC_BROADCAST_PUSH = 'clinic_broadcast_push'
     EVENT_CLINIC_CHAT_MESSAGE_PUSH = 'clinic_chat_message_push'
+    EVENT_CLINIC_BOOKING_PUSH = 'clinic_booking_push'
     EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH = 'account_verification_approved_push'
 
     EVENT_TYPE_CHOICES = [
@@ -1013,6 +1014,7 @@ class NotificationOutbox(models.Model):
         (EVENT_CLINIC_INVITE_PUSH, 'Clinic invite push'),
         (EVENT_CLINIC_BROADCAST_PUSH, 'Clinic broadcast push'),
         (EVENT_CLINIC_CHAT_MESSAGE_PUSH, 'Clinic chat message push'),
+        (EVENT_CLINIC_BOOKING_PUSH, 'Clinic booking push'),
         (EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH, 'Account verification approved push'),
     ]
 

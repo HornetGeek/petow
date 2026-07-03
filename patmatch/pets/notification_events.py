@@ -194,6 +194,22 @@ def _process_clinic_chat_message_push(object_id, payload):
     notification.save(update_fields=['extra_data', 'updated_at'])
 
 
+def _process_clinic_booking_push(object_id, payload):
+    notification = _get_notification_or_raise(object_id)
+    push_type = payload.get('push_type') or notification.type or 'clinic_booking_new'
+    delivered = deliver_outbox_notification_push(
+        notification,
+        title=payload.get('title'),
+        message=payload.get('message'),
+        push_payload=payload.get('push_payload') or {},
+        push_type=push_type,
+    )
+    extra_data = notification.extra_data if isinstance(notification.extra_data, dict) else {}
+    extra_data['delivered'] = bool(delivered)
+    notification.extra_data = extra_data
+    notification.save(update_fields=['extra_data', 'updated_at'])
+
+
 def _process_account_verification_approved_push(object_id, payload):
     notification = _get_notification_or_raise(object_id)
     delivered = deliver_outbox_notification_push(
@@ -220,6 +236,7 @@ EVENT_HANDLERS = {
     NotificationOutbox.EVENT_CLINIC_INVITE_PUSH: _process_clinic_invite_push,
     NotificationOutbox.EVENT_CLINIC_BROADCAST_PUSH: _process_clinic_broadcast_push,
     NotificationOutbox.EVENT_CLINIC_CHAT_MESSAGE_PUSH: _process_clinic_chat_message_push,
+    NotificationOutbox.EVENT_CLINIC_BOOKING_PUSH: _process_clinic_booking_push,
     NotificationOutbox.EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH: _process_account_verification_approved_push,
 }
 

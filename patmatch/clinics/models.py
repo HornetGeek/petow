@@ -259,6 +259,7 @@ class StorefrontOrder(models.Model):
 
     STATUS_CHOICES = [
         ('new', 'جديد'),
+        ('counter_proposed', 'تم اقتراح موعد بديل'),
         ('confirmed', 'مؤكد'),
         ('completed', 'مكتمل'),
         ('cancelled', 'ملغي'),
@@ -337,6 +338,10 @@ class StorefrontBooking(models.Model):
     customer_phone = models.CharField(max_length=30)
     customer_email = models.EmailField(blank=True, null=True)
     pet_name = models.CharField(max_length=120, blank=True, null=True)
+    pet_type = models.CharField(max_length=60, blank=True, null=True)
+    pet_breed = models.CharField(max_length=120, blank=True, null=True)
+    pet_age = models.CharField(max_length=80, blank=True, null=True)
+    pet_photo = models.ImageField(upload_to='clinics/bookings/pets/', blank=True, null=True)
     preferred_date = models.DateField(blank=True, null=True)
     preferred_time = models.TimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
@@ -345,6 +350,18 @@ class StorefrontBooking(models.Model):
     contact_channel = models.CharField(max_length=20, choices=CONTACT_CHANNEL_CHOICES, default='app')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
     quoted_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    confirmed_appointment = models.ForeignKey(
+        'clinics.VeterinaryAppointment',
+        on_delete=models.SET_NULL,
+        related_name='storefront_bookings',
+        blank=True,
+        null=True,
+        help_text='الموعد المؤكد الناتج عن طلب الحجز',
+    )
+    cancelled_reason = models.TextField(blank=True, null=True)
+    confirmed_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -354,6 +371,55 @@ class StorefrontBooking(models.Model):
 
     def __str__(self):
         return f"حجز {self.public_id} - {self.clinic.name}"
+
+
+class StorefrontBookingProposal(models.Model):
+    """اقتراحات المواعيد البديلة لطلبات الحجز."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_ACCEPTED = 'accepted'
+    STATUS_DECLINED = 'declined'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_EXPIRED = 'expired'
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'قيد الانتظار'),
+        (STATUS_ACCEPTED, 'تم القبول'),
+        (STATUS_DECLINED, 'تم الرفض'),
+        (STATUS_CANCELLED, 'ملغي'),
+        (STATUS_EXPIRED, 'منتهي'),
+    ]
+
+    booking = models.ForeignKey(
+        StorefrontBooking,
+        on_delete=models.CASCADE,
+        related_name='proposals',
+    )
+    proposed_date = models.DateField()
+    proposed_time = models.TimeField()
+    duration_minutes = models.PositiveIntegerField(default=30)
+    note = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_booking_proposals',
+        blank=True,
+        null=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    responded_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        verbose_name = 'اقتراح موعد حجز'
+        verbose_name_plural = 'اقتراحات مواعيد الحجوزات'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['booking', 'status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"اقتراح {self.booking.public_id} - {self.proposed_date} {self.proposed_time}"
 
 
 class ServicePricingTier(models.Model):
