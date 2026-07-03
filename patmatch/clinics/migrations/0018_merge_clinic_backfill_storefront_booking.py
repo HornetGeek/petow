@@ -8,5 +8,4 @@ class Migration(migrations.Migration):
         ('clinics', '0017_storefrontbooking_customer_user'),
     ]
 
-    operations = [
-    ]
+    operations = []
