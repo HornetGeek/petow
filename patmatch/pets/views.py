@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny, IsAdminUser
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.exceptions import ValidationError
 import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
@@ -971,10 +972,43 @@ class StoryListCreateView(generics.ListCreateAPIView):
         return context
 
     def create(self, request, *args, **kwargs):
+        started_at = time.perf_counter()
+        image_file = request.FILES.get('image')
+        image_size = getattr(image_file, 'size', None)
+        content_type = getattr(image_file, 'content_type', None)
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        validation_started_at = time.perf_counter()
+        try:
+            serializer.is_valid(raise_exception=True)
+        except ValidationError:
+            logger.info(
+                "story_create_timing user_id=%s valid=false image_size=%s content_type=%s validation_ms=%.2f total_ms=%.2f",
+                getattr(request.user, 'id', None),
+                image_size,
+                content_type,
+                (time.perf_counter() - validation_started_at) * 1000,
+                (time.perf_counter() - started_at) * 1000,
+            )
+            raise
+        validation_ms = (time.perf_counter() - validation_started_at) * 1000
+        save_started_at = time.perf_counter()
         story = serializer.save()
+        save_ms = (time.perf_counter() - save_started_at) * 1000
+        serialize_started_at = time.perf_counter()
         data = StorySerializer(story, context=self.get_serializer_context()).data
+        serialize_ms = (time.perf_counter() - serialize_started_at) * 1000
+        total_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "story_create_timing user_id=%s story_id=%s valid=true image_size=%s content_type=%s validation_ms=%.2f save_ms=%.2f serialize_ms=%.2f total_ms=%.2f",
+            getattr(request.user, 'id', None),
+            story.id,
+            image_size,
+            content_type,
+            validation_ms,
+            save_ms,
+            serialize_ms,
+            total_ms,
+        )
         headers = self.get_success_headers(data)
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
