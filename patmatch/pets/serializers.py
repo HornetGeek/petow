@@ -2,6 +2,7 @@ from rest_framework import serializers
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from django.contrib.gis.geos import Point
 from django.db.models import Count
+from django.db.utils import DatabaseError
 import re
 from .models import (
     Breed,
@@ -398,14 +399,14 @@ class SavedSearchMatchSerializer(serializers.ModelSerializer):
 
 
 class PetEngagementMixin:
-    likes_count = serializers.SerializerMethodField()
-    is_liked = serializers.SerializerMethodField()
-
     def get_likes_count(self, obj):
         annotated = getattr(obj, 'likes_count', None)
         if annotated is not None:
             return int(annotated)
-        return obj.liked_by.count()
+        try:
+            return obj.liked_by.count()
+        except (AttributeError, DatabaseError):
+            return 0
 
     def get_is_liked(self, obj):
         request = self.context.get('request')
@@ -414,10 +415,15 @@ class PetEngagementMixin:
         liked_pet_ids = self.context.get('liked_pet_ids')
         if liked_pet_ids is not None:
             return obj.id in liked_pet_ids
-        return PetLike.objects.filter(user=request.user, pet=obj).exists()
+        try:
+            return PetLike.objects.filter(user=request.user, pet=obj).exists()
+        except DatabaseError:
+            return False
 
 
 class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
+    likes_count = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
     latitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     longitude = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
@@ -600,6 +606,8 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
 
 class PetListSerializer(PetEngagementMixin, serializers.ModelSerializer):
     """سيريلايزر مبسط لقائمة الحيوانات"""
+    likes_count = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
     breed_name = serializers.CharField(source='breed.name', read_only=True)
     pet_type_display = serializers.CharField(read_only=True)
     age_display = serializers.CharField(read_only=True)

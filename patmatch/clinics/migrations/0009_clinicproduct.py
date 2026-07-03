@@ -34,8 +34,8 @@ class Migration(migrations.Migration):
                 'verbose_name_plural': 'منتجات العيادة',
                 'ordering': ['-updated_at'],
                 'indexes': [
-                    models.Index(fields=['clinic', 'is_active']),
-                    models.Index(fields=['clinic', 'category']),
+                    models.Index(fields=['clinic', 'is_active'], name='clinics_cli_clinic__f494ea_idx'),
+                    models.Index(fields=['clinic', 'category'], name='clinics_cli_clinic__b2016f_idx'),
                 ],
             },
         ),

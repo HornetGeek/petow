@@ -11,7 +11,8 @@ from django.conf import settings
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from django.db import transaction
+from django.db import connection, transaction
+from django.db.utils import DatabaseError
 from django.utils import timezone
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
@@ -65,6 +66,47 @@ from django.db.models.functions import Coalesce, Cast, Floor
 from django.core.files.storage import default_storage
 
 logger = logging.getLogger(__name__)
+
+
+def _pet_likes_table_available():
+    cache_key = 'pets:pet_likes_table_available'
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return bool(cached)
+
+    try:
+        available = PetLike._meta.db_table in connection.introspection.table_names()
+    except DatabaseError:
+        logger.warning("Unable to inspect pet likes table availability", exc_info=True)
+        available = False
+
+    cache.set(cache_key, available, 60)
+    return available
+
+
+def _with_pet_likes(queryset):
+    if not _pet_likes_table_available():
+        return queryset
+    return queryset.annotate(likes_count=Count('liked_by', distinct=True))
+
+
+def _liked_pet_ids_for_request(request):
+    if not request.user.is_authenticated or not _pet_likes_table_available():
+        return set()
+
+    try:
+        return set(
+            PetLike.objects
+            .filter(user=request.user)
+            .values_list('pet_id', flat=True)
+        )
+    except DatabaseError:
+        logger.warning(
+            "Unable to load liked pet ids for user_id=%s",
+            request.user.id,
+            exc_info=True,
+        )
+        return set()
 
 def reverse_geocode_address(lat: float, lng: float) -> str:
     fallback = f"{lat:.4f}, {lng:.4f}"
@@ -1239,11 +1281,7 @@ class PetListCreateView(generics.ListCreateAPIView):
     
     def get_queryset(self):
         # Start with all pets
-        queryset = (
-            Pet.objects
-            .select_related('breed', 'owner')
-            .annotate(likes_count=Count('liked_by', distinct=True))
-        )
+        queryset = _with_pet_likes(Pet.objects.select_related('breed', 'owner'))
         
         # Handle status filtering
         status_param = self.request.query_params.get('status')
@@ -1355,12 +1393,7 @@ class PetListCreateView(generics.ListCreateAPIView):
     def get_serializer_context(self):
         """تمرير context إضافي للسيريلايزر"""
         context = super().get_serializer_context()
-        if self.request.user.is_authenticated:
-            context['liked_pet_ids'] = set(
-                PetLike.objects
-                .filter(user=self.request.user)
-                .values_list('pet_id', flat=True)
-            )
+        context['liked_pet_ids'] = _liked_pet_ids_for_request(self.request)
         
         # إضافة إحداثيات المستخدم من query parameters
         user_lat = self.request.query_params.get('user_lat')
@@ -1385,7 +1418,6 @@ class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
         Pet.objects
         .select_related('breed', 'owner')
         .prefetch_related('additional_images')
-        .annotate(likes_count=Count('liked_by', distinct=True))
     )
     serializer_class = PetSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
@@ -1412,25 +1444,17 @@ class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
             # المالك فقط يمكنه التعديل أو الحذف
             return (
-                Pet.objects
-                .filter(owner=self.request.user)
-                .select_related('breed', 'owner')
-                .annotate(likes_count=Count('liked_by', distinct=True))
+                _with_pet_likes(
+                    Pet.objects
+                    .filter(owner=self.request.user)
+                    .select_related('breed', 'owner')
+                )
             )
-        return (
-            Pet.objects
-            .select_related('breed', 'owner')
-            .annotate(likes_count=Count('liked_by', distinct=True))
-        )
+        return _with_pet_likes(Pet.objects.select_related('breed', 'owner'))
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        if self.request.user.is_authenticated:
-            context['liked_pet_ids'] = set(
-                PetLike.objects
-                .filter(user=self.request.user)
-                .values_list('pet_id', flat=True)
-            )
+        context['liked_pet_ids'] = _liked_pet_ids_for_request(self.request)
         return context
 
 class MyPetsView(generics.ListAPIView):
@@ -1439,20 +1463,15 @@ class MyPetsView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return (
+        return _with_pet_likes(
             Pet.objects
             .filter(owner=self.request.user)
             .select_related('breed')
-            .annotate(likes_count=Count('liked_by', distinct=True))
         )
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        context['liked_pet_ids'] = set(
-            PetLike.objects
-            .filter(user=self.request.user)
-            .values_list('pet_id', flat=True)
-        )
+        context['liked_pet_ids'] = _liked_pet_ids_for_request(self.request)
         return context
 
 class FavoriteListCreateView(generics.ListCreateAPIView):
@@ -2763,11 +2782,13 @@ def respond_to_adoption_request(request, request_id):
 @permission_classes([IsAuthenticated])
 def adoption_pets(request):
     """الحيوانات المتاحة للتبني"""
-    pets = Pet.objects.filter(
-        status='available_for_adoption'
-    ).select_related(
-        'breed',
-        'owner',
+    pets = _with_pet_likes(
+        Pet.objects.filter(
+            status='available_for_adoption'
+        ).select_related(
+            'breed',
+            'owner',
+        )
     )
 
     pet_type = request.GET.get('pet_type')
@@ -2823,7 +2844,10 @@ def adoption_pets(request):
         total_count = pets.count()
         pets = pets[offset:offset + limit]
 
-    context = {'request': request}
+    context = {
+        'request': request,
+        'liked_pet_ids': _liked_pet_ids_for_request(request),
+    }
     if user_lat is not None and user_lng is not None:
         context['user_lat'] = user_lat
         context['user_lng'] = user_lng

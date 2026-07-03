@@ -63,3 +63,4 @@ Untitled.*
 
 # Worktree directory (project-local fallback)
 .worktrees/
+patmatch/data.json
