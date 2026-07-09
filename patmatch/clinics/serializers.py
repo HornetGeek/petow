@@ -19,6 +19,7 @@ from .models import (
     StorefrontOrder,
     StorefrontOrderItem,
     StorefrontBooking,
+    StorefrontBookingTimeline,
     StorefrontBookingProposal,
     ServicePricingTier,
     ServicePackage,
@@ -26,11 +27,42 @@ from .models import (
     ClinicMessage,
     ClinicClientRecord,
     ClinicPatientRecord,
+    ClinicPatientDocument,
+    ClinicPatientNote,
     ClinicInvite,
     VeterinaryAppointment,
+    VeterinarySession,
 )
 
 User = get_user_model()
+
+
+LEGACY_APPOINTMENT_STATUS_MAP = {
+    'scheduled': VeterinaryAppointment.STATUS_ACCEPTED,
+    'rescheduled': VeterinaryAppointment.STATUS_ACCEPTED,
+    'completed': VeterinaryAppointment.STATUS_COMPLETED,
+    'cancelled': VeterinaryAppointment.STATUS_CANCELLED,
+}
+
+LEGACY_BOOKING_STATUS_MAP = {
+    'new': StorefrontBooking.STATUS_PENDING,
+    'accepted': StorefrontBooking.STATUS_ACCEPTED,
+    'confirmed': StorefrontBooking.STATUS_ACCEPTED,
+    'in_progress': StorefrontBooking.STATUS_IN_SESSION,
+    'waiting_owner': StorefrontBooking.STATUS_PENDING,
+    'counter_proposed': StorefrontBooking.STATUS_PENDING,
+    'rejected': StorefrontBooking.STATUS_REFUSED,
+    'completed': StorefrontBooking.STATUS_COMPLETED,
+    'cancelled': StorefrontBooking.STATUS_CANCELLED,
+}
+
+
+def normalize_appointment_status(value):
+    return LEGACY_APPOINTMENT_STATUS_MAP.get(value, value)
+
+
+def normalize_booking_status(value):
+    return LEGACY_BOOKING_STATUS_MAP.get(value, value)
 
 
 def _calculate_age_text(date_of_birth):
@@ -563,12 +595,31 @@ class StorefrontBookingProposalSerializer(serializers.ModelSerializer):
         return user.get_full_name() or user.email or ''
 
 
+class StorefrontBookingTimelineSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StorefrontBookingTimeline
+        fields = ['id', 'event_type', 'message', 'actor', 'actor_name', 'created_at']
+        read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        actor = getattr(obj, 'actor', None)
+        if not actor:
+            return ''
+        return actor.get_full_name() or actor.email or ''
+
+
 class StorefrontBookingSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source='service.name', read_only=True)
     latest_proposal = serializers.SerializerMethodField()
     proposals = serializers.SerializerMethodField()
     confirmed_appointment = serializers.SerializerMethodField()
     pet_photo_url = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    assigned_staff_name = serializers.SerializerMethodField()
+    linked_patient_summary = serializers.SerializerMethodField()
+    timeline = serializers.SerializerMethodField()
 
     class Meta:
         model = StorefrontBooking
@@ -579,12 +630,16 @@ class StorefrontBookingSerializer(serializers.ModelSerializer):
             'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
             'status', 'quoted_price', 'confirmed_appointment', 'latest_proposal', 'proposals',
-            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
+            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at',
+            'status_display', 'assigned_staff', 'assigned_staff_name', 'internal_notes',
+            'doctor_notes', 'diagnosis', 'treatment', 'price_estimate', 'completed_result',
+            'linked_patient', 'linked_patient_summary', 'timeline',
         ]
         read_only_fields = [
             'public_id', 'clinic', 'customer_user', 'status', 'quoted_price', 'created_at',
             'service_name', 'latest_proposal', 'proposals', 'confirmed_appointment', 'pet_photo_url',
-            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at'
+            'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at',
+            'status_display', 'assigned_staff_name', 'linked_patient_summary', 'timeline',
         ]
 
     def get_pet_photo_url(self, obj):
@@ -616,6 +671,33 @@ class StorefrontBookingSerializer(serializers.ModelSerializer):
             'reason': appointment.reason,
         }
 
+    def get_assigned_staff_name(self, obj):
+        user = getattr(obj, 'assigned_staff', None)
+        if not user:
+            return ''
+        return user.get_full_name() or user.email or ''
+
+    def get_linked_patient_summary(self, obj):
+        patient = getattr(obj, 'linked_patient', None)
+        if not patient:
+            return None
+        return {
+            'id': patient.id,
+            'name': patient.name,
+            'species': patient.species,
+            'breed': patient.breed or '',
+            'owner_name': patient.owner.full_name if patient.owner_id else '',
+        }
+
+    def get_timeline(self, obj):
+        events = obj.timeline_events.select_related('actor').order_by('created_at')[:30]
+        return StorefrontBookingTimelineSerializer(events, many=True, context=self.context).data
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['status'] = normalize_booking_status(data.get('status'))
+        return data
+
 
 class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source='service.name', read_only=True)
@@ -637,6 +719,15 @@ class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
             'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
         ]
 
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if data.get('status'):
+            data['status'] = normalize_booking_status(data['status'])
+        return super().to_internal_value(data)
+
 
 class StorefrontBookingProposalCreateSerializer(serializers.Serializer):
     proposed_date = serializers.DateField()
@@ -654,6 +745,148 @@ class StorefrontBookingAcceptSerializer(serializers.Serializer):
 
 class StorefrontBookingRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class StorefrontBookingNoteSerializer(serializers.Serializer):
+    note = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    visibility = serializers.ChoiceField(
+        choices=['internal', 'doctor', 'owner'],
+        required=False,
+        default='internal',
+    )
+
+
+class StorefrontBookingAssignSerializer(serializers.Serializer):
+    staff_id = serializers.IntegerField(required=False, allow_null=True)
+
+
+class StorefrontBookingPatientLinkSerializer(serializers.Serializer):
+    patient_id = serializers.IntegerField(required=False, allow_null=True)
+
+
+class StorefrontBookingScheduleSerializer(StorefrontBookingAcceptSerializer):
+    pass
+
+
+class StorefrontBookingCompleteSerializer(serializers.Serializer):
+    completed_result = serializers.ChoiceField(
+        choices=[choice[0] for choice in StorefrontBooking.COMPLETED_RESULT_CHOICES],
+        required=False,
+        default='visit_completed',
+    )
+    internal_notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    doctor_notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    diagnosis = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    treatment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    price_estimate = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    next_appointment = serializers.DateField(required=False, allow_null=True)
+
+
+class VeterinarySessionSerializer(serializers.ModelSerializer):
+    appointment_id = serializers.IntegerField(source='appointment.id', read_only=True)
+    clinic_id = serializers.IntegerField(source='clinic.id', read_only=True)
+    pet_id = serializers.IntegerField(source='pet.id', read_only=True, allow_null=True)
+    pet_name = serializers.SerializerMethodField()
+    owner_id = serializers.IntegerField(source='owner.id', read_only=True, allow_null=True)
+    owner_name = serializers.SerializerMethodField()
+    clinic_patient_id = serializers.IntegerField(source='clinic_patient.id', read_only=True, allow_null=True)
+    care_provider_name = serializers.CharField(required=False, allow_blank=True)
+
+    class Meta:
+        model = VeterinarySession
+        fields = [
+            'id', 'appointment', 'appointment_id', 'clinic_id', 'clinic_patient_id',
+            'pet_id', 'pet_name', 'owner_id', 'owner_name', 'care_provider',
+            'care_provider_name', 'session_date', 'session_started_at', 'session_ended_at',
+            'service_type', 'main_complaint', 'symptoms', 'symptoms_duration',
+            'owner_notes', 'previous_treatment', 'current_medications', 'allergies',
+            'vitals', 'physical_exam', 'physical_exam_notes', 'diagnosis',
+            'provisional_diagnosis', 'case_severity', 'doctor_notes',
+            'services_performed', 'medications', 'lab_tests_requested',
+            'imaging_requested', 'attachments', 'home_care_instructions',
+            'food_instructions', 'warning_signs', 'follow_up_needed',
+            'next_appointment_date', 'owner_summary_sent_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'appointment', 'clinic_id', 'clinic_patient_id', 'pet_id',
+            'pet_name', 'owner_id', 'owner_name', 'care_provider',
+            'session_date', 'session_started_at', 'session_ended_at',
+            'owner_summary_sent_at', 'created_at', 'updated_at',
+        ]
+
+    def get_pet_name(self, obj):
+        if obj.pet:
+            return obj.pet.name or ''
+        if obj.clinic_patient:
+            return obj.clinic_patient.name or ''
+        return ''
+
+    def get_owner_name(self, obj):
+        if obj.owner:
+            return obj.owner.get_full_name() or obj.owner.email or ''
+        if obj.clinic_patient and obj.clinic_patient.owner:
+            return obj.clinic_patient.owner.full_name or obj.clinic_patient.owner.email or ''
+        return ''
+
+    def validate_vitals(self, value):
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('vitals must be an object.')
+        return value
+
+    def validate_physical_exam(self, value):
+        if value in (None, ''):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('physical_exam must be an object.')
+        return value
+
+    def validate_medications(self, value):
+        if value in (None, ''):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError('medications must be a list.')
+        return value
+
+    def validate_attachments(self, value):
+        if value in (None, ''):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError('attachments must be a list.')
+        return value
+
+
+class VeterinarySessionEndSerializer(VeterinarySessionSerializer):
+    def validate(self, attrs):
+        instance = self.instance
+
+        def merged(field, default=''):
+            if field in attrs:
+                return attrs.get(field) or default
+            return getattr(instance, field, default) if instance else default
+
+        vitals = attrs.get('vitals', getattr(instance, 'vitals', {}) if instance else {})
+        weight = vitals.get('weight') if isinstance(vitals, dict) else None
+        weight_status = weight.get('status') if isinstance(weight, dict) else None
+        has_weight = weight_status == 'not_checked' or bool(weight and weight.get('value') not in (None, ''))
+
+        missing = []
+        if not (merged('main_complaint') or '').strip():
+            missing.append('main_complaint')
+        if not has_weight:
+            missing.append('vitals.weight')
+        if not (merged('physical_exam_notes') or '').strip():
+            missing.append('physical_exam_notes')
+        if not ((merged('diagnosis') or '').strip() or (merged('provisional_diagnosis') or '').strip()):
+            missing.append('diagnosis')
+        if not ((merged('services_performed') or '').strip() or merged('medications', [])):
+            missing.append('treatment_plan')
+        if not (merged('home_care_instructions') or '').strip():
+            missing.append('home_care_instructions')
+        if missing:
+            raise serializers.ValidationError({'required_fields': missing})
+        return attrs
 
 
 class StorefrontBookingCreateSerializer(serializers.Serializer):
@@ -775,13 +1008,17 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
     date_of_birth = serializers.DateField(required=False, allow_null=True)
     last_visit = serializers.DateField(required=False, allow_null=True)
     next_appointment = serializers.DateField(required=False, allow_null=True)
+    weight_kg = serializers.DecimalField(max_digits=6, decimal_places=2, required=False, allow_null=True)
+    blood_type = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    photo = serializers.ImageField(required=False, allow_null=True)
 
     class Meta:
         model = ClinicPatientRecord
         fields = [
             'id', 'name', 'species', 'breed', 'date_of_birth', 'age', 'gender', 'status',
             'notes', 'owner_name', 'owner_phone', 'owner_email', 'owner_password',
-            'last_visit', 'next_appointment', 'linked_user', 'linked_pet', 'created_at', 'updated_at'
+            'last_visit', 'next_appointment', 'weight_kg', 'blood_type', 'photo',
+            'linked_user', 'linked_pet', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'linked_user', 'linked_pet', 'created_at', 'updated_at']
 
@@ -876,10 +1113,14 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'lastVisit': 'last_visit',
             'nextAppointment': 'next_appointment',
             'dateOfBirth': 'date_of_birth',
+            'weightKg': 'weight_kg',
+            'bloodType': 'blood_type',
         }
         for camel, snake in camel_to_snake.items():
             if camel in data and snake not in data:
                 data[snake] = data[camel]
+        if data.get('status'):
+            data['status'] = normalize_appointment_status(data['status'])
         return super().to_internal_value(data)
 
     def _create_pet_in_main_app(self, patient_data, user):
@@ -1046,6 +1287,9 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         instance.species = validated_data.get('species', instance.species)
         instance.breed = validated_data.get('breed', instance.breed)
         instance.notes = validated_data.get('notes', instance.notes)
+        instance.weight_kg = validated_data.get('weight_kg', instance.weight_kg)
+        instance.blood_type = validated_data.get('blood_type', instance.blood_type)
+        instance.photo = validated_data.get('photo', instance.photo)
         instance.last_visit = validated_data.get('last_visit', instance.last_visit)
         instance.next_appointment = validated_data.get('next_appointment', instance.next_appointment)
         instance.name = validated_data.get('name', instance.name)
@@ -1087,6 +1331,12 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'age': age_value,
             'dateOfBirth': instance.date_of_birth.isoformat() if instance.date_of_birth else None,
             'gender': instance.gender or 'unknown',
+            'weight_kg': str(instance.weight_kg) if instance.weight_kg is not None else None,
+            'weightKg': str(instance.weight_kg) if instance.weight_kg is not None else None,
+            'blood_type': instance.blood_type or '',
+            'bloodType': instance.blood_type or '',
+            'photo_url': self._absolute_file_url(instance.photo),
+            'photoUrl': self._absolute_file_url(instance.photo),
             'ownerName': instance.owner.full_name,
             'ownerPhone': owner_phone,
             'ownerEmail': instance.owner.email or '',
@@ -1116,6 +1366,179 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             })
 
         return data
+
+    def _absolute_file_url(self, file_field):
+        if not file_field:
+            return None
+        try:
+            url = file_field.url
+        except Exception:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(url) if request else url
+
+
+class ClinicPatientNoteSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClinicPatientNote
+        fields = ['id', 'text', 'created_by', 'created_by_name', 'created_at']
+        read_only_fields = ['id', 'created_by', 'created_by_name', 'created_at']
+
+    def get_created_by_name(self, obj):
+        user = getattr(obj, 'created_by', None)
+        if not user:
+            return ''
+        return user.get_full_name() or user.email or ''
+
+
+class ClinicPatientDocumentSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClinicPatientDocument
+        fields = [
+            'id', 'title', 'category', 'category_display', 'file', 'file_url', 'notes',
+            'issued_at', 'expires_at', 'uploaded_by', 'uploaded_by_name', 'created_at',
+        ]
+        read_only_fields = ['id', 'file_url', 'category_display', 'uploaded_by', 'uploaded_by_name', 'created_at']
+
+    def get_file_url(self, obj):
+        return _absolute_file_url(self.context.get('request'), obj.file)
+
+    def get_uploaded_by_name(self, obj):
+        user = getattr(obj, 'uploaded_by', None)
+        if not user:
+            return ''
+        return user.get_full_name() or user.email or ''
+
+
+def _absolute_file_url(request, file_field):
+    if not file_field:
+        return None
+    try:
+        url = file_field.url
+    except Exception:
+        return None
+    return request.build_absolute_uri(url) if request else url
+
+
+class ClinicPatientProfileSerializer(serializers.Serializer):
+    def to_representation(self, instance):
+        request = self.context.get('request')
+        patient_data = ClinicPatientRecordSerializer(instance, context=self.context).data
+        photo_url = patient_data.get('photo_url') or self._linked_pet_file_url(instance, 'main_image')
+        weight = patient_data.get('weight_kg')
+        blood_type = patient_data.get('blood_type') or ''
+
+        appointments = list(
+            instance.clinic_appointments.select_related('owner', 'pet', 'clinic_patient')
+            .order_by('-scheduled_date', '-scheduled_time')[:20]
+        )
+        medical_records = [self._appointment_record(appointment) for appointment in appointments]
+        vaccinations = [
+            self._appointment_record(appointment)
+            for appointment in appointments
+            if appointment.appointment_type == 'vaccination'
+        ]
+
+        documents = list(instance.documents.select_related('uploaded_by').all()[:50])
+        document_data = ClinicPatientDocumentSerializer(
+            documents,
+            many=True,
+            context=self.context,
+        ).data
+        certificate_files = self._linked_pet_certificate_files(instance)
+        vaccination_documents = [
+            item for item in document_data if item.get('category') == 'vaccination'
+        ]
+
+        notes = ClinicPatientNoteSerializer(
+            instance.profile_notes.select_related('created_by').all()[:50],
+            many=True,
+            context=self.context,
+        ).data
+
+        return {
+            **patient_data,
+            'photo_url': photo_url,
+            'photoUrl': photo_url,
+            'weight_kg': weight,
+            'weightKg': weight,
+            'blood_type': blood_type,
+            'bloodType': blood_type,
+            'stats': {
+                'age': patient_data.get('age') or '',
+                'weight_kg': weight,
+                'gender': patient_data.get('gender') or '',
+                'blood_type': blood_type,
+            },
+            'medical_records': medical_records,
+            'vaccinations': vaccinations + vaccination_documents,
+            'files': document_data + certificate_files,
+            'notes_list': notes,
+            'notesList': notes,
+        }
+
+    def _appointment_record(self, appointment):
+        return {
+            'id': appointment.id,
+            'source': 'appointment',
+            'date': appointment.scheduled_date.isoformat() if appointment.scheduled_date else None,
+            'time': appointment.scheduled_time.isoformat() if appointment.scheduled_time else None,
+            'title': appointment.get_appointment_type_display(),
+            'appointment_type': appointment.appointment_type,
+            'status': appointment.status,
+            'status_display': appointment.get_status_display(),
+            'doctor_name': '',
+            'reason': appointment.reason or '',
+            'notes': appointment.notes or '',
+            'diagnosis': appointment.diagnosis or '',
+            'treatment': appointment.treatment or '',
+            'next_appointment': appointment.next_appointment.isoformat() if appointment.next_appointment else None,
+            'created_at': appointment.created_at.isoformat() if appointment.created_at else None,
+        }
+
+    def _linked_pet_file_url(self, instance, field_name):
+        pet = getattr(instance, 'linked_pet', None)
+        if not pet:
+            return None
+        return _absolute_file_url(self.context.get('request'), getattr(pet, field_name, None))
+
+    def _linked_pet_certificate_files(self, instance):
+        pet = getattr(instance, 'linked_pet', None)
+        if not pet:
+            return []
+        certificate_fields = [
+            ('vaccination_certificate', 'vaccination', 'شهادة التطعيم'),
+            ('health_certificate', 'certificate', 'الشهادة الصحية'),
+            ('disease_free_certificate', 'certificate', 'شهادة خلو من الأمراض'),
+            ('additional_certificate', 'certificate', 'شهادة إضافية'),
+        ]
+        files = []
+        for field_name, category, title in certificate_fields:
+            file_field = getattr(pet, field_name, None)
+            url = _absolute_file_url(self.context.get('request'), file_field)
+            if url:
+                files.append({
+                    'id': f'linked_pet:{field_name}',
+                    'title': title,
+                    'category': category,
+                    'category_display': title,
+                    'file': None,
+                    'file_url': url,
+                    'notes': '',
+                    'issued_at': None,
+                    'expires_at': None,
+                    'uploaded_by': None,
+                    'uploaded_by_name': '',
+                    'created_at': None,
+                    'source': 'linked_pet',
+                })
+        return files
 
 class ClinicAppointmentSerializer(serializers.ModelSerializer):
     pet_name = serializers.SerializerMethodField()
@@ -1168,6 +1591,11 @@ class ClinicAppointmentSerializer(serializers.ModelSerializer):
             'id', 'clinic', 'clinic_name', 'owner_name', 'owner_phone',
             'owner_email', 'pet_name', 'created_at', 'updated_at'
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['status'] = normalize_appointment_status(data.get('status'))
+        return data
 
     def get_owner_name(self, obj):
         owner = getattr(obj, 'owner', None)
@@ -1251,6 +1679,29 @@ class ClinicAppointmentSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         validated_data.pop('clinic', None)
         return super().update(instance, validated_data)
+
+
+class ClinicPatientMedicalRecordCreateSerializer(serializers.Serializer):
+    appointment_type = serializers.ChoiceField(choices=VeterinaryAppointment.APPOINTMENT_TYPE_CHOICES)
+    scheduled_date = serializers.DateField()
+    scheduled_time = serializers.TimeField()
+    reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    notes = serializers.CharField(required=False, allow_blank=True, trim_whitespace=True)
+    diagnosis = serializers.CharField(required=False, allow_blank=True, trim_whitespace=True)
+    treatment = serializers.CharField(required=False, allow_blank=True, trim_whitespace=True)
+    next_appointment = serializers.DateField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        clinical_text = [
+            attrs.get('notes'),
+            attrs.get('diagnosis'),
+            attrs.get('treatment'),
+        ]
+        if not any((value or '').strip() for value in clinical_text):
+            raise serializers.ValidationError({
+                'non_field_errors': ['أدخل التشخيص أو العلاج أو ملاحظات الزيارة.']
+            })
+        return attrs
 
 
 class ClinicClientSerializer(serializers.Serializer):

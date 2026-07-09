@@ -37,7 +37,9 @@ from .models import (
     StorefrontOrder,
     StorefrontOrderItem,
     StorefrontBooking,
+    StorefrontBookingTimeline,
     StorefrontBookingProposal,
+    VeterinarySession,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -46,6 +48,8 @@ from .models import (
     ClinicStaff,
     ClinicClientRecord,
     ClinicPatientRecord,
+    ClinicPatientDocument,
+    ClinicPatientNote,
     ClinicInvite,
 )
 from pets.models import Notification, ChatRoom, Pet, NotificationOutbox
@@ -70,7 +74,16 @@ from .serializers import (
     StorefrontBookingCreateSerializer,
     StorefrontBookingProposalCreateSerializer,
     StorefrontBookingAcceptSerializer,
+    StorefrontBookingAssignSerializer,
+    StorefrontBookingCompleteSerializer,
+    StorefrontBookingNoteSerializer,
+    StorefrontBookingPatientLinkSerializer,
     StorefrontBookingRejectSerializer,
+    StorefrontBookingScheduleSerializer,
+    VeterinarySessionSerializer,
+    VeterinarySessionEndSerializer,
+    normalize_appointment_status,
+    normalize_booking_status,
     ServicePricingTierSerializer,
     ServicePackageSerializer,
     ClinicPromotionSerializer,
@@ -80,6 +93,10 @@ from .serializers import (
     ClinicDashboardStatsSerializer,
     ClinicRegistrationSerializer,
     ClinicPatientRecordSerializer,
+    ClinicPatientDocumentSerializer,
+    ClinicPatientMedicalRecordCreateSerializer,
+    ClinicPatientNoteSerializer,
+    ClinicPatientProfileSerializer,
     ClinicInviteSerializer,
     VeterinarianSerializer,
 )
@@ -689,9 +706,12 @@ class ClinicDashboardOverviewView(ClinicContextMixin, APIView):
         todays_appointments = appointments_qs.filter(scheduled_date=today).count()
         upcoming_appointments = appointments_qs.filter(
             scheduled_date__gt=today,
-            status__in=['scheduled', 'rescheduled'],
+            status__in=[
+                VeterinaryAppointment.STATUS_ACCEPTED,
+                VeterinaryAppointment.STATUS_IN_SESSION,
+            ],
         ).count()
-        pending_requests = appointments_qs.filter(status='scheduled').count()
+        pending_requests = appointments_qs.filter(status=VeterinaryAppointment.STATUS_PENDING).count()
 
         revenue_this_month = appointments_qs.filter(
             scheduled_date__gte=start_of_month,
@@ -1210,7 +1230,7 @@ class PublicStorefrontBookingView(APIView):
             request_type=data.get('request_type', 'appointment'),
             source=data.get('source') or 'PetMatch',
             contact_channel=data.get('contact_channel', 'app'),
-            status='new',
+            status=StorefrontBooking.STATUS_PENDING,
             quoted_price=service.base_price,
         )
 
@@ -1261,16 +1281,16 @@ class PublicStorefrontBookingView(APIView):
             if appointment_owner and appointment_pet:
                 appointment_type = SERVICE_CATEGORY_APPOINTMENT_TYPE.get(service.category, 'other')
 
-                existing = VeterinaryAppointment.objects.filter(
+                appointment = VeterinaryAppointment.objects.filter(
                     clinic=clinic,
                     pet=appointment_pet,
                     owner=appointment_owner,
                     scheduled_date=preferred_date,
                     scheduled_time=preferred_time,
-                ).exists()
+                ).first()
 
-                if not existing:
-                    VeterinaryAppointment.objects.create(
+                if not appointment:
+                    appointment = VeterinaryAppointment.objects.create(
                         clinic=clinic,
                         pet=appointment_pet,
                         owner=appointment_owner,
@@ -1280,13 +1300,21 @@ class PublicStorefrontBookingView(APIView):
                         duration_minutes=service.duration_minutes or 30,
                         reason=f"حجز متجر: {service.name}",
                         notes=data.get('notes') or '',
-                        status='scheduled',
+                        status=VeterinaryAppointment.STATUS_ACCEPTED,
                         payment_status='unpaid',
                         service_fee=service.base_price,
                     )
 
-                booking.status = 'confirmed'
-                booking.save(update_fields=['status'])
+                booking.confirmed_appointment = appointment
+                booking.status = StorefrontBooking.STATUS_ACCEPTED
+                booking.confirmed_at = timezone.now()
+                booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+                StorefrontBookingTimeline.objects.create(
+                    booking=booking,
+                    event_type='appointment_scheduled',
+                    message=f"تم إنشاء موعد تلقائي بتاريخ {preferred_date} الساعة {preferred_time}.",
+                    actor=None,
+                )
 
         _notify_clinic_staff_booking_created(booking)
 
@@ -1295,11 +1323,16 @@ class PublicStorefrontBookingView(APIView):
 class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     serializer_class = ClinicPatientRecordSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
         clinic = self.get_clinic()
-        queryset = ClinicPatientRecord.objects.filter(clinic=clinic).select_related('owner', 'linked_user', 'linked_pet')
+        queryset = (
+            ClinicPatientRecord.objects
+            .filter(clinic=clinic)
+            .select_related('owner', 'linked_user', 'linked_pet', 'linked_pet__breed')
+        )
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -1316,6 +1349,86 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context['clinic'] = self.get_clinic()
         return context
+
+    @action(detail=True, methods=['get'])
+    def profile(self, request, pk=None):
+        patient = (
+            ClinicPatientRecord.objects
+            .filter(clinic=self.get_clinic(), pk=pk)
+            .select_related('owner', 'linked_user', 'linked_pet', 'linked_pet__breed')
+            .prefetch_related('profile_notes__created_by', 'documents__uploaded_by', 'clinic_appointments')
+            .first()
+        )
+        if not patient:
+            raise Http404
+        serializer = ClinicPatientProfileSerializer(patient, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def notes(self, request, pk=None):
+        patient = self.get_object()
+        text = (request.data.get('text') or request.data.get('note') or '').strip()
+        if not text:
+            raise ValidationError({'text': 'نص الملاحظة مطلوب.'})
+        note = ClinicPatientNote.objects.create(
+            clinic=patient.clinic,
+            patient=patient,
+            text=text,
+            created_by=request.user,
+        )
+        serializer = ClinicPatientNoteSerializer(note, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='medical-records')
+    def medical_records(self, request, pk=None):
+        patient = self.get_object()
+        serializer = ClinicPatientMedicalRecordCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        appointment = VeterinaryAppointment.objects.create(
+            clinic=patient.clinic,
+            clinic_patient=patient,
+            pet=patient.linked_pet,
+            owner=patient.linked_user,
+            appointment_type=data['appointment_type'],
+            scheduled_date=data['scheduled_date'],
+            scheduled_time=data['scheduled_time'],
+            duration_minutes=30,
+            reason=data['reason'],
+            notes=data.get('notes') or '',
+            status=VeterinaryAppointment.STATUS_COMPLETED,
+            diagnosis=data.get('diagnosis') or '',
+            treatment=data.get('treatment') or '',
+            next_appointment=data.get('next_appointment'),
+        )
+
+        update_fields = []
+        if not patient.last_visit or data['scheduled_date'] >= patient.last_visit:
+            patient.last_visit = data['scheduled_date']
+            update_fields.append('last_visit')
+        if data.get('next_appointment'):
+            patient.next_appointment = data['next_appointment']
+            update_fields.append('next_appointment')
+        if update_fields:
+            patient.save(update_fields=update_fields)
+
+        output = ClinicAppointmentSerializer(appointment, context=self.get_serializer_context())
+        return Response(output.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def documents(self, request, pk=None):
+        patient = self.get_object()
+        serializer = ClinicPatientDocumentSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        document = ClinicPatientDocument.objects.create(
+            clinic=patient.clinic,
+            patient=patient,
+            uploaded_by=request.user,
+            **serializer.validated_data,
+        )
+        output = ClinicPatientDocumentSerializer(document, context=self.get_serializer_context())
+        return Response(output.data, status=status.HTTP_201_CREATED)
 
 
 class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -1345,7 +1458,7 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(pet_id=pet_id)
         status_param = self.request.query_params.get('status')
         if status_param:
-            queryset = queryset.filter(status=status_param)
+            queryset = queryset.filter(status=normalize_appointment_status(status_param))
         appointment_type = self.request.query_params.get('type')
         if appointment_type:
             queryset = queryset.filter(appointment_type=appointment_type)
@@ -1355,6 +1468,186 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context['clinic'] = self.get_clinic()
         return context
+
+    def _get_or_create_session(self, appointment):
+        now = timezone.now()
+        provider_name = self.request.user.get_full_name() or self.request.user.email or ''
+        session, created = VeterinarySession.objects.get_or_create(
+            appointment=appointment,
+            defaults={
+                'clinic': appointment.clinic,
+                'clinic_patient': appointment.clinic_patient,
+                'pet': appointment.pet,
+                'owner': appointment.owner,
+                'care_provider': self.request.user,
+                'care_provider_name': provider_name,
+                'session_date': timezone.localdate(),
+                'session_started_at': now,
+                'service_type': appointment.appointment_type,
+                'main_complaint': appointment.reason or '',
+                'owner_notes': appointment.notes or '',
+                'diagnosis': appointment.diagnosis or '',
+                'services_performed': appointment.treatment or '',
+                'next_appointment_date': appointment.next_appointment,
+            },
+        )
+        if not created and not session.care_provider_id:
+            session.care_provider = self.request.user
+            session.care_provider_name = provider_name
+            session.save(update_fields=['care_provider', 'care_provider_name', 'updated_at'])
+        return session
+
+    @action(detail=True, methods=['post'], url_path='start-session')
+    def start_session(self, request, pk=None):
+        with transaction.atomic():
+            appointment = self.get_queryset().select_for_update().get(pk=pk)
+            if appointment.status in {
+                VeterinaryAppointment.STATUS_CANCELLED,
+                VeterinaryAppointment.STATUS_REFUSED,
+                VeterinaryAppointment.STATUS_COMPLETED,
+                VeterinaryAppointment.STATUS_NO_SHOW,
+            }:
+                raise ValidationError({'status': 'لا يمكن بدء جلسة لهذا الموعد.'})
+            appointment.status = VeterinaryAppointment.STATUS_IN_SESSION
+            appointment.save(update_fields=['status', 'updated_at'])
+            session = self._get_or_create_session(appointment)
+
+            booking = appointment.storefront_bookings.select_for_update().first()
+            if booking and booking.status not in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                booking.status = StorefrontBooking.STATUS_IN_SESSION
+                booking.save(update_fields=['status'])
+                StorefrontBookingTimeline.objects.create(
+                    booking=booking,
+                    event_type='session_started',
+                    message='تم بدء جلسة الزيارة.',
+                    actor=request.user,
+                )
+
+        serializer = VeterinarySessionSerializer(session, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+
+class VeterinarySessionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    serializer_class = VeterinarySessionSerializer
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+    http_method_names = ['get', 'patch', 'post', 'head', 'options']
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {'detail': 'ابدأ الجلسة من الموعد أولاً.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    def get_queryset(self):
+        return (
+            VeterinarySession.objects
+            .filter(clinic=self.get_clinic())
+            .select_related(
+                'appointment',
+                'clinic',
+                'clinic_patient',
+                'clinic_patient__owner',
+                'pet',
+                'owner',
+                'care_provider',
+            )
+            .order_by('-session_started_at')
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['clinic'] = self.get_clinic()
+        return context
+
+    def _notify_owner_summary(self, session):
+        appointment = session.appointment
+        booking = appointment.storefront_bookings.select_related('customer_user', 'service', 'clinic').first()
+        message_parts = [
+            session.diagnosis or session.provisional_diagnosis,
+            session.services_performed,
+            session.home_care_instructions,
+            session.warning_signs,
+        ]
+        message = '\n'.join(part for part in message_parts if part) or 'تم إكمال جلسة الزيارة.'
+        if booking and booking.customer_user_id:
+            _enqueue_booking_push(
+                user=booking.customer_user,
+                booking=booking,
+                notification_type='clinic_session_completed',
+                title='ملخص زيارة العيادة',
+                message=message,
+                app_type=PETMATCH_APP_TYPE,
+                event_suffix=f'session_completed:{session.id}',
+                extra={
+                    'confirmed_appointment_id': appointment.id,
+                    'session_id': session.id,
+                },
+            )
+            return
+        if appointment.owner_id:
+            create_notification_once(
+                user=appointment.owner,
+                notification_type='clinic_session_completed',
+                title='ملخص زيارة العيادة',
+                message=message,
+                extra_data={
+                    'type': 'clinic_session_completed',
+                    'app_type': PETMATCH_APP_TYPE,
+                    'kind': 'veterinary_session',
+                    'appointment_id': str(appointment.id),
+                    'session_id': str(session.id),
+                    'clinic_id': str(session.clinic_id),
+                },
+                event_key=f'veterinary_session:{session.id}:completed:{appointment.owner_id}',
+            )
+
+    @action(detail=True, methods=['post'], url_path='end')
+    def end(self, request, pk=None):
+        with transaction.atomic():
+            session = self.get_queryset().select_for_update().get(pk=pk)
+            serializer = VeterinarySessionEndSerializer(
+                session,
+                data=request.data,
+                partial=True,
+                context=self.get_serializer_context(),
+            )
+            serializer.is_valid(raise_exception=True)
+            session = serializer.save(session_ended_at=timezone.now())
+            appointment = session.appointment
+            appointment.status = VeterinaryAppointment.STATUS_COMPLETED
+            appointment.diagnosis = session.diagnosis or session.provisional_diagnosis or ''
+            appointment.treatment = session.services_performed or ''
+            appointment.notes = session.doctor_notes or session.physical_exam_notes or ''
+            appointment.next_appointment = session.next_appointment_date
+            appointment.save(update_fields=[
+                'status', 'diagnosis', 'treatment', 'notes', 'next_appointment', 'updated_at'
+            ])
+            booking = appointment.storefront_bookings.select_for_update().first()
+            if booking:
+                booking.status = StorefrontBooking.STATUS_COMPLETED
+                booking.diagnosis = appointment.diagnosis
+                booking.treatment = appointment.treatment
+                booking.doctor_notes = session.doctor_notes or session.physical_exam_notes or ''
+                booking.completed_result = 'visit_completed'
+                booking.completed_at = timezone.now()
+                booking.save(update_fields=[
+                    'status', 'diagnosis', 'treatment', 'doctor_notes',
+                    'completed_result', 'completed_at',
+                ])
+                StorefrontBookingTimeline.objects.create(
+                    booking=booking,
+                    event_type='completed',
+                    message='تم إنهاء جلسة الزيارة وإرسال الملخص للمالك.',
+                    actor=request.user,
+                )
+            self._notify_owner_summary(session)
+            session.owner_summary_sent_at = timezone.now()
+            session.save(update_fields=['owner_summary_sent_at', 'updated_at'])
+        return Response(VeterinarySessionSerializer(session, context=self.get_serializer_context()).data)
 
 
 class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -1628,14 +1921,21 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         queryset = (
             StorefrontBooking.objects
             .filter(clinic=clinic)
-            .select_related('service', 'customer_user', 'confirmed_appointment')
-            .prefetch_related('proposals')
+            .select_related(
+                'service',
+                'customer_user',
+                'confirmed_appointment',
+                'linked_patient',
+                'linked_patient__owner',
+                'assigned_staff',
+            )
+            .prefetch_related('proposals', 'timeline_events__actor')
             .order_by('-created_at')
         )
 
         status_param = self.request.query_params.get('status')
         if status_param:
-            queryset = queryset.filter(status=status_param)
+            queryset = queryset.filter(status=normalize_booking_status(status_param))
 
         search = self.request.query_params.get('search')
         if search:
@@ -1757,7 +2057,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             appointment.duration_minutes = duration
             appointment.reason = f"حجز متجر: {service.name}"
             appointment.notes = notes
-            appointment.status = 'scheduled'
+            appointment.status = VeterinaryAppointment.STATUS_ACCEPTED
             appointment.service_fee = booking.quoted_price or service.base_price
             appointment.save(update_fields=[
                 'appointment_type', 'scheduled_date', 'scheduled_time', 'duration_minutes',
@@ -1776,7 +2076,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             'duration_minutes': duration,
             'reason': f"حجز متجر: {service.name}",
             'notes': notes,
-            'status': 'scheduled',
+            'status': VeterinaryAppointment.STATUS_ACCEPTED,
             'payment_status': 'unpaid',
             'service_fee': booking.quoted_price or service.base_price,
         }
@@ -1796,9 +2096,69 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer = StorefrontBookingSerializer(booking, context=self.get_serializer_context())
         return Response(serializer.data)
 
+    def _add_timeline(self, booking, event_type, message, actor=None):
+        return StorefrontBookingTimeline.objects.create(
+            booking=booking,
+            event_type=event_type,
+            message=message,
+            actor=actor,
+        )
+
+    def _set_status(self, booking, next_status, event_type, message, actor=None, update_fields=None):
+        booking.status = next_status
+        fields = ['status']
+        if update_fields:
+            fields.extend(update_fields)
+        booking.save(update_fields=list(dict.fromkeys(fields)))
+        self._add_timeline(booking, event_type, message, actor=actor)
+        return booking
+
     @action(detail=True, methods=['post'], url_path='accept')
     def accept(self, request, public_id=None):
-        serializer = StorefrontBookingAcceptSerializer(data=request.data)
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
+                raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
+            scheduled_date = request.data.get('scheduled_date') or booking.preferred_date
+            scheduled_time = request.data.get('scheduled_time') or booking.preferred_time
+            if scheduled_date and scheduled_time:
+                appointment = self._create_or_update_appointment(
+                    booking,
+                    scheduled_date=scheduled_date,
+                    scheduled_time=scheduled_time,
+                    duration_minutes=request.data.get('duration_minutes'),
+                    note=request.data.get('note'),
+                )
+                booking.confirmed_appointment = appointment
+            booking.confirmed_at = timezone.now()
+            booking.cancelled_at = None
+            booking.cancelled_reason = None
+            self._set_status(
+                booking,
+                StorefrontBooking.STATUS_ACCEPTED,
+                'accepted',
+                f"تم قبول الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
+                actor=request.user,
+                update_fields=['confirmed_appointment', 'confirmed_at', 'cancelled_at', 'cancelled_reason'],
+            )
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+
+        self._notify_customer(
+            booking,
+            'تم قبول طلبك',
+            f"قبلت عيادة {booking.clinic.name} طلب {booking.service.name}.",
+            'accepted',
+            'clinic_request_accepted',
+            extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='schedule-appointment')
+    def schedule_appointment(self, request, public_id=None):
+        serializer = StorefrontBookingScheduleSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
@@ -1807,9 +2167,13 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             scheduled_date = data.get('scheduled_date') or booking.preferred_date
             scheduled_time = data.get('scheduled_time') or booking.preferred_time
             if not scheduled_date or not scheduled_time:
-                raise ValidationError({'scheduled_date': 'التاريخ والوقت مطلوبان لتأكيد الطلب.'})
-            if booking.status == 'cancelled':
-                raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
+                raise ValidationError({'scheduled_date': 'التاريخ والوقت مطلوبان لحجز الموعد.'})
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن حجز موعد لهذا الطلب.'})
 
             appointment = self._create_or_update_appointment(
                 booking,
@@ -1819,23 +2183,21 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
                 note=data.get('note'),
             )
             booking.confirmed_appointment = appointment
-            booking.status = 'confirmed'
+            booking.status = StorefrontBooking.STATUS_ACCEPTED
             booking.confirmed_at = timezone.now()
-            booking.cancelled_at = None
-            booking.cancelled_reason = None
-            booking.save(update_fields=[
-                'confirmed_appointment', 'status', 'confirmed_at', 'cancelled_at', 'cancelled_reason'
-            ])
-            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
-                status=StorefrontBookingProposal.STATUS_CANCELLED,
-                responded_at=timezone.now(),
+            booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+            self._add_timeline(
+                booking,
+                'appointment_scheduled',
+                f"تم حجز موعد بتاريخ {scheduled_date} الساعة {scheduled_time}.",
+                actor=request.user,
             )
 
         self._notify_customer(
             booking,
             'تم تأكيد موعدك',
             f"تم تأكيد موعد {booking.service.name}.",
-            'accepted',
+            'appointment_scheduled',
             'clinic_booking_confirmed',
             extra={
                 'confirmed_appointment_id': booking.confirmed_appointment_id,
@@ -1845,6 +2207,134 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         )
         return self._serialize_booking(booking)
 
+    @action(detail=True, methods=['post'], url_path='start-processing')
+    def start_processing(self, request, public_id=None):
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن بدء معالجة هذا الطلب.'})
+            self._set_status(
+                booking,
+                StorefrontBooking.STATUS_IN_SESSION,
+                'processing_started',
+                f"بدأت معالجة الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
+                actor=request.user,
+            )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='ask-info')
+    def ask_info(self, request, public_id=None):
+        serializer = StorefrontBookingNoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = serializer.validated_data['note']
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن طلب معلومات لهذا الطلب.'})
+            booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, f"طلب معلومات: {note}"]))
+            booking.save(update_fields=['internal_notes'])
+            self._set_status(
+                booking,
+                StorefrontBooking.STATUS_PENDING,
+                'waiting_owner',
+                f"تم طلب معلومات من المالك: {note}",
+                actor=request.user,
+            )
+        self._notify_customer(
+            booking,
+            'تحتاج العيادة معلومات إضافية',
+            note,
+            'ask_info',
+            'clinic_request_waiting_owner',
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='assign')
+    def assign(self, request, public_id=None):
+        serializer = StorefrontBookingAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        staff_id = serializer.validated_data.get('staff_id')
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            staff = None
+            if staff_id:
+                staff_member = ClinicStaff.objects.select_related('user').filter(
+                    clinic=booking.clinic,
+                    user_id=staff_id,
+                ).first()
+                if not staff_member:
+                    raise ValidationError({'staff_id': 'هذا الموظف لا ينتمي لهذه العيادة.'})
+                staff = staff_member.user
+            booking.assigned_staff = staff
+            booking.save(update_fields=['assigned_staff'])
+            label = staff.get_full_name() or staff.email if staff else 'بدون موظف'
+            self._add_timeline(booking, 'assigned', f"تم تعيين الطلب إلى {label}.", actor=request.user)
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='link-patient')
+    def link_patient(self, request, public_id=None):
+        serializer = StorefrontBookingPatientLinkSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        patient_id = serializer.validated_data.get('patient_id')
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if patient_id:
+                patient = ClinicPatientRecord.objects.filter(clinic=booking.clinic, id=patient_id).first()
+                if not patient:
+                    raise ValidationError({'patient_id': 'ملف المريض غير موجود في هذه العيادة.'})
+            else:
+                patient = self._get_or_create_booking_patient(booking)
+            booking.linked_patient = patient
+            booking.save(update_fields=['linked_patient'])
+            self._add_timeline(
+                booking,
+                'patient_linked',
+                f"تم ربط الطلب بملف المريض {patient.name}.",
+                actor=request.user,
+            )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='notes')
+    def notes(self, request, public_id=None):
+        serializer = StorefrontBookingNoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = serializer.validated_data['note']
+        visibility = serializer.validated_data.get('visibility') or 'internal'
+        with transaction.atomic():
+            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            if visibility == 'doctor':
+                booking.doctor_notes = '\n'.join(filter(None, [booking.doctor_notes, note]))
+                booking.save(update_fields=['doctor_notes'])
+                event_type = 'doctor_note'
+                message = f"ملاحظة الطبيب: {note}"
+            elif visibility == 'owner':
+                booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, f"تحديث للمالك: {note}"]))
+                booking.save(update_fields=['internal_notes'])
+                event_type = 'owner_update'
+                message = f"تم إرسال تحديث للمالك: {note}"
+                self._notify_customer(
+                    booking,
+                    'تحديث من العيادة',
+                    note,
+                    'owner_update',
+                    'clinic_request_owner_update',
+                )
+            else:
+                booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, note]))
+                booking.save(update_fields=['internal_notes'])
+                event_type = 'internal_note'
+                message = f"ملاحظة داخلية: {note}"
+            self._add_timeline(booking, event_type, message, actor=request.user)
+        return self._serialize_booking(booking)
+
     @action(detail=True, methods=['post'], url_path='reject')
     def reject(self, request, public_id=None):
         serializer = StorefrontBookingRejectSerializer(data=request.data)
@@ -1852,10 +2342,16 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         reason = serializer.validated_data.get('reason') or ''
         with transaction.atomic():
             booking = self.get_queryset().select_for_update().get(public_id=public_id)
-            booking.status = 'cancelled'
+            booking.status = StorefrontBooking.STATUS_REFUSED
             booking.cancelled_reason = reason
             booking.cancelled_at = timezone.now()
             booking.save(update_fields=['status', 'cancelled_reason', 'cancelled_at'])
+            self._add_timeline(
+                booking,
+                'rejected',
+                reason or 'تم رفض الطلب من العيادة.',
+                actor=request.user,
+            )
             booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
                 status=StorefrontBookingProposal.STATUS_CANCELLED,
                 responded_at=timezone.now(),
@@ -1877,7 +2373,11 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         data = serializer.validated_data
         with transaction.atomic():
             booking = self.get_queryset().select_for_update().get(public_id=public_id)
-            if booking.status in {'cancelled', 'completed'}:
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
                 raise ValidationError({'status': 'لا يمكن اقتراح موعد لهذا الطلب.'})
             booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
                 status=StorefrontBookingProposal.STATUS_CANCELLED,
@@ -1891,8 +2391,14 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
                 note=data.get('note'),
                 proposed_by=request.user,
             )
-            booking.status = 'counter_proposed'
+            booking.status = StorefrontBooking.STATUS_PENDING
             booking.save(update_fields=['status'])
+            self._add_timeline(
+                booking,
+                'waiting_owner',
+                f"تم اقتراح موعد جديد بتاريخ {proposal.proposed_date} الساعة {proposal.proposed_time}.",
+                actor=request.user,
+            )
         self._notify_customer(
             booking,
             'اقتراح موعد جديد',
@@ -1909,22 +2415,51 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='complete')
     def complete(self, request, public_id=None):
+        serializer = StorefrontBookingCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
         with transaction.atomic():
             booking = self.get_queryset().select_for_update().get(public_id=public_id)
-            if booking.status != 'confirmed':
-                raise ValidationError({'status': 'يجب تأكيد الطلب قبل إكماله.'})
-            booking.status = 'completed'
+            if booking.status not in {
+                StorefrontBooking.STATUS_ACCEPTED,
+                StorefrontBooking.STATUS_IN_SESSION,
+                StorefrontBooking.STATUS_PENDING,
+            }:
+                raise ValidationError({'status': 'يجب قبول الطلب أو بدء معالجته قبل إكماله.'})
+            for field in ['internal_notes', 'doctor_notes', 'diagnosis', 'treatment', 'price_estimate', 'completed_result']:
+                if field in data:
+                    setattr(booking, field, data.get(field))
+            booking.status = StorefrontBooking.STATUS_COMPLETED
             booking.completed_at = timezone.now()
-            booking.save(update_fields=['status', 'completed_at'])
+            booking.save(update_fields=[
+                'internal_notes', 'doctor_notes', 'diagnosis', 'treatment',
+                'price_estimate', 'completed_result', 'status', 'completed_at'
+            ])
             if booking.confirmed_appointment_id:
-                booking.confirmed_appointment.status = 'completed'
-                booking.confirmed_appointment.save(update_fields=['status', 'updated_at'])
+                booking.confirmed_appointment.status = VeterinaryAppointment.STATUS_COMPLETED
+                if data.get('diagnosis') is not None:
+                    booking.confirmed_appointment.diagnosis = data.get('diagnosis') or ''
+                if data.get('treatment') is not None:
+                    booking.confirmed_appointment.treatment = data.get('treatment') or ''
+                if data.get('doctor_notes') is not None:
+                    booking.confirmed_appointment.notes = data.get('doctor_notes') or ''
+                if data.get('next_appointment') is not None:
+                    booking.confirmed_appointment.next_appointment = data.get('next_appointment')
+                booking.confirmed_appointment.save(update_fields=[
+                    'status', 'diagnosis', 'treatment', 'notes', 'next_appointment', 'updated_at'
+                ])
+            self._add_timeline(
+                booking,
+                'completed',
+                f"تم إكمال الطلب بنتيجة {booking.get_completed_result_display() or 'مكتمل'}.",
+                actor=request.user,
+            )
         self._notify_customer(
             booking,
             'اكتمل موعدك',
-            f"تم إكمال موعد {booking.service.name}.",
+            f"تم إكمال طلب {booking.service.name}.",
             'completed',
-            'clinic_booking_completed',
+            'clinic_request_completed',
             extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
         )
         return self._serialize_booking(booking)
@@ -1986,9 +2521,15 @@ class PublicStorefrontBookingProposalRespondView(APIView):
                 responded_at=timezone.now(),
             )
             booking.confirmed_appointment = appointment
-            booking.status = 'confirmed'
+            booking.status = StorefrontBooking.STATUS_ACCEPTED
             booking.confirmed_at = timezone.now()
             booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+            StorefrontBookingTimeline.objects.create(
+                booking=booking,
+                event_type='appointment_scheduled',
+                message=f"وافق المالك على الموعد المقترح بتاريخ {proposal.proposed_date} الساعة {proposal.proposed_time}.",
+                actor=None,
+            )
 
         return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
 
@@ -2474,7 +3015,14 @@ class ClinicRecipientGroupsView(ClinicContextMixin, APIView):
         )
         upcoming_owner_ids = set(
             VeterinaryAppointment.objects
-            .filter(clinic=clinic, scheduled_date__gte=today, status__in=['scheduled', 'rescheduled'])
+            .filter(
+                clinic=clinic,
+                scheduled_date__gte=today,
+                status__in=[
+                    VeterinaryAppointment.STATUS_ACCEPTED,
+                    VeterinaryAppointment.STATUS_IN_SESSION,
+                ],
+            )
             .values_list('owner_id', flat=True)
         )
         active_ids = set(owner_ids) & (active_owner_ids | upcoming_owner_ids)
@@ -2482,7 +3030,11 @@ class ClinicRecipientGroupsView(ClinicContextMixin, APIView):
         # Overdue: scheduled in past and still scheduled
         overdue_ids = set(
             VeterinaryAppointment.objects
-            .filter(clinic=clinic, scheduled_date__lt=today, status='scheduled')
+            .filter(
+                clinic=clinic,
+                scheduled_date__lt=today,
+                status=VeterinaryAppointment.STATUS_ACCEPTED,
+            )
             .values_list('owner_id', flat=True)
         )
         overdue_ids = set(owner_ids) & overdue_ids
