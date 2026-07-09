@@ -8,6 +8,7 @@ from .views import (
     ClinicClientsView,
     ClinicSettingsView,
     ClinicAppointmentViewSet,
+    VeterinarySessionViewSet,
     ClinicServiceViewSet,
     PlatformAdminClinicListView,
     PlatformAdminClinicServiceViewSet,
@@ -42,6 +43,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register(r'appointments', ClinicAppointmentViewSet, basename='clinic-appointments')
+router.register(r'sessions', VeterinarySessionViewSet, basename='clinic-sessions')
 router.register(r'services', ClinicServiceViewSet, basename='clinic-services')
 router.register(r'admin/services', PlatformAdminClinicServiceViewSet, basename='platform-admin-services')
 router.register(r'products', ClinicProductViewSet, basename='clinic-products')
