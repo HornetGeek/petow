@@ -26,7 +26,7 @@ from .models import (
     StorefrontBookingTimeline,
     VeterinaryAppointment,
 )
-from .views import ClinicMapMarkersView
+from .views import ClinicMapMarkersView, ClinicStorefrontBookingViewSet
 
 
 User = get_user_model()
@@ -114,6 +114,24 @@ class StorefrontBookingWorkflowTests(TestCase):
             quoted_price=250,
         )
         self.client.force_authenticate(self.staff)
+
+    def test_booking_for_update_does_not_use_nullable_select_related_joins(self):
+        factory = APIRequestFactory()
+        request = factory.post(
+            reverse('clinic-storefront-bookings-accept', kwargs={'public_id': self.booking.public_id}),
+            {},
+            format='json',
+        )
+        request.user = self.staff
+        view = ClinicStorefrontBookingViewSet()
+        view.request = request
+        view.action = 'accept'
+        view.kwargs = {'public_id': self.booking.public_id}
+
+        booking = view._get_booking_for_update(self.booking.public_id)
+
+        self.assertEqual(booking, self.booking)
+        self.assertFalse(booking._state.fields_cache)
 
     def test_public_app_booking_notifies_clinic_staff(self):
         self.client.force_authenticate(None)

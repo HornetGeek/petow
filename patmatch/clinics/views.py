@@ -2023,6 +2023,13 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             return StorefrontBookingUpdateSerializer
         return StorefrontBookingSerializer
 
+    def _get_booking_for_update(self, public_id):
+        queryset = (
+            StorefrontBooking.objects
+            .select_for_update()
+        )
+        return get_object_or_404(queryset, clinic=self.get_clinic(), public_id=public_id)
+
     def _notify_customer(self, booking, title, message, event_suffix, notification_type, extra=None):
         if not booking.customer_user_id:
             return
@@ -2205,7 +2212,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             data = serializer.validated_data
 
             with transaction.atomic():
-                booking = self.get_queryset().select_for_update().get(public_id=public_id)
+                booking = self._get_booking_for_update(public_id)
                 if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
                     raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
                 scheduled_date = data.get('scheduled_date')
@@ -2263,7 +2270,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         data = serializer.validated_data
 
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             scheduled_date = data.get('scheduled_date') or booking.preferred_date
             scheduled_time = data.get('scheduled_time') or booking.preferred_time
             if not scheduled_date or not scheduled_time:
@@ -2310,7 +2317,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='start-processing')
     def start_processing(self, request, public_id=None):
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             if booking.status in {
                 StorefrontBooking.STATUS_CANCELLED,
                 StorefrontBooking.STATUS_REFUSED,
@@ -2332,7 +2339,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         note = serializer.validated_data['note']
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             if booking.status in {
                 StorefrontBooking.STATUS_CANCELLED,
                 StorefrontBooking.STATUS_REFUSED,
@@ -2363,7 +2370,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         staff_id = serializer.validated_data.get('staff_id')
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             staff = None
             if staff_id:
                 staff_member = ClinicStaff.objects.select_related('user').filter(
@@ -2385,7 +2392,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         patient_id = serializer.validated_data.get('patient_id')
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             if patient_id:
                 patient = ClinicPatientRecord.objects.filter(clinic=booking.clinic, id=patient_id).first()
                 if not patient:
@@ -2409,7 +2416,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         note = serializer.validated_data['note']
         visibility = serializer.validated_data.get('visibility') or 'internal'
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             if visibility == 'doctor':
                 booking.doctor_notes = '\n'.join(filter(None, [booking.doctor_notes, note]))
                 booking.save(update_fields=['doctor_notes'])
@@ -2441,7 +2448,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         reason = serializer.validated_data.get('reason') or ''
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             booking.status = StorefrontBooking.STATUS_REFUSED
             booking.cancelled_reason = reason
             booking.cancelled_at = timezone.now()
@@ -2472,7 +2479,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             if booking.status in {
                 StorefrontBooking.STATUS_CANCELLED,
                 StorefrontBooking.STATUS_REFUSED,
@@ -2519,7 +2526,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
+            booking = self._get_booking_for_update(public_id)
             if booking.status not in {
                 StorefrontBooking.STATUS_ACCEPTED,
                 StorefrontBooking.STATUS_IN_SESSION,
