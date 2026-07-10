@@ -2084,19 +2084,25 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
                 phone=booking.customer_phone,
             )
 
-        patient, created = ClinicPatientRecord.objects.get_or_create(
-            clinic=booking.clinic,
-            owner=owner,
-            name=booking.pet_name or f"حيوان {booking.customer_name or booking.customer_phone}",
-            defaults={
-                'species': booking.pet_type or 'غير محدد',
-                'breed': booking.pet_breed,
-                'age_text': booking.pet_age or '',
-                'linked_user': booking.customer_user,
-                'notes': booking.notes or '',
-            },
+        patient_name = booking.pet_name or f"حيوان {booking.customer_name or booking.customer_phone}"
+        patient = (
+            ClinicPatientRecord.objects
+            .filter(clinic=booking.clinic, owner=owner, name=patient_name)
+            .order_by('id')
+            .first()
         )
-        if not created:
+        if not patient:
+            patient = ClinicPatientRecord.objects.create(
+                clinic=booking.clinic,
+                owner=owner,
+                name=patient_name,
+                species=booking.pet_type or 'غير محدد',
+                breed=booking.pet_breed,
+                age_text=booking.pet_age or '',
+                linked_user=booking.customer_user,
+                notes=booking.notes or '',
+            )
+        else:
             updates = {}
             if booking.pet_type and not patient.species:
                 updates['species'] = booking.pet_type
@@ -2159,7 +2165,13 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             lookup['clinic_patient'] = patient
             defaults['clinic_patient'] = patient
 
-        appointment, _ = VeterinaryAppointment.objects.get_or_create(**lookup, defaults=defaults)
+        appointment = VeterinaryAppointment.objects.filter(**lookup).order_by('id').first()
+        if appointment:
+            for field, value in defaults.items():
+                setattr(appointment, field, value)
+            appointment.save(update_fields=list(defaults.keys()) + ['updated_at'])
+        else:
+            appointment = VeterinaryAppointment.objects.create(**lookup, **defaults)
         booking.confirmed_appointment = appointment
         return appointment
 
@@ -2186,19 +2198,23 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='accept')
     def accept(self, request, public_id=None):
+        serializer = StorefrontBookingAcceptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
         with transaction.atomic():
             booking = self.get_queryset().select_for_update().get(public_id=public_id)
             if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
                 raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
-            scheduled_date = request.data.get('scheduled_date') or booking.preferred_date
-            scheduled_time = request.data.get('scheduled_time') or booking.preferred_time
+            scheduled_date = data.get('scheduled_date')
+            scheduled_time = data.get('scheduled_time')
             if scheduled_date and scheduled_time:
                 appointment = self._create_or_update_appointment(
                     booking,
                     scheduled_date=scheduled_date,
                     scheduled_time=scheduled_time,
-                    duration_minutes=request.data.get('duration_minutes'),
-                    note=request.data.get('note'),
+                    duration_minutes=data.get('duration_minutes'),
+                    note=data.get('note'),
                 )
                 booking.confirmed_appointment = appointment
             booking.confirmed_at = timezone.now()
