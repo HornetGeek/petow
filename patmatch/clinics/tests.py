@@ -269,6 +269,84 @@ class StorefrontBookingWorkflowTests(TestCase):
             ).exists()
         )
 
+    def test_accept_with_scheduled_payload_reuses_duplicate_patient_match(self):
+        owner = ClinicClientRecord.objects.create(
+            clinic=self.clinic,
+            full_name='Sara',
+            phone=self.booking.customer_phone,
+        )
+        first_patient = ClinicPatientRecord.objects.create(
+            clinic=self.clinic,
+            owner=owner,
+            name=self.booking.pet_name,
+            species='cats',
+        )
+        ClinicPatientRecord.objects.create(
+            clinic=self.clinic,
+            owner=owner,
+            name=self.booking.pet_name,
+            species='cats',
+            breed='Persian',
+        )
+
+        response = self.client.post(
+            reverse('clinic-storefront-bookings-accept', kwargs={'public_id': self.booking.public_id}),
+            {'scheduled_date': '2026-07-03', 'scheduled_time': '10:00:00'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_ACCEPTED)
+        self.assertIsNotNone(self.booking.confirmed_appointment_id)
+        self.assertEqual(self.booking.confirmed_appointment.clinic_patient, first_patient)
+
+    def test_schedule_booking_reuses_duplicate_matching_appointment(self):
+        owner = ClinicClientRecord.objects.create(
+            clinic=self.clinic,
+            full_name='Sara',
+            phone=self.booking.customer_phone,
+        )
+        patient = ClinicPatientRecord.objects.create(
+            clinic=self.clinic,
+            owner=owner,
+            name=self.booking.pet_name,
+            species='cats',
+        )
+        first_appointment = VeterinaryAppointment.objects.create(
+            clinic=self.clinic,
+            clinic_patient=patient,
+            scheduled_date=date(2026, 7, 3),
+            scheduled_time=time(10, 0),
+            duration_minutes=30,
+            reason='حجز قديم',
+            status=VeterinaryAppointment.STATUS_ACCEPTED,
+        )
+        VeterinaryAppointment.objects.create(
+            clinic=self.clinic,
+            clinic_patient=patient,
+            scheduled_date=date(2026, 7, 3),
+            scheduled_time=time(10, 0),
+            duration_minutes=30,
+            reason='حجز مكرر',
+            status=VeterinaryAppointment.STATUS_ACCEPTED,
+        )
+
+        response = self.client.post(
+            reverse(
+                'clinic-storefront-bookings-schedule-appointment',
+                kwargs={'public_id': self.booking.public_id},
+            ),
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.confirmed_appointment, first_appointment)
+        first_appointment.refresh_from_db()
+        self.assertEqual(first_appointment.reason, 'حجز متجر: تطعيم')
+
     def test_accept_booking_notifies_customer_with_push_outbox(self):
         customer = User.objects.create_user(
             username='booking-customer@example.com',
