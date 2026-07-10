@@ -2198,50 +2198,63 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='accept')
     def accept(self, request, public_id=None):
-        serializer = StorefrontBookingAcceptSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
+        booking = None
+        try:
+            serializer = StorefrontBookingAcceptSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            data = serializer.validated_data
 
-        with transaction.atomic():
-            booking = self.get_queryset().select_for_update().get(public_id=public_id)
-            if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
-                raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
-            scheduled_date = data.get('scheduled_date')
-            scheduled_time = data.get('scheduled_time')
-            if scheduled_date and scheduled_time:
-                appointment = self._create_or_update_appointment(
+            with transaction.atomic():
+                booking = self.get_queryset().select_for_update().get(public_id=public_id)
+                if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
+                    raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
+                scheduled_date = data.get('scheduled_date')
+                scheduled_time = data.get('scheduled_time')
+                if scheduled_date and scheduled_time:
+                    appointment = self._create_or_update_appointment(
+                        booking,
+                        scheduled_date=scheduled_date,
+                        scheduled_time=scheduled_time,
+                        duration_minutes=data.get('duration_minutes'),
+                        note=data.get('note'),
+                    )
+                    booking.confirmed_appointment = appointment
+                booking.confirmed_at = timezone.now()
+                booking.cancelled_at = None
+                booking.cancelled_reason = None
+                self._set_status(
                     booking,
-                    scheduled_date=scheduled_date,
-                    scheduled_time=scheduled_time,
-                    duration_minutes=data.get('duration_minutes'),
-                    note=data.get('note'),
+                    StorefrontBooking.STATUS_ACCEPTED,
+                    'accepted',
+                    f"تم قبول الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
+                    actor=request.user,
+                    update_fields=['confirmed_appointment', 'confirmed_at', 'cancelled_at', 'cancelled_reason'],
                 )
-                booking.confirmed_appointment = appointment
-            booking.confirmed_at = timezone.now()
-            booking.cancelled_at = None
-            booking.cancelled_reason = None
-            self._set_status(
-                booking,
-                StorefrontBooking.STATUS_ACCEPTED,
-                'accepted',
-                f"تم قبول الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
-                actor=request.user,
-                update_fields=['confirmed_appointment', 'confirmed_at', 'cancelled_at', 'cancelled_reason'],
-            )
-            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
-                status=StorefrontBookingProposal.STATUS_CANCELLED,
-                responded_at=timezone.now(),
-            )
+                booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                    status=StorefrontBookingProposal.STATUS_CANCELLED,
+                    responded_at=timezone.now(),
+                )
 
-        self._notify_customer(
-            booking,
-            'تم قبول طلبك',
-            f"قبلت عيادة {booking.clinic.name} طلب {booking.service.name}.",
-            'accepted',
-            'clinic_request_accepted',
-            extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
-        )
-        return self._serialize_booking(booking)
+            self._notify_customer(
+                booking,
+                'تم قبول طلبك',
+                f"قبلت عيادة {booking.clinic.name} طلب {booking.service.name}.",
+                'accepted',
+                'clinic_request_accepted',
+                extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
+            )
+            return self._serialize_booking(booking)
+        except ValidationError:
+            raise
+        except Exception:
+            logger.exception(
+                'Storefront booking accept failed public_id=%s booking_id=%s user_id=%s payload_keys=%s',
+                public_id,
+                getattr(booking, 'id', None),
+                getattr(request.user, 'id', None),
+                sorted(request.data.keys()) if hasattr(request.data, 'keys') else None,
+            )
+            raise
 
     @action(detail=True, methods=['post'], url_path='schedule-appointment')
     def schedule_appointment(self, request, public_id=None):
