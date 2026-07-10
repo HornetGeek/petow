@@ -1416,6 +1416,77 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         output = ClinicAppointmentSerializer(appointment, context=self.get_serializer_context())
         return Response(output.data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['post'], url_path='sessions/complete')
+    def complete_session(self, request, pk=None):
+        patient = self.get_object()
+        session_data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        appointment_type = session_data.pop('appointment_type', 'checkup') or 'checkup'
+        scheduled_date = session_data.pop('scheduled_date', timezone.localdate())
+        scheduled_time = session_data.pop('scheduled_time', timezone.localtime().time().replace(second=0, microsecond=0))
+
+        with transaction.atomic():
+            appointment = VeterinaryAppointment.objects.create(
+                clinic=patient.clinic,
+                clinic_patient=patient,
+                pet=patient.linked_pet,
+                owner=patient.linked_user,
+                appointment_type=appointment_type,
+                scheduled_date=scheduled_date,
+                scheduled_time=scheduled_time,
+                duration_minutes=30,
+                reason=session_data.get('main_complaint') or '',
+                notes=session_data.get('doctor_notes') or session_data.get('physical_exam_notes') or '',
+                status=VeterinaryAppointment.STATUS_COMPLETED,
+                diagnosis=session_data.get('diagnosis') or session_data.get('provisional_diagnosis') or '',
+                treatment=session_data.get('services_performed') or '',
+                next_appointment=session_data.get('next_appointment_date'),
+            )
+            now = timezone.now()
+            provider_name = request.user.get_full_name() or request.user.email or ''
+            session = VeterinarySession.objects.create(
+                appointment=appointment,
+                clinic=patient.clinic,
+                clinic_patient=patient,
+                pet=patient.linked_pet,
+                owner=patient.linked_user,
+                care_provider=request.user,
+                care_provider_name=session_data.get('care_provider_name') or provider_name,
+                session_date=scheduled_date,
+                session_started_at=now,
+                session_ended_at=now,
+                service_type=appointment_type,
+            )
+            serializer = VeterinarySessionEndSerializer(
+                session,
+                data=session_data,
+                partial=True,
+                context=self.get_serializer_context(),
+            )
+            serializer.is_valid(raise_exception=True)
+            session = serializer.save(session_ended_at=now)
+
+            appointment.reason = session.main_complaint or appointment.reason
+            appointment.notes = session.doctor_notes or session.physical_exam_notes or ''
+            appointment.diagnosis = session.diagnosis or session.provisional_diagnosis or ''
+            appointment.treatment = session.services_performed or ''
+            appointment.next_appointment = session.next_appointment_date
+            appointment.save(update_fields=[
+                'reason', 'notes', 'diagnosis', 'treatment', 'next_appointment', 'updated_at'
+            ])
+
+            update_fields = []
+            if not patient.last_visit or appointment.scheduled_date >= patient.last_visit:
+                patient.last_visit = appointment.scheduled_date
+                update_fields.append('last_visit')
+            if appointment.next_appointment:
+                patient.next_appointment = appointment.next_appointment
+                update_fields.append('next_appointment')
+            if update_fields:
+                patient.save(update_fields=update_fields)
+
+        output = VeterinarySessionSerializer(session, context=self.get_serializer_context())
+        return Response(output.data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['post'])
     def documents(self, request, pk=None):
         patient = self.get_object()
