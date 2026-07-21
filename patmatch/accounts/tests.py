@@ -379,6 +379,7 @@ class PasswordResetOtpSecurityTests(APITestCase):
     BREVO_API_KEY='test-api-key',
     BREVO_FROM_EMAIL='noreply@petow.app',
     BREVO_FROM_NAME='Petow',
+    BREVO_REPLY_TO_EMAIL='support@petow.app',
     BREVO_REQUEST_TIMEOUT_SECONDS=5.0,
     BREVO_MAX_RETRIES=2,
     BREVO_RETRY_BACKOFF_SECONDS=0.1,
@@ -428,6 +429,23 @@ class BrevoEmailBackendTests(SimpleTestCase):
         self.assertEqual(post_mock.call_count, 1)
         sleep_mock.assert_not_called()
         self.assertEqual(exc_context.exception.classification, 'invalid_payload')
+
+    def test_uses_default_reply_to_when_message_has_none(self):
+        backend = BrevoEmailBackend(fail_silently=False)
+        email = self._email()
+
+        email_data, _category = backend._build_email_payload(email)
+
+        self.assertEqual(email_data['replyTo'], {'email': 'support@petow.app'})
+
+    def test_message_reply_to_overrides_default_reply_to(self):
+        backend = BrevoEmailBackend(fail_silently=False)
+        email = self._email()
+        email.reply_to = ['owner@example.com']
+
+        email_data, _category = backend._build_email_payload(email)
+
+        self.assertEqual(email_data['replyTo'], {'email': 'owner@example.com'})
 
 
 class EmailRenderingTests(SimpleTestCase):

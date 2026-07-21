@@ -97,6 +97,7 @@ from .serializers import (
     ClinicPatientMedicalRecordCreateSerializer,
     ClinicPatientNoteSerializer,
     ClinicPatientProfileSerializer,
+    get_or_create_patient_record_for_pet,
     ClinicInviteSerializer,
     VeterinarianSerializer,
 )
@@ -1157,6 +1158,23 @@ class PublicStorefrontOrderView(APIView):
         if not customer_name or not customer_phone:
             raise ValidationError({'detail': 'الاسم ورقم الهاتف مطلوبان'})
 
+        product_ids = [item['product_id'] for item in items]
+        products_by_id = {
+            product.id: product
+            for product in ClinicProduct.objects.filter(
+                id__in=product_ids,
+                clinic=clinic,
+                is_active=True,
+            )
+        }
+        if len(products_by_id) != len(set(product_ids)):
+            raise ValidationError({'items': ['بعض المنتجات غير متاحة']})
+
+        order_currencies = {product.currency or 'EGP' for product in products_by_id.values()}
+        if len(order_currencies) > 1:
+            raise ValidationError({'currency': 'لا يمكن طلب منتجات بعملات مختلفة في طلب واحد.'})
+        order_currency = next(iter(order_currencies), 'EGP')
+
         with transaction.atomic():
             order = StorefrontOrder.objects.create(
                 clinic=clinic,
@@ -1166,16 +1184,12 @@ class PublicStorefrontOrderView(APIView):
                 delivery_address=delivery_address,
                 notes=notes,
                 status='new',
+                currency=order_currency,
             )
 
             total = Decimal('0')
             for item in items:
-                product = get_object_or_404(
-                    ClinicProduct,
-                    id=item['product_id'],
-                    clinic=clinic,
-                    is_active=True
-                )
+                product = products_by_id[item['product_id']]
                 quantity = item['quantity']
                 unit_price = Decimal(str(product.price))
                 line_total = unit_price * quantity
@@ -1232,6 +1246,7 @@ class PublicStorefrontBookingView(APIView):
             contact_channel=data.get('contact_channel', 'app'),
             status=StorefrontBooking.STATUS_PENDING,
             quoted_price=service.base_price,
+            quoted_currency=service.currency or 'EGP',
         )
 
         request_type = data.get('request_type', 'appointment')
@@ -1305,10 +1320,21 @@ class PublicStorefrontBookingView(APIView):
                         service_fee=service.base_price,
                     )
 
+                patient = appointment.clinic_patient
+                if not patient and appointment.pet_id:
+                    patient = get_or_create_patient_record_for_pet(
+                        clinic,
+                        appointment.pet,
+                        appointment.owner,
+                    )
+                    appointment.clinic_patient = patient
+                    appointment.save(update_fields=['clinic_patient', 'updated_at'])
+
                 booking.confirmed_appointment = appointment
+                booking.linked_patient = patient
                 booking.status = StorefrontBooking.STATUS_ACCEPTED
                 booking.confirmed_at = timezone.now()
-                booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+                booking.save(update_fields=['confirmed_appointment', 'linked_patient', 'status', 'confirmed_at'])
                 StorefrontBookingTimeline.objects.create(
                     booking=booking,
                     event_type='appointment_scheduled',
@@ -2135,6 +2161,15 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
         appointment = booking.confirmed_appointment
         if appointment:
+            patient = booking.linked_patient or appointment.clinic_patient
+            if not patient and appointment.pet_id:
+                patient = get_or_create_patient_record_for_pet(
+                    booking.clinic,
+                    appointment.pet,
+                    appointment.owner,
+                )
+            if not patient:
+                patient = self._get_or_create_booking_patient(booking)
             appointment.appointment_type = appointment_type
             appointment.scheduled_date = scheduled_date
             appointment.scheduled_time = scheduled_time
@@ -2143,10 +2178,14 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             appointment.notes = notes
             appointment.status = VeterinaryAppointment.STATUS_ACCEPTED
             appointment.service_fee = booking.quoted_price or service.base_price
+            appointment.clinic_patient = patient
             appointment.save(update_fields=[
                 'appointment_type', 'scheduled_date', 'scheduled_time', 'duration_minutes',
-                'reason', 'notes', 'status', 'service_fee', 'updated_at'
+                'reason', 'notes', 'status', 'service_fee', 'clinic_patient', 'updated_at'
             ])
+            if patient and booking.linked_patient_id != patient.id:
+                booking.linked_patient = patient
+                booking.save(update_fields=['linked_patient'])
             return appointment
 
         appointment_pet, appointment_owner = self._find_linked_pet_owner(booking)
@@ -2164,15 +2203,29 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             'payment_status': 'unpaid',
             'service_fee': booking.quoted_price or service.base_price,
         }
-        if appointment_pet and appointment_owner:
-            lookup.update({'pet': appointment_pet, 'owner': appointment_owner})
-            defaults.update({'pet': appointment_pet, 'owner': appointment_owner})
-        else:
+        patient = booking.linked_patient
+        if not patient and appointment_pet and appointment_owner:
+            patient = get_or_create_patient_record_for_pet(
+                booking.clinic,
+                appointment_pet,
+                appointment_owner,
+            )
+        if not patient:
             patient = self._get_or_create_booking_patient(booking)
-            lookup['clinic_patient'] = patient
-            defaults['clinic_patient'] = patient
 
-        appointment = VeterinaryAppointment.objects.filter(**lookup).order_by('id').first()
+        appointment_filter = Q(clinic_patient=patient)
+        if appointment_pet and appointment_owner:
+            appointment_filter |= Q(pet=appointment_pet, owner=appointment_owner)
+            defaults.update({'pet': appointment_pet, 'owner': appointment_owner})
+        defaults['clinic_patient'] = patient
+
+        appointment = (
+            VeterinaryAppointment.objects
+            .filter(**lookup)
+            .filter(appointment_filter)
+            .order_by('id')
+            .first()
+        )
         if appointment:
             for field, value in defaults.items():
                 setattr(appointment, field, value)
@@ -2180,6 +2233,8 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         else:
             appointment = VeterinaryAppointment.objects.create(**lookup, **defaults)
         booking.confirmed_appointment = appointment
+        if patient and booking.linked_patient_id != patient.id:
+            booking.linked_patient = patient
         return appointment
 
     def _serialize_booking(self, booking):
@@ -2235,7 +2290,10 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
                     'accepted',
                     f"تم قبول الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
                     actor=request.user,
-                    update_fields=['confirmed_appointment', 'confirmed_at', 'cancelled_at', 'cancelled_reason'],
+                    update_fields=[
+                        'confirmed_appointment', 'linked_patient', 'confirmed_at',
+                        'cancelled_at', 'cancelled_reason'
+                    ],
                 )
                 booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
                     status=StorefrontBookingProposal.STATUS_CANCELLED,
@@ -2292,7 +2350,7 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             booking.confirmed_appointment = appointment
             booking.status = StorefrontBooking.STATUS_ACCEPTED
             booking.confirmed_at = timezone.now()
-            booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+            booking.save(update_fields=['confirmed_appointment', 'linked_patient', 'status', 'confirmed_at'])
             self._add_timeline(
                 booking,
                 'appointment_scheduled',
@@ -2630,7 +2688,7 @@ class PublicStorefrontBookingProposalRespondView(APIView):
             booking.confirmed_appointment = appointment
             booking.status = StorefrontBooking.STATUS_ACCEPTED
             booking.confirmed_at = timezone.now()
-            booking.save(update_fields=['confirmed_appointment', 'status', 'confirmed_at'])
+            booking.save(update_fields=['confirmed_appointment', 'linked_patient', 'status', 'confirmed_at'])
             StorefrontBookingTimeline.objects.create(
                 booking=booking,
                 event_type='appointment_scheduled',

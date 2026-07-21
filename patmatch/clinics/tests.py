@@ -1,10 +1,12 @@
 import base64
 import shutil
 import tempfile
+from io import StringIO
 from datetime import date, time
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
@@ -173,6 +175,31 @@ class StorefrontBookingWorkflowTests(TestCase):
             ).exists()
         )
 
+    def test_public_app_booking_copies_service_currency(self):
+        self.service.currency = 'USD'
+        self.service.save(update_fields=['currency'])
+
+        response = self.client.post(
+            reverse('clinic-storefront-bookings', kwargs={'clinic_id': self.clinic.id}),
+            {
+                'service_id': self.service.id,
+                'customer_name': 'Mona',
+                'customer_phone': '01022222222',
+                'pet_name': None,
+                'preferred_date': '2026-07-05',
+                'preferred_time': '12:00',
+                'request_type': 'appointment',
+                'contact_channel': 'app',
+                'source': 'PetMatchMobile',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        booking = StorefrontBooking.objects.get(public_id=response.data['public_id'])
+        self.assertEqual(booking.quoted_currency, 'USD')
+        self.assertEqual(response.data['quoted_currency'], 'USD')
+
     def test_public_app_booking_auto_confirm_links_appointment(self):
         self.client.force_authenticate(None)
         customer = User.objects.create_user(
@@ -236,12 +263,65 @@ class StorefrontBookingWorkflowTests(TestCase):
         self.assertIsNotNone(booking.confirmed_appointment_id)
         self.assertEqual(booking.confirmed_appointment.pet, pet)
         self.assertEqual(booking.confirmed_appointment.owner, customer)
+        self.assertIsNotNone(booking.confirmed_appointment.clinic_patient_id)
+        self.assertEqual(booking.confirmed_appointment.clinic_patient.linked_pet, pet)
         self.assertTrue(
             StorefrontBookingTimeline.objects.filter(
                 booking=booking,
                 event_type='appointment_scheduled',
             ).exists()
         )
+
+    def test_public_app_booking_auto_confirm_creates_patient_for_linked_pet(self):
+        self.client.force_authenticate(None)
+        customer = User.objects.create_user(
+            username='new-linked-customer@example.com',
+            email='new-linked-customer@example.com',
+            password='pass12345',
+            user_type='pet_owner',
+            phone='01055555555',
+        )
+        breed = Breed.objects.create(name='Siamese', pet_type='cats')
+        pet = Pet.objects.create(
+            owner=customer,
+            name='Misho',
+            pet_type='cats',
+            breed=breed,
+            age_months=9,
+            gender='M',
+            description='Playful cat',
+            hosting_preference='flexible',
+            main_image=SimpleUploadedFile('misho.jpg', b'\xff\xd8\xff', content_type='image/jpeg'),
+            location='Cairo',
+            is_free=True,
+        )
+        self.client.force_authenticate(customer)
+
+        response = self.client.post(
+            reverse('clinic-storefront-bookings', kwargs={'clinic_id': self.clinic.id}),
+            {
+                'service_id': self.service.id,
+                'customer_name': 'Mona',
+                'customer_phone': '01055555555',
+                'customer_email': 'new-linked-customer@example.com',
+                'pet_name': 'Misho',
+                'preferred_date': '2026-07-05',
+                'preferred_time': '12:00',
+                'request_type': 'appointment',
+                'contact_channel': 'app',
+                'source': 'PetMatchMobile',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        booking = StorefrontBooking.objects.get(public_id=response.data['public_id'])
+        appointment = booking.confirmed_appointment
+        self.assertIsNotNone(appointment.clinic_patient_id)
+        self.assertEqual(appointment.clinic_patient.linked_pet, pet)
+        self.assertEqual(appointment.clinic_patient.linked_user, customer)
+        self.assertEqual(appointment.clinic_patient.name, 'Misho')
+        self.assertEqual(ClinicPatientRecord.objects.filter(clinic=self.clinic, linked_pet=pet).count(), 1)
 
     def test_accept_then_schedule_booking_creates_internal_patient_appointment(self):
         response = self.client.post(
@@ -365,6 +445,37 @@ class StorefrontBookingWorkflowTests(TestCase):
         first_appointment.refresh_from_db()
         self.assertEqual(first_appointment.reason, 'حجز متجر: تطعيم')
 
+    def test_schedule_booking_without_pet_creates_placeholder_patient_appointment(self):
+        self.booking.pet_name = None
+        self.booking.pet_type = None
+        self.booking.pet_breed = None
+        self.booking.pet_age = None
+        self.booking.save(update_fields=['pet_name', 'pet_type', 'pet_breed', 'pet_age'])
+
+        response = self.client.post(
+            reverse(
+                'clinic-storefront-bookings-schedule-appointment',
+                kwargs={'public_id': self.booking.public_id},
+            ),
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_ACCEPTED)
+        self.assertIsNotNone(self.booking.confirmed_appointment_id)
+
+        appointment = self.booking.confirmed_appointment
+        self.assertEqual(appointment.status, VeterinaryAppointment.STATUS_ACCEPTED)
+        self.assertIsNone(appointment.pet_id)
+        self.assertIsNone(appointment.owner_id)
+        self.assertIsNotNone(appointment.clinic_patient_id)
+        self.assertEqual(appointment.clinic_patient.name, 'حيوان Sara')
+        self.assertEqual(appointment.clinic_patient.species, 'غير محدد')
+        self.assertEqual(appointment.scheduled_date, date(2026, 7, 3))
+        self.assertEqual(appointment.scheduled_time, time(10, 0))
+
     def test_accept_booking_notifies_customer_with_push_outbox(self):
         customer = User.objects.create_user(
             username='booking-customer@example.com',
@@ -478,6 +589,91 @@ class ClinicProductImageUploadTests(TestCase):
         self.assertEqual(product.clinic, self.clinic)
         self.assertEqual(len(product.images), 1)
         self.assertIn('/media/products/', product.images[0])
+
+    def test_catalog_create_defaults_and_accepts_currency(self):
+        service_response = self.client.post(
+            reverse('clinic-services-list'),
+            {
+                'name': 'فحص',
+                'category': 'general',
+                'base_price': '120.00',
+                'duration_minutes': 30,
+                'applicable_pet_types': ['all'],
+                'requires_appointment': True,
+                'is_active': True,
+            },
+            format='json',
+        )
+        self.assertEqual(service_response.status_code, 201)
+        self.assertEqual(service_response.data['currency'], 'EGP')
+
+        product_response = self.client.post(
+            reverse('clinic-products-list'),
+            {
+                'name': 'طعام كلاب',
+                'category': 'food',
+                'price': '180.00',
+                'currency': 'usd',
+                'stock_quantity': 10,
+                'low_stock_threshold': 2,
+                'is_active': True,
+            },
+            format='json',
+        )
+        self.assertEqual(product_response.status_code, 201)
+        self.assertEqual(product_response.data['currency'], 'USD')
+
+    def test_catalog_rejects_invalid_currency(self):
+        response = self.client.post(
+            reverse('clinic-products-list'),
+            {
+                'name': 'طعام كلاب',
+                'category': 'food',
+                'price': '180.00',
+                'currency': 'ZZZ',
+                'stock_quantity': 10,
+                'low_stock_threshold': 2,
+                'is_active': True,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('currency', response.data)
+
+    def test_storefront_order_rejects_mixed_product_currencies(self):
+        egp_product = ClinicProduct.objects.create(
+            clinic=self.clinic,
+            name='طعام قطط',
+            category='food',
+            price=100,
+            currency='EGP',
+            stock_quantity=10,
+        )
+        usd_product = ClinicProduct.objects.create(
+            clinic=self.clinic,
+            name='دواء',
+            category='medication',
+            price=20,
+            currency='USD',
+            stock_quantity=10,
+        )
+
+        response = self.client.post(
+            reverse('clinic-storefront-orders', kwargs={'clinic_id': self.clinic.id}),
+            {
+                'customer_name': 'Mona',
+                'customer_phone': '01022222222',
+                'items': [
+                    {'product_id': egp_product.id, 'quantity': 1},
+                    {'product_id': usd_product.id, 'quantity': 1},
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('currency', response.data)
 
 
 class ClinicPatientProfileTests(TestCase):
@@ -643,6 +839,172 @@ class ClinicPatientProfileTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_create_patient_accepts_age_months_integer(self):
+        response = self.client.post(
+            reverse('clinic-patients-list'),
+            {
+                'name': 'روكي',
+                'species': 'dogs',
+                'breed': 'Golden Retriever',
+                'age_months': 18,
+                'gender': 'M',
+                'status': 'active',
+                'owner_name': 'سارة',
+                'owner_phone': '01033333333',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        patient = ClinicPatientRecord.objects.get(name='روكي')
+        self.assertEqual(patient.age_months, 18)
+        self.assertEqual(patient.age_text, '1 year 6 months')
+        self.assertEqual(response.data['age_months'], 18)
+        self.assertEqual(response.data['ageMonths'], 18)
+        self.assertEqual(response.data['age'], '1 year 6 months')
+
+    def test_update_patient_prefers_age_months_over_legacy_age_text(self):
+        response = self.client.patch(
+            reverse('clinic-patients-detail', kwargs={'pk': self.patient.id}),
+            {
+                'owner_name': self.owner.full_name,
+                'age_months': 7,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.age_months, 7)
+        self.assertEqual(self.patient.age_text, '7 months')
+        self.assertEqual(response.data['age'], '7 months')
+
+    def test_create_patient_still_accepts_legacy_age_string(self):
+        response = self.client.post(
+            reverse('clinic-patients-list'),
+            {
+                'name': 'لونا',
+                'species': 'cats',
+                'breed': 'Persian',
+                'age': 'سنتين',
+                'gender': 'F',
+                'status': 'active',
+                'owner_name': 'منى',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        patient = ClinicPatientRecord.objects.get(name='لونا')
+        self.assertIsNone(patient.age_months)
+        self.assertEqual(patient.age_text, 'سنتين')
+        self.assertEqual(response.data['age'], 'سنتين')
+
+    def test_create_appointment_with_app_pet_creates_clinic_patient_record(self):
+        owner = User.objects.create_user(
+            username='appointment-owner@example.com',
+            email='appointment-owner@example.com',
+            password='pass12345',
+            user_type='pet_owner',
+            phone='01077777777',
+        )
+        breed = Breed.objects.create(name='Appointment Breed', pet_type='dogs')
+        pet = Pet.objects.create(
+            owner=owner,
+            name='Buddy',
+            pet_type='dogs',
+            breed=breed,
+            age_months=14,
+            gender='M',
+            description='Clinic appointment pet',
+            hosting_preference='flexible',
+            main_image=SimpleUploadedFile('buddy.jpg', b'\xff\xd8\xff', content_type='image/jpeg'),
+            location='Cairo',
+            is_free=True,
+        )
+
+        response = self.client.post(
+            reverse('clinic-appointments-list'),
+            {
+                'pet': pet.id,
+                'owner': owner.id,
+                'appointment_type': 'checkup',
+                'scheduled_date': '2026-07-09',
+                'scheduled_time': '14:30',
+                'duration_minutes': 30,
+                'reason': 'فحص عام',
+                'status': 'ACCEPTED',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        appointment = VeterinaryAppointment.objects.get(id=response.data['id'])
+        self.assertIsNotNone(appointment.clinic_patient_id)
+        self.assertEqual(appointment.clinic_patient.linked_pet, pet)
+        self.assertEqual(appointment.clinic_patient.linked_user, owner)
+        self.assertEqual(appointment.clinic_patient.owner.email, owner.email)
+
+    def test_backfill_clinic_patient_links_updates_pet_only_appointments(self):
+        owner = User.objects.create_user(
+            username='backfill-owner@example.com',
+            email='backfill-owner@example.com',
+            password='pass12345',
+            user_type='pet_owner',
+            phone='01088888888',
+        )
+        breed = Breed.objects.create(name='Backfill Breed', pet_type='cats')
+        pet = Pet.objects.create(
+            owner=owner,
+            name='Nono',
+            pet_type='cats',
+            breed=breed,
+            age_months=20,
+            gender='F',
+            description='Backfill pet',
+            hosting_preference='flexible',
+            main_image=SimpleUploadedFile('nono.jpg', b'\xff\xd8\xff', content_type='image/jpeg'),
+            location='Cairo',
+            is_free=True,
+        )
+        first = VeterinaryAppointment.objects.create(
+            clinic=self.clinic,
+            pet=pet,
+            owner=owner,
+            appointment_type='checkup',
+            scheduled_date=date(2026, 7, 10),
+            scheduled_time=time(10, 0),
+            duration_minutes=30,
+            reason='فحص',
+            status=VeterinaryAppointment.STATUS_ACCEPTED,
+        )
+        second = VeterinaryAppointment.objects.create(
+            clinic=self.clinic,
+            pet=pet,
+            owner=owner,
+            appointment_type='vaccination',
+            scheduled_date=date(2026, 7, 11),
+            scheduled_time=time(11, 0),
+            duration_minutes=30,
+            reason='تطعيم',
+            status=VeterinaryAppointment.STATUS_ACCEPTED,
+        )
+
+        dry_run = StringIO()
+        call_command('backfill_clinic_patient_links', clinic_id=self.clinic.id, stdout=dry_run)
+        first.refresh_from_db()
+        self.assertIsNone(first.clinic_patient_id)
+        self.assertIn('dry-run: checked=2', dry_run.getvalue())
+
+        applied = StringIO()
+        call_command('backfill_clinic_patient_links', clinic_id=self.clinic.id, apply=True, stdout=applied)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertIsNotNone(first.clinic_patient_id)
+        self.assertEqual(first.clinic_patient, second.clinic_patient)
+        self.assertEqual(first.clinic_patient.linked_pet, pet)
+        self.assertIn('applied: checked=2', applied.getvalue())
 
     def test_upload_patient_document(self):
         upload = SimpleUploadedFile('record.txt', b'profile record', content_type='text/plain')
