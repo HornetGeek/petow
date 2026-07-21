@@ -36,6 +36,35 @@ from .models import (
 
 User = get_user_model()
 
+ISO_CURRENCY_CODES = {
+    'AED', 'AFN', 'ALL', 'AMD', 'ANG', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN',
+    'BAM', 'BBD', 'BDT', 'BGN', 'BHD', 'BIF', 'BMD', 'BND', 'BOB', 'BOV',
+    'BRL', 'BSD', 'BTN', 'BWP', 'BYN', 'BZD', 'CAD', 'CDF', 'CHE', 'CHF',
+    'CHW', 'CLF', 'CLP', 'CNY', 'COP', 'COU', 'CRC', 'CUC', 'CUP', 'CVE',
+    'CZK', 'DJF', 'DKK', 'DOP', 'DZD', 'EGP', 'ERN', 'ETB', 'EUR', 'FJD',
+    'FKP', 'GBP', 'GEL', 'GHS', 'GIP', 'GMD', 'GNF', 'GTQ', 'GYD', 'HKD',
+    'HNL', 'HRK', 'HTG', 'HUF', 'IDR', 'ILS', 'INR', 'IQD', 'IRR', 'ISK',
+    'JMD', 'JOD', 'JPY', 'KES', 'KGS', 'KHR', 'KMF', 'KPW', 'KRW', 'KWD',
+    'KYD', 'KZT', 'LAK', 'LBP', 'LKR', 'LRD', 'LSL', 'LYD', 'MAD', 'MDL',
+    'MGA', 'MKD', 'MMK', 'MNT', 'MOP', 'MRU', 'MUR', 'MVR', 'MWK', 'MXN',
+    'MXV', 'MYR', 'MZN', 'NAD', 'NGN', 'NIO', 'NOK', 'NPR', 'NZD', 'OMR',
+    'PAB', 'PEN', 'PGK', 'PHP', 'PKR', 'PLN', 'PYG', 'QAR', 'RON', 'RSD',
+    'RUB', 'RWF', 'SAR', 'SBD', 'SCR', 'SDG', 'SEK', 'SGD', 'SHP', 'SLE',
+    'SLL', 'SOS', 'SRD', 'SSP', 'STN', 'SVC', 'SYP', 'SZL', 'THB', 'TJS',
+    'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS', 'UAH', 'UGX', 'USD',
+    'USN', 'UYI', 'UYU', 'UYW', 'UZS', 'VED', 'VES', 'VND', 'VUV', 'WST',
+    'XAF', 'XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XCD', 'XDR', 'XOF',
+    'XPD', 'XPF', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX', 'YER', 'ZAR', 'ZMW',
+    'ZWL',
+}
+
+
+def validate_iso_currency(value):
+    normalized = (value or 'EGP').strip().upper()
+    if normalized not in ISO_CURRENCY_CODES:
+        raise serializers.ValidationError("كود العملة غير صالح")
+    return normalized
+
 
 LEGACY_APPOINTMENT_STATUS_MAP = {
     'scheduled': VeterinaryAppointment.STATUS_ACCEPTED,
@@ -99,6 +128,85 @@ def _calculate_age_text(date_of_birth):
             parts.append('Less than 1 month')
 
     return ' '.join(parts)
+
+
+def _format_age_months(age_months):
+    if age_months is None:
+        return ""
+    try:
+        months = int(age_months)
+    except (TypeError, ValueError):
+        return ""
+    if months < 0:
+        return ""
+    if months == 0:
+        return "Less than 1 month"
+    years, remaining_months = divmod(months, 12)
+    parts = []
+    if years:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if remaining_months:
+        parts.append(f"{remaining_months} month{'s' if remaining_months != 1 else ''}")
+    return ' '.join(parts) if parts else "Less than 1 month"
+
+
+def get_or_create_patient_record_for_pet(clinic, pet, owner=None):
+    """Ensure an app pet also has a clinic patient record."""
+    if not clinic or not pet:
+        return None
+
+    patient = (
+        ClinicPatientRecord.objects
+        .filter(clinic=clinic, linked_pet=pet)
+        .select_related('owner', 'linked_user', 'linked_pet')
+        .first()
+    )
+    if patient:
+        return patient
+
+    linked_user = owner or getattr(pet, 'owner', None)
+    owner_name = ''
+    owner_email = None
+    owner_phone = None
+    if linked_user:
+        owner_name = linked_user.get_full_name() or linked_user.email or ''
+        owner_email = linked_user.email or None
+        owner_phone = getattr(linked_user, 'phone', None) or None
+
+    owner_record = None
+    owner_qs = ClinicClientRecord.objects.filter(clinic=clinic)
+    if owner_email:
+        owner_record = owner_qs.filter(email__iexact=owner_email).first()
+    if not owner_record and owner_phone:
+        owner_record = owner_qs.filter(phone=owner_phone).first()
+    if not owner_record:
+        owner_record = ClinicClientRecord.objects.create(
+            clinic=clinic,
+            full_name=owner_name or 'عميل غير محدد',
+            email=owner_email,
+            phone=owner_phone,
+        )
+
+    breed = getattr(pet, 'breed', None)
+    gender = getattr(pet, 'gender', '') or ''
+    if gender == 'M':
+        gender = 'male'
+    elif gender == 'F':
+        gender = 'female'
+
+    return ClinicPatientRecord.objects.create(
+        clinic=clinic,
+        owner=owner_record,
+        name=pet.name,
+        species=getattr(pet, 'pet_type', '') or 'غير محدد',
+        breed=getattr(breed, 'name', '') or '',
+        age_months=getattr(pet, 'age_months', None),
+        age_text=getattr(pet, 'age_display', '') or '',
+        gender=gender,
+        linked_user=linked_user,
+        linked_pet=pet,
+        status='active',
+    )
 
 
 def _point_from_coordinates(latitude, longitude):
@@ -267,6 +375,7 @@ class ClinicStaffSerializer(serializers.ModelSerializer):
 class VeterinarianSerializer(serializers.ModelSerializer):
     """Serializer for veterinarian staff members"""
     id = serializers.CharField(read_only=True)
+    user = serializers.IntegerField(source='user.id', read_only=True)
     name = serializers.SerializerMethodField()
     email = serializers.EmailField(source='user.email', read_only=True)
     phone = serializers.CharField(source='user.phone', read_only=True)
@@ -276,7 +385,7 @@ class VeterinarianSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClinicStaff
         fields = [
-            'id', 'name', 'email', 'phone', 'avatar', 'role', 
+            'id', 'user', 'name', 'email', 'phone', 'avatar', 'role', 
             'is_primary', 'join_date', 'created_at'
         ]
         read_only_fields = ['id', 'name', 'email', 'phone', 'avatar', 'join_date', 'created_at']
@@ -320,7 +429,7 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'clinic', 'name', 'description', 'category', 'category_display',
             'applicable_pet_types', 'pet_type_display',
-            'base_price', 'has_tiered_pricing', 'pricing_tiers', 'price_range',
+            'base_price', 'currency', 'has_tiered_pricing', 'pricing_tiers', 'price_range',
             'pricing_unit', 'min_duration_units',
             'duration_minutes', 'requires_appointment',
             'is_active', 'is_featured', 'display_order',
@@ -376,6 +485,9 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
         
         return value
 
+    def validate_currency(self, value):
+        return validate_iso_currency(value)
+
     def validate_min_duration_units(self, value):
         if value is not None and value < 1:
             raise serializers.ValidationError("الحد الأدنى للمدة يجب أن يكون رقمًا موجبًا")
@@ -409,7 +521,7 @@ class MarketplaceServiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'category', 'category_display',
             'group', 'group_display', 'applicable_pet_types',
-            'base_price', 'price_range', 'pricing_unit', 'min_duration_units',
+            'base_price', 'currency', 'price_range', 'pricing_unit', 'min_duration_units',
             'duration_minutes', 'requires_appointment', 'is_featured', 'display_order',
             'service_icon', 'service_image', 'distance', 'distance_display', 'clinic',
         ]
@@ -503,7 +615,7 @@ class ClinicProductSerializer(serializers.ModelSerializer):
         model = ClinicProduct
         fields = [
             'id', 'clinic', 'name', 'description', 'category', 'category_display',
-            'price', 'cost_price', 'stock_quantity', 'sku', 'low_stock_threshold',
+            'price', 'currency', 'cost_price', 'stock_quantity', 'sku', 'low_stock_threshold',
             'is_active', 'images', 'image', 'product_image',
             'created_at', 'updated_at'
         ]
@@ -522,6 +634,9 @@ class ClinicProductSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(image) if request else image
             return image
         return None
+
+    def validate_currency(self, value):
+        return validate_iso_currency(value)
 
     def create(self, validated_data):
         product_image = validated_data.pop('product_image', None)
@@ -570,9 +685,9 @@ class StorefrontOrderSerializer(serializers.ModelSerializer):
         model = StorefrontOrder
         fields = [
             'public_id', 'clinic', 'customer_name', 'customer_phone', 'customer_email',
-            'delivery_address', 'notes', 'status', 'total_amount', 'created_at', 'items'
+            'delivery_address', 'notes', 'status', 'total_amount', 'currency', 'created_at', 'items'
         ]
-        read_only_fields = ['public_id', 'clinic', 'status', 'total_amount', 'created_at', 'items']
+        read_only_fields = ['public_id', 'clinic', 'status', 'total_amount', 'currency', 'created_at', 'items']
 
 
 class StorefrontBookingProposalSerializer(serializers.ModelSerializer):
@@ -629,14 +744,14 @@ class StorefrontBookingSerializer(serializers.ModelSerializer):
             'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_photo', 'pet_photo_url',
             'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
-            'status', 'quoted_price', 'confirmed_appointment', 'latest_proposal', 'proposals',
+            'status', 'quoted_price', 'quoted_currency', 'confirmed_appointment', 'latest_proposal', 'proposals',
             'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at',
             'status_display', 'assigned_staff', 'assigned_staff_name', 'internal_notes',
             'doctor_notes', 'diagnosis', 'treatment', 'price_estimate', 'completed_result',
             'linked_patient', 'linked_patient_summary', 'timeline',
         ]
         read_only_fields = [
-            'public_id', 'clinic', 'customer_user', 'status', 'quoted_price', 'created_at',
+            'public_id', 'clinic', 'customer_user', 'status', 'quoted_price', 'quoted_currency', 'created_at',
             'service_name', 'latest_proposal', 'proposals', 'confirmed_appointment', 'pet_photo_url',
             'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at',
             'status_display', 'assigned_staff_name', 'linked_patient_summary', 'timeline',
@@ -709,13 +824,13 @@ class StorefrontBookingUpdateSerializer(serializers.ModelSerializer):
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_photo', 'preferred_date', 'preferred_time',
             'notes', 'request_type', 'source', 'contact_channel',
-            'status', 'quoted_price', 'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
+            'status', 'quoted_price', 'quoted_currency', 'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
         ]
         read_only_fields = [
             'public_id', 'clinic', 'service', 'service_name', 'customer_user',
             'customer_name', 'customer_phone', 'customer_email',
             'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_photo', 'preferred_date', 'preferred_time',
-            'notes', 'request_type', 'source', 'contact_channel', 'quoted_price',
+            'notes', 'request_type', 'source', 'contact_channel', 'quoted_price', 'quoted_currency',
             'cancelled_reason', 'confirmed_at', 'cancelled_at', 'completed_at', 'created_at'
         ]
 
@@ -790,6 +905,11 @@ class VeterinarySessionSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source='owner.id', read_only=True, allow_null=True)
     owner_name = serializers.SerializerMethodField()
     clinic_patient_id = serializers.IntegerField(source='clinic_patient.id', read_only=True, allow_null=True)
+    care_provider = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+        allow_null=True,
+    )
     care_provider_name = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
@@ -809,7 +929,7 @@ class VeterinarySessionSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'appointment', 'clinic_id', 'clinic_patient_id', 'pet_id',
-            'pet_name', 'owner_id', 'owner_name', 'care_provider',
+            'pet_name', 'owner_id', 'owner_name',
             'session_date', 'session_started_at', 'session_ended_at',
             'owner_summary_sent_at', 'created_at', 'updated_at',
         ]
@@ -827,6 +947,32 @@ class VeterinarySessionSerializer(serializers.ModelSerializer):
         if obj.clinic_patient and obj.clinic_patient.owner:
             return obj.clinic_patient.owner.full_name or obj.clinic_patient.owner.email or ''
         return ''
+
+    def validate_care_provider(self, value):
+        if value is None:
+            return value
+        clinic = self.context.get('clinic') or getattr(self.instance, 'clinic', None)
+        if not clinic:
+            raise serializers.ValidationError('تعذر تحديد العيادة.')
+        exists = ClinicStaff.objects.filter(
+            clinic=clinic,
+            user=value,
+            role='veterinarian',
+        ).exists()
+        if not exists:
+            raise serializers.ValidationError('الطبيب المحدد لا ينتمي لهذه العيادة.')
+        return value
+
+    def update(self, instance, validated_data):
+        provider = validated_data.get('care_provider')
+        if provider:
+            validated_data['care_provider_name'] = (
+                validated_data.get('care_provider_name')
+                or provider.get_full_name()
+                or provider.email
+                or ''
+            )
+        return super().update(instance, validated_data)
 
     def validate_vitals(self, value):
         if value in (None, ''):
@@ -1005,6 +1151,7 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
     owner_email = serializers.EmailField(write_only=True, required=False, allow_blank=True)
     owner_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     age = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    age_months = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=360)
     date_of_birth = serializers.DateField(required=False, allow_null=True)
     last_visit = serializers.DateField(required=False, allow_null=True)
     next_appointment = serializers.DateField(required=False, allow_null=True)
@@ -1015,7 +1162,7 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = ClinicPatientRecord
         fields = [
-            'id', 'name', 'species', 'breed', 'date_of_birth', 'age', 'gender', 'status',
+            'id', 'name', 'species', 'breed', 'date_of_birth', 'age', 'age_months', 'gender', 'status',
             'notes', 'owner_name', 'owner_phone', 'owner_email', 'owner_password',
             'last_visit', 'next_appointment', 'weight_kg', 'blood_type', 'photo',
             'linked_user', 'linked_pet', 'created_at', 'updated_at'
@@ -1113,6 +1260,7 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'lastVisit': 'last_visit',
             'nextAppointment': 'next_appointment',
             'dateOfBirth': 'date_of_birth',
+            'ageMonths': 'age_months',
             'weightKg': 'weight_kg',
             'bloodType': 'blood_type',
         }
@@ -1234,10 +1382,14 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
         clinic = self.context['clinic']
         owner, user = self._get_or_create_owner(clinic, validated_data)
         age_value = validated_data.pop('age', None)
+        age_months = validated_data.get('age_months')
         dob = validated_data.get('date_of_birth')
 
         if dob:
             validated_data['age_text'] = _calculate_age_text(dob)
+            validated_data['age_months'] = None
+        elif age_months is not None:
+            validated_data['age_text'] = _format_age_months(age_months)
         elif age_value and isinstance(age_value, str) and age_value.strip():
             validated_data['age_text'] = age_value.strip()
         else:
@@ -1270,12 +1422,19 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
 
         age_value_present = 'age' in validated_data
         age_value = validated_data.pop('age', None)
+        age_months_present = 'age_months' in validated_data
+        age_months_value = validated_data.get('age_months')
         dob_present = 'date_of_birth' in validated_data
         dob_value = validated_data.get('date_of_birth')
 
         if dob_present:
             instance.date_of_birth = dob_value
             instance.age_text = _calculate_age_text(dob_value) if dob_value else None
+            if dob_value:
+                instance.age_months = None
+        elif age_months_present:
+            instance.age_months = age_months_value
+            instance.age_text = _format_age_months(age_months_value) if age_months_value is not None else None
         elif age_value_present:
             if isinstance(age_value, str) and age_value.strip():
                 instance.age_text = age_value.strip()
@@ -1300,7 +1459,12 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         # Compute age with fallbacks: stored age_text -> derived from DOB -> linked pet age_display
-        age_value = instance.age_text or _calculate_age_text(instance.date_of_birth) or ''
+        age_value = (
+            _format_age_months(instance.age_months)
+            or instance.age_text
+            or _calculate_age_text(instance.date_of_birth)
+            or ''
+        )
         if not age_value and getattr(instance, 'linked_pet_id', None):
             pet = getattr(instance, 'linked_pet', None)
             if pet is not None:
@@ -1329,6 +1493,8 @@ class ClinicPatientRecordSerializer(serializers.ModelSerializer):
             'species': instance.species,
             'breed': instance.breed or '',
             'age': age_value,
+            'age_months': instance.age_months,
+            'ageMonths': instance.age_months,
             'dateOfBirth': instance.date_of_birth.isoformat() if instance.date_of_birth else None,
             'gender': instance.gender or 'unknown',
             'weight_kg': str(instance.weight_kg) if instance.weight_kg is not None else None,
@@ -1674,6 +1840,12 @@ class ClinicAppointmentSerializer(serializers.ModelSerializer):
             ).first()
             if linked_patient:
                 validated_data['clinic_patient'] = linked_patient
+            else:
+                validated_data['clinic_patient'] = get_or_create_patient_record_for_pet(
+                    clinic,
+                    validated_data['pet'],
+                    validated_data.get('owner'),
+                )
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
