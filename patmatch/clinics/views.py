@@ -82,6 +82,7 @@ from .serializers import (
     StorefrontBookingScheduleSerializer,
     VeterinarySessionSerializer,
     VeterinarySessionEndSerializer,
+    ClinicPatientCompletedSessionSerializer,
     normalize_appointment_status,
     normalize_booking_status,
     ServicePricingTierSerializer,
@@ -1445,10 +1446,19 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='sessions/complete')
     def complete_session(self, request, pk=None):
         patient = self.get_object()
-        session_data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        completion_serializer = ClinicPatientCompletedSessionSerializer(
+            data=request.data,
+            partial=True,
+            context=self.get_serializer_context(),
+        )
+        completion_serializer.is_valid(raise_exception=True)
+        session_data = dict(completion_serializer.validated_data)
         appointment_type = session_data.pop('appointment_type', 'checkup') or 'checkup'
-        scheduled_date = session_data.pop('scheduled_date', timezone.localdate())
-        scheduled_time = session_data.pop('scheduled_time', timezone.localtime().time().replace(second=0, microsecond=0))
+        scheduled_date = session_data.pop('scheduled_date', None) or timezone.localdate()
+        scheduled_time = (
+            session_data.pop('scheduled_time', None)
+            or timezone.localtime().time().replace(second=0, microsecond=0)
+        )
 
         with transaction.atomic():
             appointment = VeterinaryAppointment.objects.create(
@@ -1469,27 +1479,30 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             )
             now = timezone.now()
             provider_name = request.user.get_full_name() or request.user.email or ''
+            care_provider = session_data.get('care_provider') or request.user
+            care_provider_name = (
+                session_data.get('care_provider_name')
+                or care_provider.get_full_name()
+                or getattr(care_provider, 'email', '')
+                or provider_name
+            )
             session = VeterinarySession.objects.create(
                 appointment=appointment,
                 clinic=patient.clinic,
                 clinic_patient=patient,
                 pet=patient.linked_pet,
                 owner=patient.linked_user,
-                care_provider=request.user,
-                care_provider_name=session_data.get('care_provider_name') or provider_name,
+                care_provider=care_provider,
+                care_provider_name=care_provider_name,
                 session_date=scheduled_date,
                 session_started_at=now,
                 session_ended_at=now,
                 service_type=appointment_type,
             )
-            serializer = VeterinarySessionEndSerializer(
-                session,
-                data=session_data,
-                partial=True,
-                context=self.get_serializer_context(),
-            )
-            serializer.is_valid(raise_exception=True)
-            session = serializer.save(session_ended_at=now)
+            for field, value in session_data.items():
+                setattr(session, field, value)
+            session.session_ended_at = now
+            session.save()
 
             appointment.reason = session.main_complaint or appointment.reason
             appointment.notes = session.doctor_notes or session.physical_exam_notes or ''

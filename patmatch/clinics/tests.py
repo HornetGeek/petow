@@ -27,6 +27,7 @@ from .models import (
     StorefrontBookingProposal,
     StorefrontBookingTimeline,
     VeterinaryAppointment,
+    VeterinarySession,
 )
 from .views import ClinicMapMarkersView, ClinicStorefrontBookingViewSet
 
@@ -839,6 +840,83 @@ class ClinicPatientProfileTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def _completed_session_payload(self, **overrides):
+        payload = {
+            'appointment_type': 'checkup',
+            'scheduled_date': '2026-07-08',
+            'scheduled_time': '14:30',
+            'main_complaint': 'قيء',
+            'vitals': {'weight': {'status': 'checked', 'value': '25'}},
+            'physical_exam': {'general_condition': 'normal'},
+            'physical_exam_notes': 'الفحص مستقر',
+            'diagnosis': 'التهاب بسيط',
+            'services_performed': 'حقنة ومتابعة',
+            'home_care_instructions': 'راحة وسوائل',
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_complete_patient_session_creates_completed_visit(self):
+        response = self.client.post(
+            reverse('clinic-patients-complete-session', kwargs={'pk': self.patient.id}),
+            self._completed_session_payload(next_appointment_date='2026-08-08'),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        session = VeterinarySession.objects.get(id=response.data['id'])
+        appointment = session.appointment
+        self.assertEqual(session.clinic_patient, self.patient)
+        self.assertEqual(appointment.clinic_patient, self.patient)
+        self.assertEqual(appointment.status, 'completed')
+        self.assertEqual(appointment.scheduled_date, date(2026, 7, 8))
+        self.assertEqual(appointment.scheduled_time, time(14, 30))
+        self.assertEqual(appointment.next_appointment, date(2026, 8, 8))
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.last_visit, date(2026, 7, 8))
+        self.assertEqual(self.patient.next_appointment, date(2026, 8, 8))
+
+    def test_complete_patient_session_accepts_blank_follow_up_date(self):
+        response = self.client.post(
+            reverse('clinic-patients-complete-session', kwargs={'pk': self.patient.id}),
+            self._completed_session_payload(next_appointment_date=''),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        session = VeterinarySession.objects.get(id=response.data['id'])
+        self.assertIsNone(session.next_appointment_date)
+        self.assertIsNone(session.appointment.next_appointment)
+
+    def test_complete_patient_session_invalid_date_returns_400(self):
+        response = self.client.post(
+            reverse('clinic-patients-complete-session', kwargs={'pk': self.patient.id}),
+            self._completed_session_payload(scheduled_date='not-a-date'),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(VeterinarySession.objects.count(), 0)
+
+    def test_complete_patient_session_rejects_non_veterinarian_provider(self):
+        non_vet = User.objects.create_user(
+            username='non-vet@example.com',
+            email='non-vet@example.com',
+            password='pass12345',
+            user_type='clinic_staff',
+        )
+        ClinicStaff.objects.create(user=non_vet, clinic=self.clinic, role='assistant')
+
+        response = self.client.post(
+            reverse('clinic-patients-complete-session', kwargs={'pk': self.patient.id}),
+            self._completed_session_payload(care_provider=non_vet.id),
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('care_provider', response.data)
+        self.assertEqual(VeterinarySession.objects.count(), 0)
 
     def test_create_patient_accepts_age_months_integer(self):
         response = self.client.post(
