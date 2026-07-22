@@ -1035,6 +1035,35 @@ class VeterinarySessionEndSerializer(VeterinarySessionSerializer):
         return attrs
 
 
+class ClinicPatientCompletedSessionSerializer(VeterinarySessionEndSerializer):
+    appointment_type = serializers.ChoiceField(
+        choices=[choice[0] for choice in VeterinaryAppointment.APPOINTMENT_TYPE_CHOICES],
+        required=False,
+        default='checkup',
+    )
+    scheduled_date = serializers.DateField(required=False, allow_null=True)
+    scheduled_time = serializers.TimeField(required=False, allow_null=True)
+
+    class Meta(VeterinarySessionEndSerializer.Meta):
+        fields = [
+            'appointment_type',
+            'scheduled_date',
+            'scheduled_time',
+            *VeterinarySessionEndSerializer.Meta.fields,
+        ]
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        if not data.get('appointment_type'):
+            data['appointment_type'] = 'checkup'
+        for key in ('scheduled_date', 'scheduled_time'):
+            if data.get(key) in ('', None):
+                data.pop(key, None)
+        if data.get('next_appointment_date') == '':
+            data['next_appointment_date'] = None
+        return super().to_internal_value(data)
+
+
 class StorefrontBookingCreateSerializer(serializers.Serializer):
     service_id = serializers.IntegerField()
     customer_name = serializers.CharField()
