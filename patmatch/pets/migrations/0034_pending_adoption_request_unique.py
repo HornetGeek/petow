@@ -4,6 +4,53 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+DROP_OLD_ADOPTION_REQUEST_UNIQUE_SQL = """
+DO $$
+DECLARE
+    item record;
+BEGIN
+    FOR item IN
+        SELECT constraint_name
+        FROM information_schema.table_constraints
+        WHERE table_schema = current_schema()
+          AND table_name = 'pets_adoptionrequest'
+          AND constraint_type = 'UNIQUE'
+          AND constraint_name IN (
+              SELECT tc.constraint_name
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_schema = kcu.constraint_schema
+               AND tc.constraint_name = kcu.constraint_name
+               AND tc.table_name = kcu.table_name
+              WHERE tc.table_schema = current_schema()
+                AND tc.table_name = 'pets_adoptionrequest'
+                AND tc.constraint_type = 'UNIQUE'
+              GROUP BY tc.constraint_name
+              HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position)
+                   = ARRAY['adopter_id', 'pet_id', 'status']
+          )
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE %I DROP CONSTRAINT IF EXISTS %I',
+            'pets_adoptionrequest',
+            item.constraint_name
+        );
+    END LOOP;
+
+    FOR item IN
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND tablename = 'pets_adoptionrequest'
+          AND indexdef LIKE 'CREATE UNIQUE INDEX%%'
+          AND indexdef LIKE '%%(adopter_id, pet_id, status)%%'
+    LOOP
+        EXECUTE format('DROP INDEX IF EXISTS %I', item.indexname);
+    END LOOP;
+END $$;
+"""
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -12,9 +59,19 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterUniqueTogether(
-            name='adoptionrequest',
-            unique_together=set(),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=DROP_OLD_ADOPTION_REQUEST_UNIQUE_SQL,
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
+            state_operations=[
+                migrations.AlterUniqueTogether(
+                    name='adoptionrequest',
+                    unique_together=set(),
+                ),
+            ],
         ),
         migrations.AddConstraint(
             model_name='adoptionrequest',
