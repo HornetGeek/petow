@@ -140,6 +140,7 @@ class ClinicService(models.Model):
     
     # Pricing - renamed from 'price' to 'base_price'
     base_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="السعر الأساسي")
+    currency = models.CharField(max_length=3, default='EGP', help_text="عملة السعر حسب كود ISO 4217")
     has_tiered_pricing = models.BooleanField(default=False, help_text="هل لديها تسعير متدرج؟")
     pricing_unit = models.CharField(
         max_length=20,
@@ -230,6 +231,7 @@ class ClinicProduct(models.Model):
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='other')
 
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    currency = models.CharField(max_length=3, default='EGP')
     cost_price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     stock_quantity = models.PositiveIntegerField(default=0)
     sku = models.CharField(max_length=80, blank=True, null=True)
@@ -274,6 +276,7 @@ class StorefrontOrder(models.Model):
     notes = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    currency = models.CharField(max_length=3, default='EGP')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -369,6 +372,7 @@ class StorefrontBooking(models.Model):
     contact_channel = models.CharField(max_length=20, choices=CONTACT_CHANNEL_CHOICES, default='app')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
     quoted_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    quoted_currency = models.CharField(max_length=3, default='EGP')
     confirmed_appointment = models.ForeignKey(
         'clinics.VeterinaryAppointment',
         on_delete=models.SET_NULL,
@@ -649,6 +653,7 @@ class ClinicPatientRecord(models.Model):
     species = models.CharField(max_length=60)
     breed = models.CharField(max_length=120, blank=True, null=True)
     date_of_birth = models.DateField(blank=True, null=True)
+    age_months = models.PositiveIntegerField(blank=True, null=True)
     age_text = models.CharField(max_length=80, blank=True, null=True)
     gender = models.CharField(max_length=10, blank=True, null=True)
     weight_kg = models.DecimalField(max_digits=6, decimal_places=2, blank=True, null=True)
