@@ -1581,7 +1581,13 @@ class AdoptionRequest(models.Model):
         verbose_name = "طلب تبني"
         verbose_name_plural = "طلبات التبني"
         ordering = ['-created_at']
-        unique_together = ['adopter', 'pet', 'status']  # منع الطلبات المكررة
+        constraints = [
+            models.UniqueConstraint(
+                fields=['adopter', 'pet'],
+                condition=models.Q(status='pending'),
+                name='pets_adoption_pending_unique',
+            ),
+        ]
         indexes = [
             models.Index(fields=['adopter', 'created_at'], name='pets_adopti_adopter_e507df_idx'),
             models.Index(fields=['pet', 'status', 'created_at'], name='pets_adopti_pet_id_5cc999_idx'),
