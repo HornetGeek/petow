@@ -42,7 +42,7 @@ class ServicePricingTierInline(admin.TabularInline):
 
 @admin.register(ClinicService)
 class ClinicServiceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clinic', 'category', 'base_price', 'has_tiered_pricing', 'is_active', 'is_featured')
+    list_display = ('name', 'clinic', 'category', 'base_price', 'currency', 'has_tiered_pricing', 'is_active', 'is_featured')
     list_filter = ('clinic', 'category', 'is_active', 'is_featured', 'has_tiered_pricing')
     search_fields = ('name', 'clinic__name')
     inlines = [ServicePricingTierInline]
@@ -54,7 +54,7 @@ class ClinicServiceAdmin(admin.ModelAdmin):
             'fields': ('applicable_pet_types',)
         }),
         ('Pricing', {
-            'fields': ('base_price', 'has_tiered_pricing', 'pricing_unit', 'min_duration_units')
+            'fields': ('base_price', 'currency', 'has_tiered_pricing', 'pricing_unit', 'min_duration_units')
         }),
         ('Details', {
             'fields': ('duration_minutes', 'requires_appointment')
@@ -67,7 +67,7 @@ class ClinicServiceAdmin(admin.ModelAdmin):
 
 @admin.register(ClinicProduct)
 class ClinicProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clinic', 'category', 'price', 'stock_quantity', 'is_active', 'updated_at')
+    list_display = ('name', 'clinic', 'category', 'price', 'currency', 'stock_quantity', 'is_active', 'updated_at')
     list_filter = ('clinic', 'category', 'is_active')
     search_fields = ('name', 'sku', 'clinic__name')
 
