@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.conf import settings
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from django.db.models.signals import post_save
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -845,6 +846,110 @@ class DailyReminderEmailPolicyTests(TestCase):
             target_date=self.target_date,
         )
         self.assertEqual(dispatch.status, EmailReminderDispatch.STATUS_SENT)
+
+
+class AdoptionRequestUniquenessTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        post_save.disconnect(receiver=claim_invites_when_user_updates, sender=User)
+
+    @classmethod
+    def tearDownClass(cls):
+        post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username='adoption-owner',
+            email='adoption-owner@example.com',
+            password='testpass123',
+            phone='5100000000',
+            first_name='Adoption',
+            last_name='Owner',
+        )
+        self.adopter = User.objects.create_user(
+            username='adoption-user',
+            email='adoption-user@example.com',
+            password='testpass123',
+            phone='5200000000',
+            first_name='Adoption',
+            last_name='User',
+        )
+        self.breed = Breed.objects.create(name='Constraint Breed', pet_type='cats')
+        self.pet = Pet.objects.create(
+            owner=self.owner,
+            name='Constraint Cat',
+            pet_type='cats',
+            breed=self.breed,
+            age_months=12,
+            gender='F',
+            description='Friendly cat',
+            hosting_preference='flexible',
+            main_image=SimpleUploadedFile('constraint.jpg', b'\xff\xd8\xff', content_type='image/jpeg'),
+            status='available_for_adoption',
+            location='Riyadh',
+            latitude=Decimal('24.7136'),
+            longitude=Decimal('46.6753'),
+            is_free=True,
+        )
+
+    def _create_adoption_request(self, status='pending'):
+        return AdoptionRequest.objects.create(
+            adopter=self.adopter,
+            pet=self.pet,
+            adopter_name='Adoption User',
+            adopter_email='adoption-user@example.com',
+            adopter_phone='5200000000',
+            adopter_age=31,
+            adopter_occupation='Engineer',
+            adopter_address='Riyadh',
+            status=status,
+        )
+
+    def test_pending_requests_are_unique_per_adopter_and_pet(self):
+        self._create_adoption_request(status='pending')
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._create_adoption_request(status='pending')
+
+    def test_rejected_history_can_have_multiple_attempts(self):
+        first = self._create_adoption_request(status='rejected')
+        second = self._create_adoption_request(status='rejected')
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(
+            AdoptionRequest.objects.filter(
+                adopter=self.adopter,
+                pet=self.pet,
+                status='rejected',
+            ).count(),
+            2,
+        )
+
+    @patch('pets.management.commands.auto_manage_requests.send_system_message')
+    def test_auto_manage_can_reject_pending_request_with_rejected_history(self, mocked_system_message):
+        self._create_adoption_request(status='rejected')
+        pending = self._create_adoption_request(status='pending')
+        AdoptionRequest.objects.filter(id=pending.id).update(
+            created_at=timezone.now() - timedelta(days=8),
+        )
+
+        call_command('auto_manage_requests')
+
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, 'rejected')
+        self.assertIn('auto_rejected_due_to_inactivity', pending.admin_notes)
+        self.assertEqual(
+            AdoptionRequest.objects.filter(
+                adopter=self.adopter,
+                pet=self.pet,
+                status='rejected',
+            ).count(),
+            2,
+        )
+        self.assertEqual(mocked_system_message.call_count, 1)
 
 
 class PetOnboardingStateSignalTests(TestCase):
