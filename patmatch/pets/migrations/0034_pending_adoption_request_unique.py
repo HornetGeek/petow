@@ -26,8 +26,8 @@ BEGIN
                 AND tc.table_name = 'pets_adoptionrequest'
                 AND tc.constraint_type = 'UNIQUE'
               GROUP BY tc.constraint_name
-              HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position)
-                   = ARRAY['adopter_id', 'pet_id', 'status']
+              HAVING array_agg(kcu.column_name::text ORDER BY kcu.ordinal_position)
+                   = ARRAY['adopter_id', 'pet_id', 'status']::text[]
           )
     LOOP
         EXECUTE format(
