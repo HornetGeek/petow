@@ -98,6 +98,7 @@ from .serializers import (
     ClinicPatientMedicalRecordCreateSerializer,
     ClinicPatientNoteSerializer,
     ClinicPatientProfileSerializer,
+    _absolute_file_url,
     get_or_create_patient_record_for_pet,
     ClinicInviteSerializer,
     VeterinarianSerializer,
@@ -360,7 +361,6 @@ class ClinicMapMarkersView(APIView):
                 Clinic.objects
                 .filter(is_active=True)
                 .annotate(staff_count=Count('staff_members', distinct=True))
-                .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
                 .distinct()
                 .annotate(
                     effective_point_geom=Cast(
@@ -1041,7 +1041,6 @@ class PublicMarketplaceServicesView(APIView):
                 ClinicService.objects
                 .filter(is_active=True, clinic__is_active=True)
                 .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
-                .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
                 .annotate(
                     marketplace_min_price=Min(
                         'pricing_tiers__price',
@@ -1120,7 +1119,6 @@ class PublicClinicListView(APIView):
             Clinic.objects
             .filter(is_active=True)
             .annotate(staff_count=Count('staff_members', distinct=True))
-            .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
         )
         category_filter = _build_service_category_filter(request.query_params.get('service_category'))
@@ -1843,7 +1841,7 @@ class PlatformAdminClinicListView(APIView):
         serializer.is_valid(raise_exception=True)
         result = serializer.save()
         return Response(
-            ClinicSerializer(result['clinic'], context={'request': request}).data,
+            ClinicListSerializer(result['clinic'], context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -2710,6 +2708,121 @@ class PublicStorefrontBookingProposalRespondView(APIView):
             )
 
         return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
+
+
+def _owner_booking_queryset(user):
+    phone = (getattr(user, 'phone', '') or '').strip()
+    email = (getattr(user, 'email', '') or '').strip()
+    query = Q(customer_user=user)
+    if phone:
+        query |= Q(customer_phone=phone)
+    if email:
+        query |= Q(customer_email__iexact=email)
+    return (
+        StorefrontBooking.objects
+        .filter(query)
+        .select_related('clinic', 'service', 'confirmed_appointment', 'linked_patient')
+        .prefetch_related('proposals', 'timeline_events')
+        .distinct()
+        .order_by('-created_at')
+    )
+
+
+class OwnerStorefrontBookingListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get('limit')
+        try:
+            limit = min(max(int(raw_limit or 30), 1), 100)
+        except (TypeError, ValueError):
+            limit = 30
+        bookings = list(_owner_booking_queryset(request.user)[:limit])
+        serializer = StorefrontBookingSerializer(bookings, many=True, context={'request': request})
+        return Response({'count': len(serializer.data), 'results': serializer.data})
+
+
+class OwnerPetMedicalRecordsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pet_id):
+        pet = get_object_or_404(Pet, id=pet_id, owner=request.user)
+        patient_records = ClinicPatientRecord.objects.filter(linked_user=request.user, linked_pet=pet)
+        patient_ids = list(patient_records.values_list('id', flat=True))
+
+        active_statuses = {
+            StorefrontBooking.STATUS_PENDING,
+            StorefrontBooking.STATUS_ACCEPTED,
+            StorefrontBooking.STATUS_IN_SESSION,
+        }
+        active_bookings = _owner_booking_queryset(request.user).filter(
+            Q(linked_patient_id__in=patient_ids) | Q(pet_name__iexact=pet.name),
+            request_type='appointment',
+            status__in=active_statuses,
+        )[:5]
+
+        appointment_query = Q(pet=pet, owner=request.user)
+        if patient_ids:
+            appointment_query |= Q(clinic_patient_id__in=patient_ids)
+        appointments = (
+            VeterinaryAppointment.objects
+            .filter(appointment_query)
+            .select_related('clinic', 'clinic_patient')
+            .order_by('-scheduled_date', '-scheduled_time')[:20]
+        )
+
+        medical_records = []
+        vaccination_records = []
+        for appointment in appointments:
+            base = {
+                'id': appointment.id,
+                'clinic_id': appointment.clinic_id,
+                'clinic_name': appointment.clinic.name if appointment.clinic_id else '',
+                'patient_name': (
+                    appointment.pet.name if appointment.pet_id else
+                    appointment.clinic_patient.name if appointment.clinic_patient_id else
+                    pet.name
+                ),
+                'title': appointment.get_appointment_type_display() or 'زيارة عيادة',
+                'appointment_type': appointment.appointment_type,
+                'date': appointment.scheduled_date,
+                'time': appointment.scheduled_time,
+                'status': normalize_appointment_status(appointment.status),
+                'status_display': appointment.get_status_display(),
+                'reason': appointment.reason or '',
+                'diagnosis': appointment.diagnosis or '',
+                'treatment': appointment.treatment or '',
+                'notes': appointment.notes or '',
+                'next_appointment': appointment.next_appointment,
+            }
+            medical_records.append(base)
+            if appointment.appointment_type == 'vaccination':
+                vaccination_records.append(base)
+
+        documents = ClinicPatientDocument.objects.filter(patient_id__in=patient_ids).select_related('clinic', 'patient')
+        files = []
+        for document in documents[:30]:
+            files.append({
+                'id': document.id,
+                'clinic_id': document.clinic_id,
+                'clinic_name': document.clinic.name if document.clinic_id else '',
+                'title': document.title,
+                'category': document.category,
+                'category_display': document.get_category_display(),
+                'file_url': _absolute_file_url(request, document.file),
+                'notes': document.notes or '',
+                'issued_at': document.issued_at,
+                'expires_at': document.expires_at,
+                'created_at': document.created_at,
+            })
+
+        return Response({
+            'pet': {'id': pet.id, 'name': pet.name},
+            'active_appointments': StorefrontBookingSerializer(active_bookings, many=True, context={'request': request}).data,
+            'medical_records': medical_records,
+            'vaccinations': vaccination_records,
+            'files': files,
+        })
 
 
 

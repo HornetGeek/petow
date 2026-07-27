@@ -295,6 +295,7 @@ class ClinicListSerializer(serializers.ModelSerializer):
 class ClinicMapPointSerializer(serializers.ModelSerializer):
     """Lightweight serializer for clinic map markers."""
     service_categories = serializers.SerializerMethodField()
+    has_dashboard = serializers.SerializerMethodField()
     distance = serializers.SerializerMethodField()
     distance_display = serializers.SerializerMethodField()
     latitude = serializers.SerializerMethodField()
@@ -345,13 +346,19 @@ class ClinicMapPointSerializer(serializers.ModelSerializer):
         ordered = [choice[0] for choice in ClinicService.CATEGORY_CHOICES]
         return [key for key in ordered if key in categories]
 
+    def get_has_dashboard(self, obj):
+        staff_count = getattr(obj, 'staff_count', None)
+        if staff_count is None:
+            staff_count = obj.staff_members.count()
+        return bool(obj.owner_id or staff_count)
+
     class Meta:
         model = Clinic
         fields = [
             'id', 'name', 'address', 'city', 'phone', 'whatsapp_phone', 'email',
             'logo', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active',
-            'service_categories', 'distance', 'distance_display',
+            'has_dashboard', 'service_categories', 'distance', 'distance_display',
         ]
         read_only_fields = fields
 
@@ -1930,25 +1937,39 @@ class ClinicDashboardStatsSerializer(serializers.Serializer):
 
 
 class ClinicRegistrationSerializer(serializers.Serializer):
+    LISTING_MODE_DASHBOARD = 'dashboard_account'
+    LISTING_MODE_CONTACT = 'contact_only'
+    LISTING_MODE_INTERNAL = 'internal_only'
+    LISTING_MODE_CHOICES = (
+        (LISTING_MODE_DASHBOARD, 'Dashboard account'),
+        (LISTING_MODE_CONTACT, 'Mobile contact listing'),
+        (LISTING_MODE_INTERNAL, 'Internal only'),
+    )
+
+    listing_mode = serializers.ChoiceField(
+        choices=LISTING_MODE_CHOICES,
+        required=False,
+        default=LISTING_MODE_DASHBOARD,
+    )
     clinic_name = serializers.CharField(max_length=200)
     clinic_description = serializers.CharField(required=False, allow_blank=True)
-    clinic_email = serializers.EmailField()
-    clinic_phone = serializers.CharField(max_length=20)
+    clinic_email = serializers.EmailField(required=False, allow_blank=True)
+    clinic_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     clinic_emergency_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     clinic_whatsapp_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     clinic_address = serializers.CharField()
     clinic_opening_hours = serializers.CharField()
-    clinic_services = serializers.CharField()
+    clinic_services = serializers.CharField(required=False, allow_blank=True)
     clinic_website = serializers.URLField(required=False, allow_blank=True)
     clinic_latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True)
     clinic_longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True)
 
-    owner_first_name = serializers.CharField(max_length=150)
-    owner_last_name = serializers.CharField(max_length=150)
-    owner_email = serializers.EmailField()
-    owner_phone = serializers.CharField(max_length=20)
-    password1 = serializers.CharField(write_only=True)
-    password2 = serializers.CharField(write_only=True)
+    owner_first_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    owner_last_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    owner_email = serializers.EmailField(required=False, allow_blank=True)
+    owner_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    password1 = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    password2 = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     def validate_owner_email(self, value):
         if User.objects.filter(email=value).exists():
@@ -1956,11 +1977,60 @@ class ClinicRegistrationSerializer(serializers.Serializer):
         return value
 
     def validate(self, attrs):
-        if attrs['password1'] != attrs['password2']:
+        listing_mode = attrs.get('listing_mode') or self.LISTING_MODE_DASHBOARD
+
+        if listing_mode == self.LISTING_MODE_DASHBOARD:
+            required_fields = [
+                'clinic_email',
+                'clinic_phone',
+                'clinic_services',
+                'owner_first_name',
+                'owner_last_name',
+                'owner_email',
+                'owner_phone',
+                'password1',
+                'password2',
+            ]
+            missing = [field for field in required_fields if not attrs.get(field)]
+            if missing:
+                raise serializers.ValidationError({
+                    field: "هذا الحقل مطلوب" for field in missing
+                })
+        elif listing_mode == self.LISTING_MODE_CONTACT:
+            if not attrs.get('clinic_whatsapp_phone'):
+                raise serializers.ValidationError({
+                    'clinic_whatsapp_phone': "رقم واتساب مطلوب لعيادة بدون حساب لوحة تحكم"
+                })
+            if attrs.get('clinic_latitude') is None or attrs.get('clinic_longitude') is None:
+                raise serializers.ValidationError({
+                    'clinic_location': "يجب تحديد موقع العيادة على الخريطة"
+                })
+
+        if attrs.get('password1') != attrs.get('password2'):
             raise serializers.ValidationError({'password2': "كلمات المرور غير متطابقة"})
         return attrs
 
     def create(self, validated_data):
+        listing_mode = validated_data.get('listing_mode') or self.LISTING_MODE_DASHBOARD
+        if listing_mode in (self.LISTING_MODE_CONTACT, self.LISTING_MODE_INTERNAL):
+            clinic = Clinic.objects.create(
+                owner=None,
+                name=validated_data['clinic_name'],
+                description=validated_data.get('clinic_description', ''),
+                address=validated_data['clinic_address'],
+                phone=validated_data.get('clinic_phone') or validated_data.get('clinic_whatsapp_phone') or '',
+                emergency_phone=validated_data.get('clinic_emergency_phone'),
+                whatsapp_phone=validated_data.get('clinic_whatsapp_phone'),
+                email=validated_data.get('clinic_email') or None,
+                website=validated_data.get('clinic_website'),
+                opening_hours=validated_data['clinic_opening_hours'],
+                services=validated_data.get('clinic_services') or '',
+                latitude=validated_data.get('clinic_latitude'),
+                longitude=validated_data.get('clinic_longitude'),
+                is_active=listing_mode == self.LISTING_MODE_CONTACT,
+            )
+            return {'clinic': clinic, 'owner': None}
+
         password = validated_data.pop('password1')
         validated_data.pop('password2', None)
 
@@ -1985,7 +2055,7 @@ class ClinicRegistrationSerializer(serializers.Serializer):
             email=validated_data['clinic_email'],
             website=validated_data.get('clinic_website'),
             opening_hours=validated_data['clinic_opening_hours'],
-            services=validated_data['clinic_services'],
+            services=validated_data.get('clinic_services') or '',
             latitude=validated_data.get('clinic_latitude'),
             longitude=validated_data.get('clinic_longitude'),
         )
