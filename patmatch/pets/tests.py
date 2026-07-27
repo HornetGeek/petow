@@ -21,7 +21,7 @@ from clinics.signals import claim_invites_when_user_updates
 from .email_notifications import send_adoption_request_email, send_daily_unread_messages_reminder
 from .models import AdoptionRequest, Breed, BreedingRequest, ChatRoom, EmailReminderDispatch, EngagementEvent, Notification, NotificationDeliveryAttempt, NotificationOutbox, Pet, PetLike, SavedSearch, SavedSearchMatch, Story, StoryReaction, StoryReport, StoryView
 from .notification_events import enqueue_notification_event
-from .notifications import notify_new_adoption_pet, notify_new_pet_added
+from .notifications import notify_adoption_request_received, notify_breeding_request_received, notify_new_adoption_pet, notify_new_pet_added
 from .serializers import ChatContextSerializer, ChatRoomListSerializer, PetListSerializer, PetSerializer
 from .tasks import (
     process_notification_outbox_event,
@@ -1394,6 +1394,7 @@ class RequestCenterSavedSearchDigestTests(TestCase):
             services='Care',
             is_active=True,
         )
+
         self.service = ClinicService.objects.create(
             clinic=self.clinic,
             name='Grooming',
@@ -1402,6 +1403,44 @@ class RequestCenterSavedSearchDigestTests(TestCase):
             base_price=Decimal('50.00'),
             is_active=True,
         )
+
+    @patch('pets.notifications._send_push_if_allowed', return_value=True)
+    @patch('pets.notifications.send_breeding_request_email')
+    def test_breeding_opt_out_skips_notification_record(self, mock_email, mock_push):
+        self.owner.notify_breeding_requests = False
+        self.owner.save(update_fields=['notify_breeding_requests'])
+
+        result = notify_breeding_request_received(self.breeding_request)
+
+        self.assertIsNone(result)
+        self.assertFalse(
+            Notification.objects.filter(
+                user=self.owner,
+                type='breeding_request_received',
+                related_breeding_request=self.breeding_request,
+            ).exists()
+        )
+        self.assertEqual(mock_push.call_count, 0)
+        self.assertEqual(mock_email.call_count, 0)
+
+    @patch('pets.notifications._send_push_if_allowed', return_value=True)
+    @patch('pets.notifications.send_adoption_request_email')
+    def test_adoption_opt_out_skips_notification_record(self, mock_email, mock_push):
+        self.owner.notify_adoption_pets = False
+        self.owner.save(update_fields=['notify_adoption_pets'])
+
+        result = notify_adoption_request_received(self.adoption_request)
+
+        self.assertIsNone(result)
+        self.assertFalse(
+            Notification.objects.filter(
+                user=self.owner,
+                type='adoption_request_received',
+                related_pet=self.owner_pet,
+            ).exists()
+        )
+        self.assertEqual(mock_push.call_count, 0)
+        self.assertEqual(mock_email.call_count, 0)
 
     def _image(self, name):
         return SimpleUploadedFile(name, b'\xff\xd8\xff', content_type='image/jpeg')

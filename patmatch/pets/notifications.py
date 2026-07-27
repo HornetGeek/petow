@@ -492,6 +492,10 @@ def notify_breeding_request_received(breeding_request, event_key=None):
     else:
         message += " (مكان المقابلة سيتم تحديده لاحقاً)"
 
+    if getattr(receiver, 'notify_breeding_requests', True) is False:
+        logger.info("Breeding notifications disabled for user %s", receiver.id)
+        return None
+
     # إنشاء الإشعار
     notification, created = create_notification_once(
         user=receiver,
