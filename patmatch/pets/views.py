@@ -334,7 +334,7 @@ def _build_storefront_booking_card(booking, request):
         'updated_at': booking.created_at,
         'requires_action': status_value in {'new', 'confirmed'},
         'action_label': 'متابعة الاستفسار' if is_inquiry else 'متابعة الحجز',
-        'deep_link': f'petow://services?booking_id={booking.id}',
+        'deep_link': f'petow://clinic-booking?booking_public_id={booking.public_id}',
         'metadata': {
             'booking_id': booking.id,
             'public_id': str(booking.public_id),
