@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 from accounts.models import User
 from datetime import timedelta
 
@@ -716,24 +717,24 @@ class PetLike(models.Model):
 class Notification(models.Model):
     """نموذج الإشعارات"""
     NOTIFICATION_TYPES = [
-        ('breeding_request_received', 'تم استلام طلب مقابلة جديد'),
-        ('breeding_request_approved', 'تم قبول طلب المقابلة'),
-        ('breeding_request_rejected', 'تم رفض طلب المقابلة'),
-        ('breeding_request_completed', 'تم إكمال المقابلة'),
-        ('favorite_added', 'تم إضافة حيوانك إلى المفضلة'),
-        ('pet_status_changed', 'تم تغيير حالة حيوانك'),
-        ('system_message', 'رسالة من النظام'),
-        ('chat_message_received', 'تم استلام رسالة جديدة'),
-        ('pet_nearby', 'حيوان جديد بالقرب منك'),
-        ('adoption_pet_nearby', 'حيوان للتبني بالقرب منك'),
-        ('saved_search_match', 'نتيجة جديدة لبحث محفوظ'),
-        ('clinic_broadcast', 'إشعار من العيادة'),
-        ('clinic_invite', 'دعوة ربط عيادة'),
-        ('breeding_request_pending_reminder', 'تذكير بطلب مقابلة معلق'),
-        ('adoption_request_received', 'تم استلام طلب تبني جديد'),
-        ('adoption_request_approved', 'تم قبول طلب التبني'),
-        ('adoption_request_pending_reminder', 'تذكير بطلب تبني معلق'),
-        ('account_verification_approved', 'تم اعتماد التحقق من الحساب'),
+        ('breeding_request_received', _('New breeding request received')),
+        ('breeding_request_approved', _('Breeding request approved')),
+        ('breeding_request_rejected', _('Breeding request rejected')),
+        ('breeding_request_completed', _('Breeding meeting completed')),
+        ('favorite_added', _('Pet added to favorites')),
+        ('pet_status_changed', _('Pet status changed')),
+        ('system_message', _('System message')),
+        ('chat_message_received', _('New message received')),
+        ('pet_nearby', _('A new pet is nearby')),
+        ('adoption_pet_nearby', _('An adoptable pet is nearby')),
+        ('saved_search_match', _('New saved-search match')),
+        ('clinic_broadcast', _('Clinic notification')),
+        ('clinic_invite', _('Clinic connection invitation')),
+        ('breeding_request_pending_reminder', _('Pending breeding request reminder')),
+        ('adoption_request_received', _('New adoption request received')),
+        ('adoption_request_approved', _('Adoption request approved')),
+        ('adoption_request_pending_reminder', _('Pending adoption request reminder')),
+        ('account_verification_approved', _('Account verification approved')),
     ]
     
     user = models.ForeignKey(
@@ -749,6 +750,8 @@ class Notification(models.Model):
     )
     title = models.CharField(max_length=200, help_text="عنوان الإشعار")
     message = models.TextField(help_text="محتوى الإشعار")
+    template_key = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    template_context = models.JSONField(default=dict, blank=True)
     event_key = models.CharField(
         max_length=255,
         null=True,

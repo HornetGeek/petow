@@ -865,6 +865,8 @@ class FavoriteSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 class NotificationSerializer(serializers.ModelSerializer):
+    title = serializers.SerializerMethodField()
+    message = serializers.SerializerMethodField()
     type_display = serializers.CharField(source='get_type_display', read_only=True)
     related_pet_details = PetListSerializer(source='related_pet', read_only=True)
     time_ago = serializers.SerializerMethodField()
@@ -880,6 +882,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = [
             'id', 'type', 'type_display', 'title', 'message', 
+            'template_key', 'template_context',
             'related_pet', 'related_pet_details',
             'related_breeding_request', 'related_chat_room', 'is_read', 'read_at',
             'extra_data', 'created_at', 'time_ago',
@@ -887,6 +890,25 @@ class NotificationSerializer(serializers.ModelSerializer):
             'entity_type', 'entity_id',
         ]
         read_only_fields = ['user', 'created_at', 'read_at']
+
+    def _rendered(self, obj):
+        from django.utils import translation
+        from .notification_templates import render_notification
+
+        language = (translation.get_language() or getattr(obj.user, 'preferred_language', 'ar'))[:2]
+        return render_notification(
+            obj.template_key,
+            obj.template_context,
+            language,
+            obj.title,
+            obj.message,
+        )
+
+    def get_title(self, obj):
+        return self._rendered(obj)[0]
+
+    def get_message(self, obj):
+        return self._rendered(obj)[1]
     
     def get_time_ago(self, obj):
         """حساب الوقت المنقضي منذ إنشاء الإشعار"""
@@ -896,16 +918,18 @@ class NotificationSerializer(serializers.ModelSerializer):
         now = timezone.now()
         diff = now - obj.created_at
         
+        from django.utils.translation import ngettext, gettext
+
         if diff.days > 0:
-            return f"منذ {diff.days} يوم"
+            return ngettext('%(count)d day ago', '%(count)d days ago', diff.days) % {'count': diff.days}
         elif diff.seconds > 3600:
             hours = diff.seconds // 3600
-            return f"منذ {hours} ساعة"
+            return ngettext('%(count)d hour ago', '%(count)d hours ago', hours) % {'count': hours}
         elif diff.seconds > 60:
             minutes = diff.seconds // 60
-            return f"منذ {minutes} دقيقة"
+            return ngettext('%(count)d minute ago', '%(count)d minutes ago', minutes) % {'count': minutes}
         else:
-            return "الآن" 
+            return gettext('Now')
 
     def _context_payload(self, obj):
         payload = dict(self._extra_data(obj))

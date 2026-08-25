@@ -20,6 +20,7 @@ from .models import (
     PasswordResetOTP,
     AccountVerification,
     MobileAppConfig,
+    PushDevice,
 )
 from .email_notifications import send_welcome_email, send_password_reset_email
 from .google_maps_service import GoogleMapsService, GoogleMapsServiceError
@@ -29,11 +30,20 @@ import logging
 import hashlib
 import os
 import re
+from django.utils.translation import gettext as _
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
 logger = logging.getLogger(__name__)
+
+
+def _error(code, message, http_status=status.HTTP_400_BAD_REQUEST):
+    return Response({"code": code, "error": _(message)}, status=http_status)
+
+
+def _message(code, message, **extra):
+    return Response({"code": code, "message": _(message), **extra})
 
 
 class GoogleMapsAutocompleteThrottle(UserRateThrottle):
@@ -297,7 +307,7 @@ class UserProfileView(generics.RetrieveUpdateDestroyAPIView):
         user.email = f"deleted_{timestamp}_{user.email}"
         user.save()
 
-        return Response({"message": "تم حذف الحساب بنجاح"}, status=status.HTTP_200_OK)
+        return _message("account_deleted", "Your account was deleted successfully.")
 
 
 @api_view(["POST"])
@@ -308,19 +318,14 @@ def login(request):
     password = request.data.get("password")
 
     if not email or not password:
-        return Response(
-            {"error": "البريد الإلكتروني وكلمة المرور مطلوبان"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error("credentials_required", "Email and password are required.")
 
     user = authenticate(username=email, password=password)
     if user:
         token, created = Token.objects.get_or_create(user=user)
         return Response({"key": token.key, "user": UserSerializer(user).data})
 
-    return Response(
-        {"error": "بيانات تسجيل الدخول غير صحيحة"}, status=status.HTTP_400_BAD_REQUEST
-    )
+    return _error("invalid_credentials", "The email or password is incorrect.")
 
 
 @api_view(["POST"])
@@ -345,19 +350,25 @@ def register(request):
                 {
                     "key": token.key,
                     "user": UserSerializer(user).data,
-                    "message": "تم إنشاء الحساب بنجاح",
+                    "code": "account_created",
+                    "message": _("Account created successfully."),
                 },
                 status=status.HTTP_201_CREATED,
             )
 
         except Exception as e:
             logger.error(f"Error creating user: {str(e)}")
-            return Response(
-                {"error": "حدث خطأ في إنشاء الحساب"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return _error("account_creation_failed", "Could not create the account.", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response(
+        {
+            **serializer.errors,
+            "code": "validation_error",
+            "message": _("Please correct the highlighted fields."),
+            "errors": serializer.errors,
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
 
 
 @api_view(["POST"])
@@ -365,12 +376,12 @@ def register(request):
 def google_login(request):
     """Login or register via Google ID token."""
     id_token_str = request.data.get("id_token")
+    preferred_language = request.data.get("preferred_language", "ar")
+    if preferred_language not in {"ar", "en"}:
+        preferred_language = "ar"
 
     if not id_token_str:
-        return Response(
-            {"error": "رمز Google مطلوب"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error("google_token_required", "Google token is required.")
 
     try:
         idinfo = google_id_token.verify_oauth2_token(
@@ -379,10 +390,7 @@ def google_login(request):
         )
     except Exception as exc:
         logger.error("Google token verification failed: %s", exc)
-        return Response(
-            {"error": "رمز Google غير صالح أو منتهي الصلاحية"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error("google_token_invalid", "The Google token is invalid or expired.")
 
     google_id = idinfo.get("sub")
     email = idinfo.get("email", "")
@@ -391,10 +399,7 @@ def google_login(request):
     picture = idinfo.get("picture", "")
 
     if not email:
-        return Response(
-            {"error": "حساب Google لا يحتوي على بريد إلكتروني"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error("google_email_missing", "The Google account does not provide an email address.")
 
     is_new_user = False
 
@@ -427,6 +432,7 @@ def google_login(request):
                 password=random_password,
                 auth_provider="google",
                 google_id=google_id,
+                preferred_language=preferred_language,
             )
             is_new_user = True
 
@@ -453,11 +459,9 @@ def logout(request):
     """تسجيل الخروج"""
     try:
         request.user.auth_token.delete()
-        return Response({"message": "تم تسجيل الخروج بنجاح"})
+        return _message("logout_succeeded", "You were logged out successfully.")
     except:
-        return Response(
-            {"error": "خطأ في تسجيل الخروج"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return _error("logout_failed", "Could not log out.")
 
 
 @api_view(["POST"])
@@ -650,26 +654,74 @@ def send_sms(phone_number, message):
     return send_firebase_sms(phone_number, message.split(": ")[-1])
 
 
-@api_view(["POST"])
+@api_view(["POST", "DELETE"])
 @permission_classes([IsAuthenticated])
 def update_notification_token(request):
-    """تحديث FCM token للمستخدم"""
-    fcm_token = request.data.get("fcm_token")
+    """Upsert or deactivate a per-installation FCM token."""
+    fcm_token = (request.data.get("fcm_token") or "").strip()
+    device_id = (request.data.get("device_id") or "").strip()
+    app_type = (request.data.get("app_type") or "petmatch_mobile").strip()
+
+    if request.method == "DELETE":
+        devices = PushDevice.objects.filter(user=request.user, app_type=app_type)
+        if device_id:
+            devices = devices.filter(device_id=device_id)
+        elif fcm_token:
+            devices = devices.filter(token=fcm_token)
+        else:
+            return Response(
+                {"code": "device_identifier_required", "error": _("A device identifier is required.")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        devices.update(is_active=False)
+        replacement = PushDevice.objects.filter(
+            user=request.user, is_active=True
+        ).order_by("-last_seen_at").first()
+        replacement_token = replacement.token if replacement else None
+        if request.user.fcm_token != replacement_token:
+            request.user.fcm_token = replacement_token
+            request.user.save(update_fields=["fcm_token", "updated_at"])
+        return Response({"code": "push_device_deactivated", "message": _("Notifications were disabled for this device.")})
 
     if not fcm_token:
         return Response(
-            {"error": "FCM token مطلوب"}, status=status.HTTP_400_BAD_REQUEST
+            {"code": "fcm_token_required", "error": _("FCM token is required.")},
+            status=status.HTTP_400_BAD_REQUEST,
         )
+
+    language = (request.data.get("language") or request.user.preferred_language or "ar").lower()
+    if language not in {"ar", "en"}:
+        return Response(
+            {"code": "unsupported_language", "error": _("The selected language is not supported.")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not device_id:
+        device_id = f"legacy-user-{request.user.id}"
 
     try:
         user = request.user
         user.fcm_token = fcm_token
-        user.save()
+        user.preferred_language = language
+        user.save(update_fields=["fcm_token", "preferred_language", "updated_at"])
 
-        return Response({"success": True, "message": "تم تحديث FCM token بنجاح"})
+        PushDevice.objects.filter(token=fcm_token).exclude(user=user, device_id=device_id).delete()
+        PushDevice.objects.update_or_create(
+            user=user,
+            device_id=device_id,
+            app_type=app_type,
+            defaults={
+                "token": fcm_token,
+                "platform": (request.data.get("platform") or "").strip(),
+                "language": language,
+                "is_active": True,
+            },
+        )
+
+        return Response({"success": True, "code": "push_device_registered", "message": _("Notification device updated successfully.")})
     except Exception as e:
+        logger.exception("Failed to update notification device for user=%s", request.user.id)
         return Response(
-            {"error": f"خطأ في تحديث FCM token: {str(e)}"},
+            {"code": "push_device_update_failed", "error": _("Could not update the notification device.")},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -681,13 +733,12 @@ def send_password_reset_otp(request):
     email = request.data.get("email")
 
     if not email:
-        return Response(
-            {"error": "البريد الإلكتروني مطلوب"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return _error("email_required", "Email is required.")
 
     generic_response = {
         "success": True,
-        "message": "إذا كان البريد الإلكتروني موجود، ستصلك رسالة بكود التحقق",
+        "code": "password_reset_requested",
+        "message": _("If the email exists, a verification code will be sent."),
     }
 
     try:
@@ -724,10 +775,7 @@ def verify_password_reset_otp(request):
     otp_code = request.data.get("otp_code")
 
     if not email or not otp_code:
-        return Response(
-            {"error": "البريد الإلكتروني وكود التحقق مطلوبان"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error("email_and_code_required", "Email and verification code are required.")
 
     try:
         user = User.objects.get(email=email)
@@ -738,15 +786,10 @@ def verify_password_reset_otp(request):
         ).first()
 
         if not password_reset_otp:
-            return Response(
-                {"error": "كود التحقق غير صحيح"}, status=status.HTTP_400_BAD_REQUEST
-            )
+            return _error("verification_code_invalid", "The verification code is incorrect.")
 
         if password_reset_otp.is_expired():
-            return Response(
-                {"error": "كود التحقق منتهي الصلاحية"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return _error("verification_code_expired", "The verification code has expired.")
 
         # تمييز الكود كمستخدم (لكن لا نحذفه حتى يتم تغيير كلمة المرور)
         password_reset_otp.is_used = True
@@ -755,22 +798,18 @@ def verify_password_reset_otp(request):
         return Response(
             {
                 "success": True,
-                "message": "تم التحقق من الكود بنجاح",
+                "code": "verification_code_confirmed",
+                "message": _("The verification code was confirmed successfully."),
                 "reset_token": password_reset_otp.id,  # نرسل معرف الـ OTP كـ token
             }
         )
 
     except User.DoesNotExist:
-        return Response(
-            {"error": "البريد الإلكتروني غير موجود"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return _error("email_not_found", "The email address was not found.")
 
     except Exception as e:
         logger.error(f"Error in verify_password_reset_otp: {str(e)}")
-        return Response(
-            {"error": "حدث خطأ في التحقق من الكود"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _error("verification_failed", "Could not verify the code.", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["POST"])
@@ -782,20 +821,13 @@ def reset_password_confirm(request):
     confirm_password = request.data.get("confirm_password")
 
     if not reset_token or not new_password or not confirm_password:
-        return Response(
-            {"error": "جميع الحقول مطلوبة"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return _error("required_fields_missing", "All fields are required.")
 
     if new_password != confirm_password:
-        return Response(
-            {"error": "كلمتا المرور غير متطابقتان"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return _error("passwords_do_not_match", "Passwords do not match.")
 
     if len(new_password) < 8:
-        return Response(
-            {"error": "كلمة المرور يجب أن تكون 8 أحرف على الأقل"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error("password_too_short", "Password must contain at least 8 characters.")
 
     try:
         # البحث عن الـ OTP token
@@ -806,10 +838,7 @@ def reset_password_confirm(request):
 
         # التأكد أن الكود لم ينته
         if password_reset_otp.is_expired():
-            return Response(
-                {"error": "انتهت صلاحية جلسة إعادة تعيين كلمة المرور"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return _error("password_reset_expired", "The password reset session has expired.")
 
         # تغيير كلمة المرور
         user = password_reset_otp.user
@@ -821,19 +850,14 @@ def reset_password_confirm(request):
 
         logger.info(f"Password reset successful for user {user.email}")
 
-        return Response({"success": True, "message": "تم تغيير كلمة المرور بنجاح"})
+        return Response({"success": True, "code": "password_changed", "message": _("Password changed successfully.")})
 
     except PasswordResetOTP.DoesNotExist:
-        return Response(
-            {"error": "رمز إعادة التعيين غير صالح"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return _error("password_reset_token_invalid", "The password reset token is invalid.")
 
     except Exception as e:
         logger.error(f"Error in reset_password_confirm: {str(e)}")
-        return Response(
-            {"error": "حدث خطأ في تغيير كلمة المرور"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _error("password_change_failed", "Could not change the password.", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["POST"])
