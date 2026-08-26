@@ -6,6 +6,7 @@ from datetime import date, time
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -33,6 +34,93 @@ from .views import ClinicMapMarkersView, ClinicStorefrontBookingViewSet
 
 
 User = get_user_model()
+
+
+class PlatformAdminClinicCreationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(
+            username='platform-admin@example.com',
+            email='platform-admin@example.com',
+            password='pass12345',
+        )
+        self.client.force_authenticate(self.admin)
+
+    def test_platform_admin_can_create_contact_only_clinic_without_owner_or_services(self):
+        response = self.client.post(reverse('platform-admin-clinics'), {
+            'listing_mode': 'contact_only',
+            'clinic_name': 'Contact Only Vet',
+            'clinic_address': 'Cairo',
+            'clinic_opening_hours': '9-5',
+            'clinic_whatsapp_phone': '01011111111',
+            'clinic_latitude': '30.044400',
+            'clinic_longitude': '31.235700',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        clinic = Clinic.objects.get(name='Contact Only Vet')
+        self.assertIsNone(clinic.owner)
+        self.assertFalse(clinic.staff_members.exists())
+        self.assertTrue(clinic.is_active)
+        self.assertEqual(clinic.services, '')
+        self.assertEqual(response.data['has_dashboard'], False)
+
+    def test_platform_admin_dashboard_account_mode_keeps_owner_creation(self):
+        response = self.client.post(reverse('platform-admin-clinics'), {
+            'listing_mode': 'dashboard_account',
+            'clinic_name': 'Dashboard Vet',
+            'clinic_email': 'clinic@example.com',
+            'clinic_phone': '01000000000',
+            'clinic_address': 'Cairo',
+            'clinic_opening_hours': '9-5',
+            'clinic_services': 'Vaccination',
+            'owner_first_name': 'Clinic',
+            'owner_last_name': 'Owner',
+            'owner_email': 'owner@example.com',
+            'owner_phone': '01022222222',
+            'password1': 'pass12345',
+            'password2': 'pass12345',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        clinic = Clinic.objects.get(name='Dashboard Vet')
+        self.assertIsNotNone(clinic.owner)
+        self.assertTrue(clinic.staff_members.exists())
+        self.assertEqual(response.data['has_dashboard'], True)
+
+
+class PublicContactOnlyClinicDiscoveryTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        cache.clear()
+        self.clinic = Clinic.objects.create(
+            name='Contact Map Vet',
+            address='Cairo',
+            phone='01011111111',
+            whatsapp_phone='01011111111',
+            opening_hours='9-5',
+            services='',
+            latitude='30.044400',
+            longitude='31.235700',
+        )
+
+    def test_public_clinic_list_includes_contact_only_clinics(self):
+        response = self.client.get(reverse('clinic-list-public'))
+
+        self.assertEqual(response.status_code, 200)
+        names = [row['name'] for row in response.data['results']]
+        self.assertIn('Contact Map Vet', names)
+
+    def test_public_clinic_map_includes_contact_only_clinics(self):
+        response = self.client.get(reverse('clinic-map-markers'), {
+            'bbox': '31.0,29.8,31.5,30.3',
+            'zoom': '14',
+            'cluster': 'false',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        names = [row['name'] for row in response.data['points']]
+        self.assertIn('Contact Map Vet', names)
 
 
 class ClinicMapMarkersValidationTests(SimpleTestCase):
@@ -75,6 +163,91 @@ class ClinicMapMarkersValidationTests(SimpleTestCase):
             'تعذر تحميل الخدمات على الخريطة. حاول مرة أخرى لاحقاً.',
         )
         self.assertEqual(response.data.get('release_marker'), 'clinic-map-json-error-v2')
+
+
+class MarketplaceServicesVisibilityTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def _create_clinic_service(self, clinic_name, service_name, **clinic_kwargs):
+        clinic_defaults = {
+            'name': clinic_name,
+            'address': 'Cairo',
+            'phone': '01000000000',
+            'opening_hours': '9-5',
+            'services': 'Vaccination',
+        }
+        clinic_defaults.update(clinic_kwargs)
+        clinic = Clinic.objects.create(**clinic_defaults)
+        service = ClinicService.objects.create(
+            clinic=clinic,
+            name=service_name,
+            category='vaccination',
+            applicable_pet_types=['cats'],
+            base_price=250,
+            duration_minutes=30,
+        )
+        return clinic, service
+
+    def test_marketplace_includes_app_and_non_app_clinics(self):
+        staff = User.objects.create_user(
+            username='clinic-staff@example.com',
+            email='clinic-staff@example.com',
+            password='pass12345',
+            user_type='clinic_staff',
+        )
+        app_clinic, _ = self._create_clinic_service(
+            'App Clinic',
+            'App Vaccination',
+            owner=staff,
+        )
+        ClinicStaff.objects.create(user=staff, clinic=app_clinic, role='owner', is_primary=True)
+        self._create_clinic_service(
+            'WhatsApp Clinic',
+            'WhatsApp Vaccination',
+            whatsapp_phone='01011111111',
+        )
+
+        response = self.client.get(reverse('clinic-marketplace-services'), {'group': 'clinic_vaccination'})
+
+        self.assertEqual(response.status_code, 200)
+        clinics = {
+            row['clinic']['name']: row['clinic']['has_dashboard']
+            for row in response.data['results']
+        }
+        self.assertEqual(clinics['App Clinic'], True)
+        self.assertEqual(clinics['WhatsApp Clinic'], False)
+
+    def test_marketplace_still_excludes_inactive_clinics_and_services(self):
+        self._create_clinic_service('Visible Clinic', 'Visible Vaccination')
+        self._create_clinic_service(
+            'Inactive Clinic',
+            'Hidden Clinic Vaccination',
+            is_active=False,
+        )
+        active_clinic = Clinic.objects.create(
+            name='Clinic With Hidden Service',
+            address='Cairo',
+            phone='01000000000',
+            opening_hours='9-5',
+            services='Vaccination',
+        )
+        ClinicService.objects.create(
+            clinic=active_clinic,
+            name='Hidden Service Vaccination',
+            category='vaccination',
+            applicable_pet_types=['cats'],
+            base_price=250,
+            is_active=False,
+        )
+
+        response = self.client.get(reverse('clinic-marketplace-services'), {'group': 'clinic_vaccination'})
+
+        self.assertEqual(response.status_code, 200)
+        service_names = {row['name'] for row in response.data['results']}
+        self.assertIn('Visible Vaccination', service_names)
+        self.assertNotIn('Hidden Clinic Vaccination', service_names)
+        self.assertNotIn('Hidden Service Vaccination', service_names)
 
 
 class StorefrontBookingWorkflowTests(TestCase):

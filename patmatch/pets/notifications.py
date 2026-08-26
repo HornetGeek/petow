@@ -16,7 +16,7 @@ from .models import (
     BreedingRequest,
     NotificationDeliveryAttempt,
 )
-from accounts.models import User, UserNotificationSettings
+from accounts.models import PushDevice, User, UserNotificationSettings
 from accounts.firebase_service import firebase_service
 from .email_notifications import (
     send_breeding_request_email,
@@ -25,6 +25,7 @@ from .email_notifications import (
     send_adoption_request_approved_email
 )
 from .push_targets import attach_push_targets
+from .notification_templates import has_template, render_notification
 
 logger = logging.getLogger(__name__)
 
@@ -266,9 +267,9 @@ def _should_deliver_push(user, notification_type):
     return allowed, reason, user_settings
 
 
-def _send_push_notification(user, title, message, data=None):
-    """Helper to send a push notification if the user has a valid FCM token."""
-    if not user or not user.fcm_token:
+def _send_push_notification(user, title, message, data=None, notification=None):
+    """Send to every active installation, rendering system text per device language."""
+    if not user:
         return False
 
     if not firebase_service.is_initialized:
@@ -276,19 +277,31 @@ def _send_push_notification(user, title, message, data=None):
         return False
 
     payload = data or {}
-    try:
-        success = firebase_service.send_notification(
-            fcm_token=user.fcm_token,
-            title=title,
-            body=message,
-            data=payload
-        )
-        if not success:
-            logger.warning("Failed to deliver push notification to user %s", user.id)
-        return success
-    except Exception as exc:
-        logger.error("Error sending push notification to user %s: %s", user.id, exc)
-        return False
+    devices = list(PushDevice.objects.filter(user=user, is_active=True))
+    if not devices and user.fcm_token:
+        devices = [type('LegacyDevice', (), {'token': user.fcm_token, 'language': user.preferred_language})()]
+    delivered = False
+    for device in devices:
+        localized_title, localized_message = title, message
+        if notification:
+            localized_title, localized_message = render_notification(
+                notification.template_key,
+                notification.template_context,
+                device.language,
+                title,
+                message,
+            )
+        try:
+            success = firebase_service.send_notification(
+                fcm_token=device.token,
+                title=localized_title,
+                body=localized_message,
+                data=payload,
+            )
+            delivered = success or delivered
+        except Exception as exc:
+            logger.error("Error sending push notification to user %s: %s", user.id, exc)
+    return delivered
 
 
 def _send_push_if_allowed(user, title, message, data=None, category=None, notification=None, notification_type=None):
@@ -318,7 +331,8 @@ def _send_push_if_allowed(user, title, message, data=None, category=None, notifi
     if resolved_type and not payload.get('type'):
         payload['type'] = resolved_type
 
-    if not user.fcm_token:
+    has_active_device = PushDevice.objects.filter(user=user, is_active=True).exists()
+    if not user.fcm_token and not has_active_device:
         _record_delivery_attempt(
             notification,
             NotificationDeliveryAttempt.STATUS_SUPPRESSED,
@@ -336,7 +350,7 @@ def _send_push_if_allowed(user, title, message, data=None, category=None, notifi
         )
         return False
 
-    delivered = _send_push_notification(user, title, message, payload)
+    delivered = _send_push_notification(user, title, message, payload, notification=notification)
     _record_delivery_attempt(
         notification,
         NotificationDeliveryAttempt.STATUS_SENT if delivered else NotificationDeliveryAttempt.STATUS_FAILED,
@@ -407,11 +421,17 @@ def create_notification(
     Returns:
         Notification: الإشعار المُنشأ
     """
+    context = dict(extra_data or {})
+    if related_pet:
+        context.setdefault('pet_name', related_pet.name)
+        context.setdefault('pet_id', related_pet.id)
     return Notification.objects.create(
         user=user,
         type=notification_type,
         title=title,
         message=message,
+        template_key=notification_type if has_template(notification_type) else None,
+        template_context=context,
         event_key=event_key,
         related_pet=related_pet,
         related_breeding_request=related_breeding_request,
@@ -443,10 +463,16 @@ def create_notification_once(
             extra_data=extra_data,
         ), True
 
+    context = dict(extra_data or {})
+    if related_pet:
+        context.setdefault('pet_name', related_pet.name)
+        context.setdefault('pet_id', related_pet.id)
     defaults = {
         'type': notification_type,
         'title': title,
         'message': message,
+        'template_key': notification_type if has_template(notification_type) else None,
+        'template_context': context,
         'related_pet': related_pet,
         'related_breeding_request': related_breeding_request,
         'related_chat_room': related_chat_room,

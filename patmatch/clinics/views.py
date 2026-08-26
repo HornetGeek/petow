@@ -361,7 +361,6 @@ class ClinicMapMarkersView(APIView):
                 Clinic.objects
                 .filter(is_active=True)
                 .annotate(staff_count=Count('staff_members', distinct=True))
-                .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
                 .distinct()
                 .annotate(
                     effective_point_geom=Cast(
@@ -1042,7 +1041,6 @@ class PublicMarketplaceServicesView(APIView):
                 ClinicService.objects
                 .filter(is_active=True, clinic__is_active=True)
                 .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
-                .filter(Q(clinic__owner__isnull=False) | Q(has_staff=True))
                 .annotate(
                     marketplace_min_price=Min(
                         'pricing_tiers__price',
@@ -1121,7 +1119,6 @@ class PublicClinicListView(APIView):
             Clinic.objects
             .filter(is_active=True)
             .annotate(staff_count=Count('staff_members', distinct=True))
-            .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
         )
         category_filter = _build_service_category_filter(request.query_params.get('service_category'))
@@ -1844,7 +1841,7 @@ class PlatformAdminClinicListView(APIView):
         serializer.is_valid(raise_exception=True)
         result = serializer.save()
         return Response(
-            ClinicSerializer(result['clinic'], context={'request': request}).data,
+            ClinicListSerializer(result['clinic'], context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
 

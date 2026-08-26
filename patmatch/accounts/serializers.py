@@ -53,6 +53,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "pets_count",
             "date_joined",
             "fcm_token",
+            "preferred_language",
             "notify_breeding_requests",
             "notify_adoption_pets",
             "notification_settings",
@@ -154,6 +155,7 @@ class UserSerializer(serializers.ModelSerializer):
             "phone",
             "is_phone_verified",
             "fcm_token",
+            "preferred_language",
             "user_type",
             "auth_provider",
         ]
@@ -173,6 +175,7 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
             "last_name",
             "phone",
             "address",
+            "preferred_language",
             "password1",
             "password2",
         ]

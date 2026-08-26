@@ -20,6 +20,7 @@ RUN apt-get update \
         libproj-dev \
         binutils \
         libgeos-dev \
+        gettext \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -30,6 +31,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Collect static files
+RUN python manage.py compilemessages
 RUN python manage.py collectstatic --noinput
 
 # Expose port
