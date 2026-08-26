@@ -11,7 +11,7 @@ type RegisterPayload = {
   password2: string;
   first_name: string;
   last_name: string;
-  phone?: string;
+  phone: string;
 };
 
 type RegisterResult = {
@@ -19,14 +19,23 @@ type RegisterResult = {
   error?: string;
 };
 
+type GoogleLoginResult = {
+  success: boolean;
+  isNewUser?: boolean;
+  googlePicture?: string;
+  error?: string;
+};
+
 interface AuthContextType {
   user: User | null;
   login: (email: string, password: string) => Promise<boolean>;
   register: (userData: RegisterPayload) => Promise<RegisterResult>;
+  googleLogin: (idToken: string) => Promise<GoogleLoginResult>;
   logout: () => void;
   loading: boolean;
   shouldShowNotificationModal: boolean;
   setShouldShowNotificationModal: (show: boolean) => void;
+  refreshUser: () => Promise<User | null>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -74,35 +83,27 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   };
 
   const getCurrentCoords = async (): Promise<{ lat: number; lng: number } | null> => {
-    return new Promise((resolve) => {
-      Geolocation.getCurrentPosition(
-        (pos) => {
-          resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-        },
-        () => resolve(null),
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
-      );
-    });
+    try {
+      return await new Promise((resolve) => {
+        Geolocation.getCurrentPosition(
+          (pos) => {
+            resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+          },
+          () => resolve(null),
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+        );
+      });
+    } catch (error) {
+      console.warn('Geolocation getCurrentPosition threw unexpectedly', error);
+      return null;
+    }
   };
 
   const reverseGeocode = async (lat: number, lng: number): Promise<string | null> => {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 6000);
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=ar,en`,
-        {
-          signal: controller.signal,
-          headers: {
-            'User-Agent': 'PetMatchMobile/1.0 (contact@petmatch.com)',
-            'Accept': 'application/json',
-          },
-        }
-      );
-      clearTimeout(timeout);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const full: string | undefined = data?.display_name;
+      const res = await apiService.mapsReverseGeocode({ lat, lng, language: 'ar' });
+      if (!res.success || !res.data?.address) return null;
+      const full: string | undefined = res.data.address;
       if (full && full.length) {
         const parts = full.split(', ');
         return parts.slice(0, 3).join(', ');
@@ -160,6 +161,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     } catch {
       // ignore errors; best-effort only
     }
+  };
+
+  const refreshUser = async (): Promise<User | null> => {
+    try {
+      const response = await apiService.getProfile();
+      if (response.success && response.data) {
+        setUser(response.data);
+        captureAndSaveUserLocation(response.data);
+        return response.data;
+      }
+    } catch (error) {
+      console.error('❌ Error refreshing user profile:', error);
+    }
+    return null;
   };
 
   // Check for existing token on app start
@@ -337,14 +352,64 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     await apiService.logout();
   };
 
+  const googleLogin = async (idToken: string): Promise<GoogleLoginResult> => {
+    setLoading(true);
+    try {
+      const response = await apiService.googleLogin(idToken);
+
+      if (response.success && response.data) {
+        const userData = response.data.user;
+        if (userData && userData.email) {
+          setUser(userData);
+          captureAndSaveUserLocation(userData);
+
+          try {
+            await getAndRegisterFcmToken();
+          } catch (error) {
+            console.log('⚠️ FCM token registration failed (non-fatal):', error);
+          }
+
+          try {
+            const shouldShow = await shouldShowNotificationPermissionRequest();
+            if (shouldShow) {
+              setShouldShowNotificationModal(true);
+            }
+          } catch (error) {
+            // non-fatal
+          }
+
+          return {
+            success: true,
+            isNewUser: response.data.is_new_user,
+            googlePicture: response.data.google_picture,
+          };
+        }
+      }
+
+      return {
+        success: false,
+        error: response.error || 'تعذر تسجيل الدخول باستخدام Google',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: 'حدث خطأ أثناء تسجيل الدخول',
+      };
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const value: AuthContextType = {
     user,
     login,
     register,
+    googleLogin,
     logout,
     loading,
     shouldShowNotificationModal,
     setShouldShowNotificationModal,
+    refreshUser,
   };
 
   console.log('🔄 AuthContext: Current state:', { user: user ? 'logged in' : 'not logged in', loading });

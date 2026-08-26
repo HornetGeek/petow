@@ -6,6 +6,61 @@ import com.android.build.OutputFile
 
 logger.lifecycle("[react-native] Resolved .nvmrc at ${rootProject.file("../.nvmrc").absolutePath}, exists=${rootProject.file("../.nvmrc").exists()}")
 
+def resolveNodeBinaryForNativeModules() {
+    def envNode = System.getenv("NODE_BINARY")
+    if (envNode) {
+        def envNodeFile = new File(envNode)
+        if (envNodeFile.exists()) {
+            return envNodeFile.absolutePath
+        }
+    }
+
+    def nvmrc = rootProject.file("../.nvmrc")
+    if (nvmrc.exists()) {
+        def requestedNodeVersion = nvmrc.text.trim()
+        if (requestedNodeVersion) {
+            def normalizedNodeVersion = requestedNodeVersion.startsWith("v")
+                ? requestedNodeVersion
+                : "v${requestedNodeVersion}"
+            def nodeBinary = new File(
+                System.getProperty("user.home"),
+                ".nvm/versions/node/${normalizedNodeVersion}/bin/node"
+            )
+            if (nodeBinary.exists()) {
+                return nodeBinary.absolutePath
+            }
+        }
+    }
+
+    return "node"
+}
+
+def patchNativeModulesGradleForApp(File sourceFile, String nodeBinary) {
+    def patchedDir = new File(rootProject.projectDir, ".gradle/react-native")
+    if (!patchedDir.exists()) {
+        patchedDir.mkdirs()
+    }
+
+    def patchedFile = new File(patchedDir, "native_modules.app.patched.gradle")
+    def content = sourceFile.getText("UTF-8")
+    def escapedNodeBinary = nodeBinary
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+    def nodeLiteral = "'${escapedNodeBinary}'"
+
+    content = content.replace(
+        'String[] nodeCommand = ["node", "-e", cliResolveScript]',
+        "String[] nodeCommand = [${nodeLiteral}, \"-e\", cliResolveScript]"
+    )
+    content = content.replace(
+        'String[] reactNativeConfigCommand = ["node", cliPath, "config"]',
+        "String[] reactNativeConfigCommand = [${nodeLiteral}, cliPath, \"config\"]"
+    )
+
+    patchedFile.setText(content, "UTF-8")
+    return patchedFile
+}
+
 /**
  * This is the configuration block to customize your React Native Android app.
  * By default you don't need to apply any configuration, just uncomment the lines you need.
@@ -19,6 +74,12 @@ react {
         if (nodeBinary.exists()) {
             logger.lifecycle("[react-native] Using Node executable: ${nodeBinary.absolutePath}")
             nodeExecutableAndArgs = [nodeBinary.absolutePath]
+        }
+    } else {
+        def envNode = System.getenv("NODE_BINARY")
+        if (envNode) {
+            logger.lifecycle("[react-native] Using NODE_BINARY from env: ${envNode}")
+            nodeExecutableAndArgs = [envNode]
         }
     }
 
@@ -112,8 +173,11 @@ android {
         applicationId "com.petmatchmobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 13
-        versionName "1.0.12"
+        versionCode 17
+        versionName "1.0.16"
+        manifestPlaceholders = [
+            googleMapsApiKey: (project.findProperty("GOOGLE_MAPS_ANDROID_API_KEY") ?: System.getenv("GOOGLE_MAPS_ANDROID_API_KEY") ?: "")
+        ]
         
         // Limit native libraries to 64-bit ABIs to satisfy the 16KB page-size mandate
         ndk {
@@ -198,12 +262,28 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    // Explicitly include fused location provider; rely on its own pinned transitive deps (cached locally)
+    implementation "com.google.android.gms:play-services-location:${rootProject.ext.has('googlePlayServicesLocationVersion') ? rootProject.ext.googlePlayServicesLocationVersion : '21.0.1'}"
+    // Explicit pins aligned with measurement 23.0.0 set (also compatible with location 21.0.1)
+    implementation "com.google.android.gms:play-services-base:18.5.0"
+    implementation "com.google.android.gms:play-services-basement:18.5.0"
+    implementation "com.google.android.gms:play-services-tasks:18.2.0"
+    implementation "com.google.android.gms:play-services-places-placereport:17.0.0"
+    implementation "com.google.android.gms:play-services-auth-api-phone:18.0.2"
+    implementation "com.google.android.gms:play-services-maps:18.2.0"
+    implementation "com.google.android.gms:play-services-auth:21.2.0"
+    implementation "com.google.android.gms:play-services-auth-base:18.0.10"
+    implementation "com.google.android.gms:play-services-fido:20.1.0"
+    implementation "com.google.android.gms:play-services-ads-identifier:18.0.0"
+    implementation "com.google.android.gms:play-services-cloud-messaging:17.2.0"
 
     // Use Firebase BoM to align all Firebase SDKs
     implementation platform('com.google.firebase:firebase-bom:33.4.0')
     implementation 'com.google.firebase:firebase-auth'
     implementation 'com.google.firebase:firebase-messaging'
     implementation 'com.google.firebase:firebase-firestore'
+    // Ensure analytics uses SDK with AD_USER_DATA / AD_PERSONALIZATION consent types
+    implementation 'com.google.firebase:firebase-analytics:23.0.0'
 
     // DataStore (required by Firebase Heartbeat & Firestore 26+)
     implementation "androidx.datastore:datastore-preferences:1.1.1"
@@ -254,7 +334,13 @@ dependencies {
     }
 }
 
-apply from: file("../../node_modules/react-native/node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)
+def nativeModulesNodeBinary = resolveNodeBinaryForNativeModules()
+logger.lifecycle("[react-native] App native_modules node=${nativeModulesNodeBinary}")
+def patchedNativeModulesGradle = patchNativeModulesGradleForApp(
+    file("../../node_modules/react-native/node_modules/@react-native-community/cli-platform-android/native_modules.gradle"),
+    nativeModulesNodeBinary
+)
+apply from: patchedNativeModulesGradle; applyNativeModulesAppBuildGradle(project)
 
 // Move Google services plugin to the very bottom
 apply plugin: 'com.google.gms.google-services'

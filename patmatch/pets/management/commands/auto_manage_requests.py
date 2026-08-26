@@ -59,6 +59,8 @@ class Command(BaseCommand):
         )
 
         for br in breeding_qs:
+            age_hours = (now - br.created_at).total_seconds() / 3600.0
+
             # If older than cutoff -> auto reject
             if br.created_at <= cutoff:
                 if not dry_run:
@@ -103,8 +105,12 @@ class Command(BaseCommand):
                         pass
                 summary["breeding"]["auto_rejects"] += 1
             else:
-                # Send daily reminder if not already today
-                if not reminded_today:
+                # Lifecycle cadence: first reminder after 24h, second after 72h.
+                should_send_reminder = (
+                    (total_reminders == 0 and age_hours >= 24) or
+                    (total_reminders == 1 and age_hours >= 72)
+                )
+                if should_send_reminder and not reminded_today:
                     if not dry_run:
                         try:
                             notify_breeding_request_pending_reminder(br)
@@ -118,6 +124,8 @@ class Command(BaseCommand):
         )
 
         for ar in adoption_qs:
+            age_hours = (now - ar.created_at).total_seconds() / 3600.0
+
             if ar.created_at <= cutoff:
                 if not dry_run:
                     ar.status = "rejected"
@@ -167,7 +175,11 @@ class Command(BaseCommand):
                         pass
                 summary["adoption"]["auto_rejects"] += 1
             else:
-                if not reminded_today:
+                should_send_reminder = (
+                    (total_reminders == 0 and age_hours >= 24) or
+                    (total_reminders == 1 and age_hours >= 72)
+                )
+                if should_send_reminder and not reminded_today:
                     if not dry_run:
                         try:
                             notify_adoption_request_pending_reminder(ar)
@@ -241,4 +253,3 @@ class Command(BaseCommand):
                 f"pets_marked_unavailable={summary['pets_unavailable']}"
             )
         )
-

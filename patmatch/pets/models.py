@@ -1,7 +1,15 @@
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 from django.conf import settings
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 from accounts.models import User
+from datetime import timedelta
+
+
+def story_image_upload_path(instance, filename):
+    now = timezone.now()
+    return f"stories/{now:%Y/%m/%d}/{filename}"
 
 class Breed(models.Model):
     """نموذج السلالات"""
@@ -122,6 +130,7 @@ class Pet(models.Model):
     location = models.CharField(max_length=200, help_text="الموقع (المدينة/الحي)")
     latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
     
     # معلومات التبني
     is_free = models.BooleanField(default=True, help_text="هل التبني مجاني؟")
@@ -257,6 +266,9 @@ class Pet(models.Model):
         verbose_name = "حيوان أليف"
         verbose_name_plural = "الحيوانات الأليفة"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at'], name='pets_pet_status_5ce6d5_idx'),
+        ]
 
 class PetImage(models.Model):
     """صور إضافية للحيوانات"""
@@ -266,6 +278,324 @@ class PetImage(models.Model):
     
     def __str__(self):
         return f"صورة {self.pet.name}"
+
+
+class Story(models.Model):
+    """قصة صورة مؤقتة تظهر لمدة 24 ساعة."""
+
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='stories',
+    )
+    pet = models.ForeignKey(
+        Pet,
+        on_delete=models.SET_NULL,
+        related_name='stories',
+        null=True,
+        blank=True,
+    )
+    image = models.ImageField(upload_to=story_image_upload_path)
+    caption = models.CharField(max_length=160, blank=True, default='')
+    expires_at = models.DateTimeField(db_index=True)
+    is_hidden = models.BooleanField(default=False, db_index=True)
+    hidden_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='hidden_stories',
+        null=True,
+        blank=True,
+    )
+    hidden_reason = models.TextField(blank=True, default='')
+    hidden_at = models.DateTimeField(null=True, blank=True)
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "قصة"
+        verbose_name_plural = "القصص"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['is_hidden', 'deleted_at', 'expires_at'], name='pets_story_active_idx'),
+            models.Index(fields=['author', '-created_at'], name='pets_story_author_idx'),
+        ]
+
+    def __str__(self):
+        return f"Story #{self.id} by {self.author_id}"
+
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(hours=24)
+        super().save(*args, **kwargs)
+
+    @property
+    def is_active(self):
+        return not self.is_hidden and self.deleted_at is None and self.expires_at > timezone.now()
+
+    def soft_delete(self):
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['deleted_at', 'updated_at'])
+
+    def hide(self, moderator=None, reason=''):
+        self.is_hidden = True
+        self.hidden_by = moderator
+        self.hidden_reason = reason or ''
+        self.hidden_at = timezone.now()
+        self.save(update_fields=['is_hidden', 'hidden_by', 'hidden_reason', 'hidden_at', 'updated_at'])
+
+    def unhide(self):
+        self.is_hidden = False
+        self.hidden_by = None
+        self.hidden_reason = ''
+        self.hidden_at = None
+        self.save(update_fields=['is_hidden', 'hidden_by', 'hidden_reason', 'hidden_at', 'updated_at'])
+
+
+class StoryView(models.Model):
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='views')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='story_views')
+    viewed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "مشاهدة قصة"
+        verbose_name_plural = "مشاهدات القصص"
+        ordering = ['-viewed_at']
+        constraints = [
+            models.UniqueConstraint(fields=['story', 'user'], name='pets_storyview_user_story_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-viewed_at'], name='pets_storyview_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"StoryView(story={self.story_id}, user={self.user_id})"
+
+
+class StoryReport(models.Model):
+    REASON_INAPPROPRIATE = 'inappropriate'
+    REASON_SPAM = 'spam'
+    REASON_SAFETY = 'safety'
+    REASON_OTHER = 'other'
+    REASON_CHOICES = [
+        (REASON_INAPPROPRIATE, 'محتوى غير مناسب'),
+        (REASON_SPAM, 'إزعاج أو إعلان'),
+        (REASON_SAFETY, 'مشكلة أمان'),
+        (REASON_OTHER, 'سبب آخر'),
+    ]
+
+    STATUS_OPEN = 'open'
+    STATUS_REVIEWED = 'reviewed'
+    STATUS_DISMISSED = 'dismissed'
+    STATUS_CHOICES = [
+        (STATUS_OPEN, 'مفتوح'),
+        (STATUS_REVIEWED, 'تمت المراجعة'),
+        (STATUS_DISMISSED, 'تم التجاهل'),
+    ]
+
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='reports')
+    reporter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='story_reports')
+    reason = models.CharField(max_length=32, choices=REASON_CHOICES)
+    details = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='reviewed_story_reports',
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "بلاغ قصة"
+        verbose_name_plural = "بلاغات القصص"
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['story', 'reporter'], name='pets_storyrep_usr_story_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['status', '-created_at'], name='pets_storyrep_status_idx'),
+        ]
+
+    def __str__(self):
+        return f"StoryReport(story={self.story_id}, reporter={self.reporter_id})"
+
+
+class StoryReaction(models.Model):
+    REACTION_HEART = 'heart'
+    REACTION_CUTE = 'cute'
+    REACTION_HELPFUL = 'helpful'
+    REACTION_INTERESTED = 'interested'
+    REACTION_CHOICES = [
+        (REACTION_HEART, 'أعجبني'),
+        (REACTION_CUTE, 'لطيف'),
+        (REACTION_HELPFUL, 'مفيد'),
+        (REACTION_INTERESTED, 'مهتم'),
+    ]
+
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name='reactions')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='story_reactions')
+    reaction = models.CharField(max_length=20, choices=REACTION_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "تفاعل قصة"
+        verbose_name_plural = "تفاعلات القصص"
+        ordering = ['-updated_at']
+        constraints = [
+            models.UniqueConstraint(fields=['story', 'user'], name='pets_strreact_user_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['story', 'reaction'], name='pets_storyreact_summary_idx'),
+            models.Index(fields=['user', '-updated_at'], name='pets_storyreact_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"StoryReaction(story={self.story_id}, user={self.user_id}, reaction={self.reaction})"
+
+
+class EngagementEvent(models.Model):
+    EVENT_PET_LIKE = 'pet_like'
+    EVENT_PET_UNLIKE = 'pet_unlike'
+    EVENT_STORY_REACTION = 'story_reaction'
+    EVENT_STORY_REACTION_REMOVED = 'story_reaction_removed'
+    EVENT_STORY_VIEW = 'story_view'
+    EVENT_CTA_TAP = 'cta_tap'
+    EVENT_FAVORITE = 'favorite'
+    EVENT_UNFAVORITE = 'unfavorite'
+    EVENT_TYPE_CHOICES = [
+        (EVENT_PET_LIKE, 'إعجاب بحيوان'),
+        (EVENT_PET_UNLIKE, 'إزالة إعجاب بحيوان'),
+        (EVENT_STORY_REACTION, 'تفاعل مع قصة'),
+        (EVENT_STORY_REACTION_REMOVED, 'إزالة تفاعل قصة'),
+        (EVENT_STORY_VIEW, 'مشاهدة قصة'),
+        (EVENT_CTA_TAP, 'ضغط دعوة لاتخاذ إجراء'),
+        (EVENT_FAVORITE, 'إضافة للمفضلة'),
+        (EVENT_UNFAVORITE, 'إزالة من المفضلة'),
+    ]
+
+    TARGET_PET = 'pet'
+    TARGET_STORY = 'story'
+    TARGET_CLINIC = 'clinic'
+    TARGET_SERVICE = 'service'
+    TARGET_TYPE_CHOICES = [
+        (TARGET_PET, 'حيوان'),
+        (TARGET_STORY, 'قصة'),
+        (TARGET_CLINIC, 'عيادة'),
+        (TARGET_SERVICE, 'خدمة'),
+    ]
+
+    SOURCE_PET_CARD = 'pet_card'
+    SOURCE_PET_DETAILS = 'pet_details'
+    SOURCE_STORY_VIEWER = 'story_viewer'
+    SOURCE_HOME_STORY_RAIL = 'home_story_rail'
+    SOURCE_NOTIFICATION = 'notification'
+    SOURCE_OTHER = 'other'
+    SOURCE_CHOICES = [
+        (SOURCE_PET_CARD, 'بطاقة الحيوان'),
+        (SOURCE_PET_DETAILS, 'تفاصيل الحيوان'),
+        (SOURCE_STORY_VIEWER, 'عارض القصص'),
+        (SOURCE_HOME_STORY_RAIL, 'شريط القصص'),
+        (SOURCE_NOTIFICATION, 'إشعار'),
+        (SOURCE_OTHER, 'مصدر آخر'),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='engagement_events')
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPE_CHOICES)
+    source = models.CharField(max_length=32, choices=SOURCE_CHOICES, default=SOURCE_OTHER)
+    target_type = models.CharField(max_length=24, choices=TARGET_TYPE_CHOICES)
+    pet = models.ForeignKey(Pet, on_delete=models.SET_NULL, related_name='engagement_events', null=True, blank=True)
+    story = models.ForeignKey(Story, on_delete=models.SET_NULL, related_name='engagement_events', null=True, blank=True)
+    metadata = models.JSONField(blank=True, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حدث تفاعل"
+        verbose_name_plural = "أحداث التفاعل"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['event_type', '-created_at'], name='pets_engage_event_idx'),
+            models.Index(fields=['target_type', '-created_at'], name='pets_engage_target_idx'),
+            models.Index(fields=['user', '-created_at'], name='pets_engage_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"EngagementEvent({self.event_type}, {self.target_type}, user={self.user_id})"
+
+
+class SavedSearch(models.Model):
+    """بحث محفوظ للمستخدم مع فلاتر قابلة للتنبيه."""
+
+    TARGET_PET = 'pet'
+    TARGET_ADOPTION = 'adoption_pet'
+    TARGET_BREEDING = 'breeding_pet'
+    TARGET_SERVICE = 'service'
+    TARGET_TYPE_CHOICES = [
+        (TARGET_PET, 'حيوانات'),
+        (TARGET_ADOPTION, 'حيوانات للتبني'),
+        (TARGET_BREEDING, 'حيوانات للتزاوج'),
+        (TARGET_SERVICE, 'خدمات'),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='saved_searches')
+    name = models.CharField(max_length=120)
+    target_type = models.CharField(max_length=24, choices=TARGET_TYPE_CHOICES, default=TARGET_PET)
+    filters = models.JSONField(default=dict, blank=True)
+    city = models.CharField(max_length=120, blank=True, default='')
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
+    radius_km = models.PositiveIntegerField(default=25)
+    alerts_enabled = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    last_notified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "بحث محفوظ"
+        verbose_name_plural = "البحوث المحفوظة"
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['user', 'is_active', '-updated_at'], name='pets_saved_user_active_idx'),
+            models.Index(fields=['target_type', 'is_active'], name='pets_saved_target_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.user_id})"
+
+
+class SavedSearchMatch(models.Model):
+    """نتيجة مطابقة لبحث محفوظ، مع dedupe للتنبيهات."""
+
+    saved_search = models.ForeignKey(SavedSearch, on_delete=models.CASCADE, related_name='matches')
+    target_type = models.CharField(max_length=24)
+    target_id = models.PositiveBigIntegerField()
+    matched_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = "نتيجة بحث محفوظ"
+        verbose_name_plural = "نتائج البحوث المحفوظة"
+        ordering = ['-matched_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['saved_search', 'target_type', 'target_id'],
+                name='pets_saved_match_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['saved_search', '-matched_at'], name='pets_saved_match_idx'),
+            models.Index(fields=['target_type', 'target_id'], name='pets_saved_target_id_idx'),
+        ]
+
+    def __str__(self):
+        return f"SavedSearchMatch(search={self.saved_search_id}, target={self.target_type}:{self.target_id})"
 
 class VeterinaryClinic(models.Model):
     """نموذج العيادات البيطرية"""
@@ -337,10 +667,15 @@ class BreedingRequest(models.Model):
         verbose_name = "طلب مقابلة"
         verbose_name_plural = "طلبات المقابلة"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['requester', 'created_at'], name='pets_breedi_request_55bc14_idx'),
+            models.Index(fields=['receiver', 'created_at'], name='pets_breedi_receive_f0df09_idx'),
+            models.Index(fields=['status', 'created_at'], name='pets_breedi_status_2c575a_idx'),
+        ]
 
     def create_chat_room(self):
         """إنشاء غرفة محادثة عند قبول الطلب"""
-        if self.status == 'accepted' and not hasattr(self, 'chat_room'):
+        if self.status == 'approved' and not hasattr(self, 'chat_room'):
             chat_room = ChatRoom.objects.create(breeding_request=self)
             return chat_room
         return getattr(self, 'chat_room', None)
@@ -359,25 +694,47 @@ class Favorite(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.pet.name}"
 
+
+class PetLike(models.Model):
+    """إعجاب خفيف بالحيوان؛ المفضلة تبقى للحفظ والمتابعة."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='pet_likes')
+    pet = models.ForeignKey(Pet, on_delete=models.CASCADE, related_name='liked_by')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'pet')
+        verbose_name = "إعجاب حيوان"
+        verbose_name_plural = "إعجابات الحيوانات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['pet', '-created_at'], name='pets_petlike_pet_idx'),
+            models.Index(fields=['user', '-created_at'], name='pets_petlike_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} likes {self.pet.name}"
+
 class Notification(models.Model):
     """نموذج الإشعارات"""
     NOTIFICATION_TYPES = [
-        ('breeding_request_received', 'تم استلام طلب مقابلة جديد'),
-        ('breeding_request_approved', 'تم قبول طلب المقابلة'),
-        ('breeding_request_rejected', 'تم رفض طلب المقابلة'),
-        ('breeding_request_completed', 'تم إكمال المقابلة'),
-        ('favorite_added', 'تم إضافة حيوانك إلى المفضلة'),
-        ('pet_status_changed', 'تم تغيير حالة حيوانك'),
-        ('system_message', 'رسالة من النظام'),
-        ('chat_message_received', 'تم استلام رسالة جديدة'),
-        ('pet_nearby', 'حيوان جديد بالقرب منك'),
-        ('adoption_pet_nearby', 'حيوان للتبني بالقرب منك'),
-        ('clinic_broadcast', 'إشعار من العيادة'),
-        ('clinic_invite', 'دعوة ربط عيادة'),
-        ('breeding_request_pending_reminder', 'تذكير بطلب مقابلة معلق'),
-        ('adoption_request_received', 'تم استلام طلب تبني جديد'),
-        ('adoption_request_approved', 'تم قبول طلب التبني'),
-        ('adoption_request_pending_reminder', 'تذكير بطلب تبني معلق'),
+        ('breeding_request_received', _('New breeding request received')),
+        ('breeding_request_approved', _('Breeding request approved')),
+        ('breeding_request_rejected', _('Breeding request rejected')),
+        ('breeding_request_completed', _('Breeding meeting completed')),
+        ('favorite_added', _('Pet added to favorites')),
+        ('pet_status_changed', _('Pet status changed')),
+        ('system_message', _('System message')),
+        ('chat_message_received', _('New message received')),
+        ('pet_nearby', _('A new pet is nearby')),
+        ('adoption_pet_nearby', _('An adoptable pet is nearby')),
+        ('saved_search_match', _('New saved-search match')),
+        ('clinic_broadcast', _('Clinic notification')),
+        ('clinic_invite', _('Clinic connection invitation')),
+        ('breeding_request_pending_reminder', _('Pending breeding request reminder')),
+        ('adoption_request_received', _('New adoption request received')),
+        ('adoption_request_approved', _('Adoption request approved')),
+        ('adoption_request_pending_reminder', _('Pending adoption request reminder')),
+        ('account_verification_approved', _('Account verification approved')),
     ]
     
     user = models.ForeignKey(
@@ -393,6 +750,15 @@ class Notification(models.Model):
     )
     title = models.CharField(max_length=200, help_text="عنوان الإشعار")
     message = models.TextField(help_text="محتوى الإشعار")
+    template_key = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    template_context = models.JSONField(default=dict, blank=True)
+    event_key = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="مفتاح idempotency لمنع تكرار نفس الإشعار"
+    )
     
     # معلومات إضافية
     related_pet = models.ForeignKey(
@@ -438,6 +804,16 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['user', '-created_at']),
             models.Index(fields=['user', 'is_read']),
+            models.Index(fields=['user', 'is_read', '-created_at'], name='pets_notifi_user_id_82b9a5_idx'),
+            models.Index(fields=['user', 'type', '-created_at'], name='pets_notifi_user_id_8d5d81_idx'),
+            models.Index(fields=['user', 'type', 'is_read', 'related_chat_room'], name='pets_notifi_user_id_a8a6dd_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'event_key'],
+                condition=models.Q(event_key__isnull=False),
+                name='pets_notification_user_event_key_uniq',
+            ),
         ]
     
     def __str__(self):
@@ -452,36 +828,236 @@ class Notification(models.Model):
     
     @classmethod
     def create_chat_message_notification(cls, recipient_user, sender_user, chat_room, message_content):
-        """إنشاء إشعار رسالة جديدة مع إرسال إشعار دفع."""
-        # لا نرسل إشعار للمرسل نفسه
-        if recipient_user.id == sender_user.id:
-            return None
-            
-        notification = cls.objects.create(
-            user=recipient_user,
-            type='chat_message_received',
-            title=f'رسالة جديدة من {sender_user.get_full_name()}',
-            message=f'{message_content[:100]}...' if len(message_content) > 100 else message_content,
-            related_chat_room=chat_room,
-            extra_data={
-                'sender_name': sender_user.get_full_name(),
-                'sender_id': sender_user.id,
-                'chat_id': chat_room.firebase_chat_id,
-                'message_preview': message_content[:50]
-            }
+        """إنشاء إشعار رسالة جديدة."""
+        from .notifications import notify_chat_message_received  # local import to avoid circular dependency
+        return notify_chat_message_received(
+            recipient_user=recipient_user,
+            sender_user=sender_user,
+            chat_room=chat_room,
+            message_content=message_content,
         )
 
-        from .notifications import _send_push_notification  # local import to avoid circular dependency
 
-        push_payload = {
-            'type': 'chat_message_received',
-            'chat_id': chat_room.firebase_chat_id,
-            'sender_id': str(sender_user.id),
-            'sender_name': sender_user.get_full_name(),
-        }
-        _send_push_notification(recipient_user, notification.title, notification.message, push_payload)
+class NotificationInteractionEvent(models.Model):
+    EVENT_OPENED = 'opened'
+    EVENT_ACTIONED = 'actioned'
+    EVENT_DISMISSED = 'dismissed'
+    EVENT_TYPE_CHOICES = [
+        (EVENT_OPENED, 'Opened'),
+        (EVENT_ACTIONED, 'Actioned'),
+        (EVENT_DISMISSED, 'Dismissed'),
+    ]
 
-        return notification
+    SOURCE_MOBILE_PUSH = 'mobile_push'
+    SOURCE_WEB_PUSH = 'web_push'
+    SOURCE_IN_APP = 'in_app'
+    SOURCE_CHOICES = [
+        (SOURCE_MOBILE_PUSH, 'Mobile Push'),
+        (SOURCE_WEB_PUSH, 'Web Push'),
+        (SOURCE_IN_APP, 'In App'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='notification_interaction_events',
+    )
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name='interaction_events',
+        null=True,
+        blank=True,
+    )
+    event_type = models.CharField(max_length=16, choices=EVENT_TYPE_CHOICES)
+    source = models.CharField(max_length=24, choices=SOURCE_CHOICES)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حدث تفاعل إشعار"
+        verbose_name_plural = "أحداث تفاعل الإشعارات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'event_type', '-created_at'], name='pets_notifi_user_id_7e1b2e_idx'),
+            models.Index(fields=['notification', 'event_type'], name='pets_notifi_notific_b252b3_idx'),
+        ]
+
+    def __str__(self):
+        return f"Interaction({self.user_id}, {self.event_type}, {self.source})"
+
+
+class NotificationDeliveryAttempt(models.Model):
+    CHANNEL_PUSH = 'push'
+    CHANNEL_IN_APP = 'in_app'
+    CHANNEL_EMAIL = 'email'
+    CHANNEL_CHOICES = [
+        (CHANNEL_PUSH, 'Push'),
+        (CHANNEL_IN_APP, 'In App'),
+        (CHANNEL_EMAIL, 'Email'),
+    ]
+
+    STATUS_QUEUED = 'queued'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_SUPPRESSED = 'suppressed'
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, 'Queued'),
+        (STATUS_SENT, 'Sent'),
+        (STATUS_FAILED, 'Failed'),
+        (STATUS_SUPPRESSED, 'Suppressed'),
+    ]
+
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name='delivery_attempts',
+        null=True,
+        blank=True,
+    )
+    channel = models.CharField(max_length=16, choices=CHANNEL_CHOICES, default=CHANNEL_PUSH)
+    provider = models.CharField(max_length=32, default='fcm')
+    provider_message_id = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    error = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "محاولة تسليم إشعار"
+        verbose_name_plural = "محاولات تسليم الإشعارات"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['channel', 'status', '-created_at'], name='pets_notifi_channel_5bc52d_idx'),
+            models.Index(fields=['notification', 'channel'], name='pets_notifi_notific_c59c19_idx'),
+        ]
+
+    def __str__(self):
+        return f"DeliveryAttempt(notification={self.notification_id}, status={self.status})"
+
+
+class EmailReminderDispatch(models.Model):
+    REMINDER_DAILY_UNREAD_MESSAGES = 'daily_unread_messages'
+    REMINDER_CHOICES = [
+        (REMINDER_DAILY_UNREAD_MESSAGES, 'Daily unread messages'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROCESSING = 'processing'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROCESSING, 'Processing'),
+        (STATUS_SENT, 'Sent'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='email_reminder_dispatches',
+    )
+    reminder_key = models.CharField(
+        max_length=64,
+        choices=REMINDER_CHOICES,
+        default=REMINDER_DAILY_UNREAD_MESSAGES,
+    )
+    target_date = models.DateField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    recipient_email = models.EmailField(blank=True, default='')
+    last_error = models.TextField(blank=True, default='')
+    sent_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "سجل إرسال تذكير بريدي"
+        verbose_name_plural = "سجلات إرسال التذكيرات البريدية"
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'reminder_key', 'target_date'],
+                name='pets_email_reminder_user_key_date_uniq',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['reminder_key', 'target_date', 'status'], name='pets_eml_rem_key_dt_st_idx'),
+            models.Index(fields=['user', 'target_date'], name='pets_eml_rem_usr_dt_idx'),
+        ]
+
+    def __str__(self):
+        return f"EmailReminderDispatch(user={self.user_id}, key={self.reminder_key}, date={self.target_date}, status={self.status})"
+
+
+class NotificationOutbox(models.Model):
+    EVENT_PET_CREATED = 'pet_created'
+    EVENT_BREEDING_REQUEST_RECEIVED = 'breeding_request_received'
+    EVENT_BREEDING_REQUEST_APPROVED = 'breeding_request_approved'
+    EVENT_BREEDING_REQUEST_REJECTED = 'breeding_request_rejected'
+    EVENT_ADOPTION_REQUEST_RECEIVED = 'adoption_request_received'
+    EVENT_ADOPTION_REQUEST_APPROVED = 'adoption_request_approved'
+    EVENT_CHAT_MESSAGE_RECEIVED = 'chat_message_received'
+    EVENT_CLINIC_INVITE_PUSH = 'clinic_invite_push'
+    EVENT_CLINIC_BROADCAST_PUSH = 'clinic_broadcast_push'
+    EVENT_CLINIC_CHAT_MESSAGE_PUSH = 'clinic_chat_message_push'
+    EVENT_CLINIC_BOOKING_PUSH = 'clinic_booking_push'
+    EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH = 'account_verification_approved_push'
+
+    EVENT_TYPE_CHOICES = [
+        (EVENT_PET_CREATED, 'Pet created'),
+        (EVENT_BREEDING_REQUEST_RECEIVED, 'Breeding request received'),
+        (EVENT_BREEDING_REQUEST_APPROVED, 'Breeding request approved'),
+        (EVENT_BREEDING_REQUEST_REJECTED, 'Breeding request rejected'),
+        (EVENT_ADOPTION_REQUEST_RECEIVED, 'Adoption request received'),
+        (EVENT_ADOPTION_REQUEST_APPROVED, 'Adoption request approved'),
+        (EVENT_CHAT_MESSAGE_RECEIVED, 'Chat message received'),
+        (EVENT_CLINIC_INVITE_PUSH, 'Clinic invite push'),
+        (EVENT_CLINIC_BROADCAST_PUSH, 'Clinic broadcast push'),
+        (EVENT_CLINIC_CHAT_MESSAGE_PUSH, 'Clinic chat message push'),
+        (EVENT_CLINIC_BOOKING_PUSH, 'Clinic booking push'),
+        (EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH, 'Account verification approved push'),
+    ]
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROCESSING = 'processing'
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROCESSING, 'Processing'),
+        (STATUS_SUCCEEDED, 'Succeeded'),
+        (STATUS_FAILED, 'Failed'),
+    ]
+
+    event_type = models.CharField(max_length=64, choices=EVENT_TYPE_CHOICES)
+    object_id = models.PositiveBigIntegerField()
+    payload = models.JSONField(default=dict, blank=True)
+    dedupe_key = models.CharField(max_length=255, unique=True)
+
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Notification Outbox Event"
+        verbose_name_plural = "Notification Outbox Events"
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['status', 'next_attempt_at'], name='pets_notifi_status_d39f19_idx'),
+            models.Index(fields=['event_type', 'status'], name='pets_notifi_event_t_629f6d_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type}#{self.object_id} ({self.status})"
+
 
 class ChatRoom(models.Model):
     """غرفة محادثة بين مالكين حيوانات - metadata فقط، الرسائل في Firebase"""
@@ -658,14 +1234,32 @@ class ChatRoom(models.Model):
                 if not pet:
                     return {}
                 
+                requester_pet = breeding_request.requester_pet
+                veterinary_clinic = breeding_request.veterinary_clinic
                 return {
                     'chat_id': self.firebase_chat_id,
                     'type': 'breeding',
                     'breeding_request': {
                         'id': breeding_request.id,
                         'status': breeding_request.status,
+                        'requester_id': breeding_request.requester_id,
+                        'receiver_id': breeding_request.receiver_id,
+                        'owner_id': pet.owner_id,
                         'created_at': breeding_request.created_at.isoformat(),
                         'message': breeding_request.message,
+                        # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
+                        'meeting_date': breeding_request.meeting_date.isoformat() if breeding_request.meeting_date else None,
+                        'contact_phone': breeding_request.contact_phone,
+                        'agreed_fee': str(breeding_request.agreed_fee) if breeding_request.agreed_fee else None,
+                        'fee_paid_by': breeding_request.fee_paid_by,
+                        'veterinary_clinic_name': veterinary_clinic.name if veterinary_clinic else None,
+                        'requester_pet': {
+                            'id': requester_pet.id,
+                            'name': requester_pet.name,
+                            'breed_name': requester_pet.breed.name if requester_pet.breed else None,
+                            'pet_type_display': requester_pet.pet_type_display,
+                            'main_image': requester_pet.main_image.url if requester_pet.main_image else None,
+                        } if requester_pet else None,
                     },
                     'pet': {
                         'id': pet.id,
@@ -688,15 +1282,34 @@ class ChatRoom(models.Model):
                 pet = adoption_request.pet
                 if not pet:
                     return {}
-                
+
                 return {
                     'chat_id': self.firebase_chat_id,
                     'type': 'adoption',
                     'adoption_request': {
                         'id': adoption_request.id,
                         'status': adoption_request.status,
+                        'adopter_id': adoption_request.adopter_id,
+                        'owner_id': pet.owner_id,
                         'created_at': adoption_request.created_at.isoformat(),
                         'adopter_name': adoption_request.adopter_name,
+                        # ↓ chat-v2: rich fields exposed for RequestSystemCard ↓
+                        'adopter_age': adoption_request.adopter_age,
+                        'adopter_phone': adoption_request.adopter_phone,
+                        'housing_type': adoption_request.housing_type,
+                        'family_members': adoption_request.family_members,
+                        'experience_level': adoption_request.experience_level,
+                        'time_availability': adoption_request.time_availability,
+                        'reason_for_adoption': adoption_request.reason_for_adoption,
+                        'feeding_plan': adoption_request.feeding_plan,
+                        'exercise_plan': adoption_request.exercise_plan,
+                        'vet_care_plan': adoption_request.vet_care_plan,
+                        'emergency_plan': adoption_request.emergency_plan,
+                        'notes': adoption_request.notes,
+                        'family_agreement': adoption_request.family_agreement,
+                        'agrees_to_follow_up': adoption_request.agrees_to_follow_up,
+                        'agrees_to_vet_care': adoption_request.agrees_to_vet_care,
+                        'agrees_to_training': adoption_request.agrees_to_training,
                     },
                     'pet': {
                         'id': pet.id,
@@ -776,6 +1389,8 @@ class ChatRoom(models.Model):
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
             'breeding_request__target_pet',
+            'breeding_request__requester_pet',
+            'breeding_request__requester_pet__owner',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
             'adoption_request__pet',
@@ -798,6 +1413,8 @@ class ChatRoom(models.Model):
             'breeding_request__requester',
             'breeding_request__target_pet__owner',
             'breeding_request__target_pet',
+            'breeding_request__requester_pet',
+            'breeding_request__requester_pet__owner',
             'adoption_request__adopter',
             'adoption_request__pet__owner',
             'adoption_request__pet',
@@ -810,6 +1427,9 @@ class ChatRoom(models.Model):
         verbose_name = "غرفة محادثة"
         verbose_name_plural = "غرف المحادثة"
         ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['is_active', 'updated_at'], name='pets_chatro_is_acti_6cab74_idx'),
+        ]
 
 
 class AdoptionRequest(models.Model):
@@ -964,4 +1584,14 @@ class AdoptionRequest(models.Model):
         verbose_name = "طلب تبني"
         verbose_name_plural = "طلبات التبني"
         ordering = ['-created_at']
-        unique_together = ['adopter', 'pet', 'status']  # منع الطلبات المكررة
+        constraints = [
+            models.UniqueConstraint(
+                fields=['adopter', 'pet'],
+                condition=models.Q(status='pending'),
+                name='pets_adoption_pending_unique',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['adopter', 'created_at'], name='pets_adopti_adopter_e507df_idx'),
+            models.Index(fields=['pet', 'status', 'created_at'], name='pets_adopti_pet_id_5cc999_idx'),
+        ]

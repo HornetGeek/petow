@@ -1,7 +1,9 @@
 import uuid
 
 from django.conf import settings
+from django.contrib.gis.geos import Point
 from django.db import models
+from django.contrib.gis.db import models as gis_models
 from django.utils import timezone
 
 
@@ -21,6 +23,7 @@ class Clinic(models.Model):
     address = models.TextField()
     phone = models.CharField(max_length=20)
     emergency_phone = models.CharField(max_length=20, blank=True, null=True)
+    whatsapp_phone = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     website = models.URLField(blank=True, null=True)
     logo = models.ImageField(upload_to='clinics/logos/', blank=True, null=True)
@@ -35,6 +38,7 @@ class Clinic(models.Model):
     # معلومات إضافية
     latitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    location_point = gis_models.PointField(geography=True, srid=4326, null=True, blank=True, spatial_index=True)
 
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -42,6 +46,13 @@ class Clinic(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        if self.latitude is not None and self.longitude is not None:
+            self.location_point = Point(float(self.longitude), float(self.latitude), srid=4326)
+        else:
+            self.location_point = None
+        super().save(*args, **kwargs)
 
     class Meta:
         verbose_name = "عيادة بيطرية"
@@ -129,6 +140,7 @@ class ClinicService(models.Model):
     
     # Pricing - renamed from 'price' to 'base_price'
     base_price = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="السعر الأساسي")
+    currency = models.CharField(max_length=3, default='EGP', help_text="عملة السعر حسب كود ISO 4217")
     has_tiered_pricing = models.BooleanField(default=False, help_text="هل لديها تسعير متدرج؟")
     pricing_unit = models.CharField(
         max_length=20,
@@ -165,6 +177,10 @@ class ClinicService(models.Model):
         verbose_name = "خدمة طبية"
         verbose_name_plural = "الخدمات الطبية"
         ordering = ['clinic', 'display_order', 'name']
+        indexes = [
+            models.Index(fields=['category', 'is_active', 'display_order']),
+            models.Index(fields=['is_featured', 'base_price']),
+        ]
 
     def __str__(self):
         return f"{self.name} - {self.clinic.name}"
@@ -215,6 +231,7 @@ class ClinicProduct(models.Model):
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='other')
 
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    currency = models.CharField(max_length=3, default='EGP')
     cost_price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     stock_quantity = models.PositiveIntegerField(default=0)
     sku = models.CharField(max_length=80, blank=True, null=True)
@@ -244,6 +261,7 @@ class StorefrontOrder(models.Model):
 
     STATUS_CHOICES = [
         ('new', 'جديد'),
+        ('counter_proposed', 'تم اقتراح موعد بديل'),
         ('confirmed', 'مؤكد'),
         ('completed', 'مكتمل'),
         ('cancelled', 'ملغي'),
@@ -258,6 +276,7 @@ class StorefrontOrder(models.Model):
     notes = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    currency = models.CharField(max_length=3, default='EGP')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -289,25 +308,109 @@ class StorefrontOrderItem(models.Model):
 class StorefrontBooking(models.Model):
     """حجوزات خدمات المتجر الإلكتروني"""
 
+    REQUEST_TYPE_CHOICES = [
+        ('inquiry', 'استفسار'),
+        ('appointment', 'موعد'),
+    ]
+
+    CONTACT_CHANNEL_CHOICES = [
+        ('whatsapp', 'واتساب'),
+        ('phone', 'هاتف'),
+        ('app', 'التطبيق'),
+    ]
+
+    STATUS_PENDING = 'PENDING'
+    STATUS_ACCEPTED = 'ACCEPTED'
+    STATUS_REFUSED = 'REFUSED'
+    STATUS_IN_SESSION = 'IN_SESSION'
+    STATUS_COMPLETED = 'COMPLETED'
+    STATUS_CANCELLED = 'CANCELLED'
+    STATUS_NO_SHOW = 'NO_SHOW'
+
     STATUS_CHOICES = [
-        ('new', 'جديد'),
-        ('confirmed', 'مؤكد'),
-        ('completed', 'مكتمل'),
+        (STATUS_PENDING, 'قيد الانتظار'),
+        (STATUS_ACCEPTED, 'مقبول'),
+        (STATUS_REFUSED, 'مرفوض'),
+        (STATUS_IN_SESSION, 'داخل الجلسة'),
+        (STATUS_COMPLETED, 'مكتمل'),
+        (STATUS_CANCELLED, 'ملغي'),
+        (STATUS_NO_SHOW, 'لم يحضر'),
+    ]
+
+    COMPLETED_RESULT_CHOICES = [
+        ('appointment_booked', 'تم حجز موعد'),
+        ('visit_completed', 'تمت الزيارة'),
+        ('owner_no_response', 'لم يرد المالك'),
         ('cancelled', 'ملغي'),
+        ('rejected', 'مرفوض'),
     ]
 
     public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='storefront_bookings')
     service = models.ForeignKey(ClinicService, on_delete=models.CASCADE, related_name='bookings')
+    customer_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='storefront_bookings',
+        blank=True,
+        null=True,
+        help_text="المستخدم صاحب الطلب عند إنشائه من التطبيق"
+    )
     customer_name = models.CharField(max_length=150)
     customer_phone = models.CharField(max_length=30)
     customer_email = models.EmailField(blank=True, null=True)
     pet_name = models.CharField(max_length=120, blank=True, null=True)
+    pet_type = models.CharField(max_length=60, blank=True, null=True)
+    pet_breed = models.CharField(max_length=120, blank=True, null=True)
+    pet_age = models.CharField(max_length=80, blank=True, null=True)
+    pet_photo = models.ImageField(upload_to='clinics/bookings/pets/', blank=True, null=True)
     preferred_date = models.DateField(blank=True, null=True)
     preferred_time = models.TimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
+    request_type = models.CharField(max_length=20, choices=REQUEST_TYPE_CHOICES, default='appointment')
+    source = models.CharField(max_length=80, default='PetMatch')
+    contact_channel = models.CharField(max_length=20, choices=CONTACT_CHANNEL_CHOICES, default='app')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
     quoted_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    quoted_currency = models.CharField(max_length=3, default='EGP')
+    confirmed_appointment = models.ForeignKey(
+        'clinics.VeterinaryAppointment',
+        on_delete=models.SET_NULL,
+        related_name='storefront_bookings',
+        blank=True,
+        null=True,
+        help_text='الموعد المؤكد الناتج عن طلب الحجز',
+    )
+    linked_patient = models.ForeignKey(
+        'clinics.ClinicPatientRecord',
+        on_delete=models.SET_NULL,
+        related_name='clinic_requests',
+        blank=True,
+        null=True,
+        help_text='ملف المريض داخل العيادة المرتبط بهذا الطلب',
+    )
+    assigned_staff = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='assigned_clinic_requests',
+        blank=True,
+        null=True,
+    )
+    internal_notes = models.TextField(blank=True, null=True)
+    doctor_notes = models.TextField(blank=True, null=True)
+    diagnosis = models.TextField(blank=True, null=True)
+    treatment = models.TextField(blank=True, null=True)
+    price_estimate = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    completed_result = models.CharField(
+        max_length=40,
+        choices=COMPLETED_RESULT_CHOICES,
+        blank=True,
+        null=True,
+    )
+    cancelled_reason = models.TextField(blank=True, null=True)
+    confirmed_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -317,6 +420,80 @@ class StorefrontBooking(models.Model):
 
     def __str__(self):
         return f"حجز {self.public_id} - {self.clinic.name}"
+
+
+class StorefrontBookingTimeline(models.Model):
+    """سجل أحداث طلب العيادة."""
+
+    booking = models.ForeignKey(
+        StorefrontBooking,
+        on_delete=models.CASCADE,
+        related_name='timeline_events',
+    )
+    event_type = models.CharField(max_length=60)
+    message = models.CharField(max_length=255)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_request_timeline_events',
+        blank=True,
+        null=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "حدث طلب عيادة"
+        verbose_name_plural = "أحداث طلبات العيادة"
+        ordering = ['created_at']
+
+
+class StorefrontBookingProposal(models.Model):
+    """اقتراحات المواعيد البديلة لطلبات الحجز."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_ACCEPTED = 'accepted'
+    STATUS_DECLINED = 'declined'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_EXPIRED = 'expired'
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'قيد الانتظار'),
+        (STATUS_ACCEPTED, 'تم القبول'),
+        (STATUS_DECLINED, 'تم الرفض'),
+        (STATUS_CANCELLED, 'ملغي'),
+        (STATUS_EXPIRED, 'منتهي'),
+    ]
+
+    booking = models.ForeignKey(
+        StorefrontBooking,
+        on_delete=models.CASCADE,
+        related_name='proposals',
+    )
+    proposed_date = models.DateField()
+    proposed_time = models.TimeField()
+    duration_minutes = models.PositiveIntegerField(default=30)
+    note = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_booking_proposals',
+        blank=True,
+        null=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    responded_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        verbose_name = 'اقتراح موعد حجز'
+        verbose_name_plural = 'اقتراحات مواعيد الحجوزات'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['booking', 'status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"اقتراح {self.booking.public_id} - {self.proposed_date} {self.proposed_time}"
 
 
 class ServicePricingTier(models.Model):
@@ -476,8 +653,12 @@ class ClinicPatientRecord(models.Model):
     species = models.CharField(max_length=60)
     breed = models.CharField(max_length=120, blank=True, null=True)
     date_of_birth = models.DateField(blank=True, null=True)
+    age_months = models.PositiveIntegerField(blank=True, null=True)
     age_text = models.CharField(max_length=80, blank=True, null=True)
     gender = models.CharField(max_length=10, blank=True, null=True)
+    weight_kg = models.DecimalField(max_digits=6, decimal_places=2, blank=True, null=True)
+    blood_type = models.CharField(max_length=20, blank=True, null=True)
+    photo = models.ImageField(upload_to='clinics/patients/photos/', blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     notes = models.TextField(blank=True, null=True)
     last_visit = models.DateField(blank=True, null=True)
@@ -516,6 +697,70 @@ class ClinicPatientRecord(models.Model):
 
     def __str__(self):
         return f"{self.name} - {self.owner.full_name}"
+
+
+class ClinicPatientNote(models.Model):
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='patient_notes')
+    patient = models.ForeignKey(ClinicPatientRecord, on_delete=models.CASCADE, related_name='profile_notes')
+    text = models.TextField()
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_patient_notes',
+        blank=True,
+        null=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "ملاحظة مريض عيادة"
+        verbose_name_plural = "ملاحظات مرضى العيادة"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['clinic', 'patient', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"ملاحظة {self.patient.name} - {self.created_at:%Y-%m-%d}"
+
+
+class ClinicPatientDocument(models.Model):
+    CATEGORY_CHOICES = [
+        ('medical_record', 'سجل طبي'),
+        ('vaccination', 'تطعيم'),
+        ('lab_result', 'نتيجة مختبر'),
+        ('certificate', 'شهادة'),
+        ('other', 'أخرى'),
+    ]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='patient_documents')
+    patient = models.ForeignKey(ClinicPatientRecord, on_delete=models.CASCADE, related_name='documents')
+    title = models.CharField(max_length=180)
+    category = models.CharField(max_length=30, choices=CATEGORY_CHOICES, default='other')
+    file = models.FileField(upload_to='clinics/patients/documents/')
+    notes = models.TextField(blank=True, null=True)
+    issued_at = models.DateField(blank=True, null=True)
+    expires_at = models.DateField(blank=True, null=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_patient_documents',
+        blank=True,
+        null=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "ملف مريض عيادة"
+        verbose_name_plural = "ملفات مرضى العيادة"
+        ordering = ['-issued_at', '-created_at']
+        indexes = [
+            models.Index(fields=['clinic', 'patient', 'category']),
+            models.Index(fields=['clinic', 'patient', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} - {self.patient.name}"
 
 
 class ClinicMessage(models.Model):
@@ -740,16 +985,29 @@ class ClinicInvite(models.Model):
 class VeterinaryAppointment(models.Model):
     """نموذج مواعيد بيطرية"""
 
+    STATUS_PENDING = 'PENDING'
+    STATUS_ACCEPTED = 'ACCEPTED'
+    STATUS_REFUSED = 'REFUSED'
+    STATUS_IN_SESSION = 'IN_SESSION'
+    STATUS_COMPLETED = 'COMPLETED'
+    STATUS_CANCELLED = 'CANCELLED'
+    STATUS_NO_SHOW = 'NO_SHOW'
+
     STATUS_CHOICES = [
-        ('scheduled', 'مجدول'),
-        ('completed', 'تم'),
-        ('cancelled', 'ملغي'),
-        ('rescheduled', 'تم إعادة الجدولة'),
+        (STATUS_PENDING, 'قيد الانتظار'),
+        (STATUS_ACCEPTED, 'مقبول'),
+        (STATUS_REFUSED, 'مرفوض'),
+        (STATUS_IN_SESSION, 'داخل الجلسة'),
+        (STATUS_COMPLETED, 'مكتمل'),
+        (STATUS_CANCELLED, 'ملغي'),
+        (STATUS_NO_SHOW, 'لم يحضر'),
     ]
 
     APPOINTMENT_TYPE_CHOICES = [
         ('checkup', 'فحص دوري'),
         ('vaccination', 'تطعيم'),
+        ('dental', 'تنظيف أسنان'),
+        ('follow-up', 'متابعة'),
         ('breeding_consultation', 'استشارة تزاوج'),
         ('pregnancy_check', 'فحص حمل'),
         ('emergency', 'طوارئ'),
@@ -798,7 +1056,7 @@ class VeterinaryAppointment(models.Model):
     reason = models.TextField(help_text="سبب الزيارة")
     notes = models.TextField(blank=True, null=True, help_text="ملاحظات إضافية")
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACCEPTED)
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='unpaid')
     service_fee = models.DecimalField(max_digits=9, decimal_places=2, default=0)
 
@@ -822,6 +1080,107 @@ class VeterinaryAppointment(models.Model):
         verbose_name = "موعد بيطري"
         verbose_name_plural = "المواعيد البيطرية"
         ordering = ['scheduled_date', 'scheduled_time']
+
+
+class VeterinarySession(models.Model):
+    """Simple medically useful clinic visit/session record."""
+
+    CHECK_STATUS_CHOICES = [
+        ('checked', 'تم الفحص'),
+        ('not_checked', 'لم يتم الفحص'),
+    ]
+    EXAM_STATUS_CHOICES = [
+        ('normal', 'طبيعي'),
+        ('abnormal', 'غير طبيعي'),
+        ('not_checked', 'لم يتم الفحص'),
+    ]
+    SEVERITY_CHOICES = [
+        ('low', 'بسيطة'),
+        ('medium', 'متوسطة'),
+        ('high', 'خطيرة'),
+        ('emergency', 'طارئة'),
+    ]
+
+    appointment = models.OneToOneField(
+        VeterinaryAppointment,
+        on_delete=models.CASCADE,
+        related_name='session',
+    )
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='veterinary_sessions')
+    clinic_patient = models.ForeignKey(
+        ClinicPatientRecord,
+        on_delete=models.SET_NULL,
+        related_name='veterinary_sessions',
+        blank=True,
+        null=True,
+    )
+    pet = models.ForeignKey(
+        'pets.Pet',
+        on_delete=models.SET_NULL,
+        related_name='clinic_sessions',
+        blank=True,
+        null=True,
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='clinic_pet_sessions',
+        blank=True,
+        null=True,
+    )
+    care_provider = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='provided_veterinary_sessions',
+        blank=True,
+        null=True,
+    )
+    care_provider_name = models.CharField(max_length=200, blank=True)
+    session_date = models.DateField()
+    session_started_at = models.DateTimeField()
+    session_ended_at = models.DateTimeField(blank=True, null=True)
+    service_type = models.CharField(max_length=60, blank=True)
+
+    main_complaint = models.TextField(blank=True)
+    symptoms = models.TextField(blank=True)
+    symptoms_duration = models.CharField(max_length=120, blank=True)
+    owner_notes = models.TextField(blank=True)
+    previous_treatment = models.TextField(blank=True)
+    current_medications = models.TextField(blank=True)
+    allergies = models.TextField(blank=True)
+
+    vitals = models.JSONField(default=dict, blank=True)
+    physical_exam = models.JSONField(default=dict, blank=True)
+    physical_exam_notes = models.TextField(blank=True)
+
+    diagnosis = models.TextField(blank=True)
+    provisional_diagnosis = models.TextField(blank=True)
+    case_severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, blank=True)
+    doctor_notes = models.TextField(blank=True)
+
+    services_performed = models.TextField(blank=True)
+    medications = models.JSONField(default=list, blank=True)
+    lab_tests_requested = models.TextField(blank=True)
+    imaging_requested = models.TextField(blank=True)
+    attachments = models.JSONField(default=list, blank=True)
+
+    home_care_instructions = models.TextField(blank=True)
+    food_instructions = models.TextField(blank=True)
+    warning_signs = models.TextField(blank=True)
+    follow_up_needed = models.BooleanField(default=False)
+    next_appointment_date = models.DateField(blank=True, null=True)
+
+    owner_summary_sent_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "جلسة بيطرية"
+        verbose_name_plural = "الجلسات البيطرية"
+        ordering = ['-session_started_at']
+
+    def __str__(self):
+        return f"جلسة {self.appointment_id} - {self.session_date}"
 
 
 class VeterinaryCertificate(models.Model):

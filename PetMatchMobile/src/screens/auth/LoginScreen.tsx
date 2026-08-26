@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -15,25 +15,40 @@ import {
   Image,
   Linking,
 } from 'react-native';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { useAuth } from '../../contexts/AuthContext';
 import ForgotPasswordScreen from './ForgotPasswordScreen';
+import AppIcon, { IconSize } from '../../components/icons/AppIcon';
 
 const PRIVACY_POLICY_URL = 'https://petow.app/privacy-policy';
 const TERMS_URL = 'https://petow.app/terms';
 
+const GOOGLE_WEB_CLIENT_ID = '171353883247-d3qfgch4tkiihlc212bkpbm62adllfr3.apps.googleusercontent.com';
+const GOOGLE_IOS_CLIENT_ID = '171353883247-0u0t3567pgbb48ijjmif5is0s62h5os4.apps.googleusercontent.com';
+
 interface LoginScreenProps {
   onNavigateToRegister: () => void;
+  onGoogleNewUser?: (googlePicture?: string) => void;
 }
 
-const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateToRegister }) => {
+const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateToRegister, onGoogleNewUser }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [showForgotPassword, setShowForgotPassword] = useState(false);
-  const { login } = useAuth();
+  const { login, googleLogin } = useAuth();
+
+  useEffect(() => {
+    GoogleSignin.configure({
+      webClientId: GOOGLE_WEB_CLIENT_ID,
+      iosClientId: GOOGLE_IOS_CLIENT_ID,
+      offlineAccess: false,
+    });
+  }, []);
 
   const handleForgotPassword = () => {
     setErrorMessage('');
@@ -70,6 +85,48 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateToRegister }) => {
       setErrorMessage('تعذر تسجيل الدخول، حاول مرة أخرى');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const onGoogleButtonPress = async () => {
+    setErrorMessage('');
+    setGoogleLoading(true);
+    try {
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const signInResponse = await GoogleSignin.signIn();
+
+      let idToken: string | null = null;
+      if (signInResponse.type === 'success' && signInResponse.data) {
+        idToken = signInResponse.data.idToken ?? null;
+      } else if (signInResponse.type === 'cancelled') {
+        setGoogleLoading(false);
+        return;
+      }
+
+      if (!idToken) {
+        setErrorMessage('فشل الحصول على رمز الدخول من Google');
+        setGoogleLoading(false);
+        return;
+      }
+
+      const result = await googleLogin(idToken);
+
+      if (result.success) {
+        if (result.isNewUser && onGoogleNewUser) {
+          onGoogleNewUser(result.googlePicture);
+        }
+      } else {
+        setErrorMessage(result.error || 'فشل تسجيل الدخول باستخدام Google');
+      }
+    } catch (error: any) {
+      console.error('Google Sign-In Error:', error);
+      if (error.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+        setErrorMessage('خدمات Google Play غير متوفرة');
+      } else {
+        setErrorMessage('حدث خطأ أثناء تسجيل الدخول باستخدام Google');
+      }
+    } finally {
+      setGoogleLoading(false);
     }
   };
 
@@ -142,9 +199,12 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateToRegister }) => {
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     accessibilityLabel={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
                   >
-                    <Text style={styles.togglePasswordText}>
-                      {showPassword ? '🙈' : '👁'}
-                    </Text>
+                    <AppIcon
+                      name={showPassword ? 'eye-off' : 'eye'}
+                      size={IconSize.md}
+                      color="#64748B"
+                      accessibilityLabel={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                    />
                   </TouchableOpacity>
                 </View>
               </View>
@@ -166,6 +226,30 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateToRegister }) => {
                   <ActivityIndicator color="#fff" />
                 ) : (
                   <Text style={styles.primaryButtonText}>تسجيل الدخول</Text>
+                )}
+              </TouchableOpacity>
+
+              <View style={styles.dividerContainer}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>أو</Text>
+                <View style={styles.dividerLine} />
+              </View>
+
+              <TouchableOpacity
+                style={[styles.googleButton, googleLoading && styles.buttonDisabled]}
+                onPress={onGoogleButtonPress}
+                disabled={googleLoading}
+                activeOpacity={0.7}
+              >
+                {googleLoading ? (
+                  <ActivityIndicator color="#444" />
+                ) : (
+                  <>
+                    <View style={styles.googleIconWrap}>
+                      <Text style={styles.googleIconG}>G</Text>
+                    </View>
+                    <Text style={styles.googleButtonText}>تسجيل الدخول باستخدام Google</Text>
+                  </>
                 )}
               </TouchableOpacity>
 
@@ -278,10 +362,6 @@ const styles = StyleSheet.create({
     top: 12,
     padding: 4,
   },
-  togglePasswordText: {
-    fontSize: 18,
-    color: '#0a84ff',
-  },
   successText: {
     textAlign: 'center',
     color: '#2ecc71',
@@ -308,6 +388,50 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.6,
+  },
+  dividerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 16,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#e1e8f0',
+  },
+  dividerText: {
+    marginHorizontal: 12,
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e1e8f0',
+    borderRadius: 14,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  googleIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#f1f3f4',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleIconG: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#4285F4',
+  },
+  googleButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#3c4043',
   },
   secondaryLink: {
     alignItems: 'center',

@@ -7,7 +7,8 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
-import DocumentPicker, { DocumentPickerResponse } from 'react-native-document-picker';
+import { pick, isErrorWithCode, errorCodes, type DocumentPickerResponse } from '@react-native-documents/picker';
+import AppIcon, { AppIconName } from './icons/AppIcon';
 
 interface DocumentPickerProps {
   documents: DocumentPickerResponse[];
@@ -32,13 +33,13 @@ const DocumentPickerComponent: React.FC<DocumentPickerProps> = ({
       allowMultiSelection: true,
     };
 
-    DocumentPicker.pick(options)
+    pick(options)
       .then((response: DocumentPickerResponse[]) => {
         const newDocuments = [...documents, ...response].slice(0, maxDocuments);
         onDocumentsChange(newDocuments);
       })
-      .catch((error) => {
-        if (DocumentPicker.isCancel(error)) {
+      .catch((error: unknown) => {
+        if (isErrorWithCode(error) && error.code === errorCodes.OPERATION_CANCELED) {
           // User cancelled
         } else {
           Alert.alert('خطأ', 'حدث خطأ في اختيار الملفات');
@@ -51,10 +52,10 @@ const DocumentPickerComponent: React.FC<DocumentPickerProps> = ({
     onDocumentsChange(updatedDocuments);
   };
 
-  const getFileIcon = (type: string) => {
-    if (type.includes('pdf')) return '📄';
-    if (type.includes('image')) return '🖼️';
-    return '📎';
+  const getFileIcon = (type: string): AppIconName => {
+    if (type.includes('pdf')) return 'document';
+    if (type.includes('image')) return 'image';
+    return 'paperclip';
   };
 
   const formatFileSize = (size: number) => {
@@ -72,9 +73,13 @@ const DocumentPickerComponent: React.FC<DocumentPickerProps> = ({
           {documents.map((document, index) => (
             <View key={index} style={styles.documentWrapper}>
               <View style={styles.documentItem}>
-                <Text style={styles.documentIcon}>
-                  {getFileIcon(document.type || '')}
-                </Text>
+                <View style={styles.documentIcon}>
+                  <AppIcon
+                    name={getFileIcon(document.type || '')}
+                    size={24}
+                    color="#5b6d7f"
+                  />
+                </View>
                 <Text style={styles.documentName} numberOfLines={2}>
                   {document.name}
                 </Text>
@@ -136,8 +141,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   documentIcon: {
-    fontSize: 24,
+    width: 24,
+    height: 24,
     marginBottom: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   documentName: {
     fontSize: 12,

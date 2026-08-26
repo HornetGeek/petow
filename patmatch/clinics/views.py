@@ -1,15 +1,24 @@
 import re
+import time
+import logging
+import hashlib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import authenticate
-from django.db.models import Count, Q, Sum
+from django.contrib.gis.db import models as gis_models
+from django.contrib.gis.db.models.functions import Distance, Transform
+from django.contrib.gis.geos import Point, Polygon
+from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper, Exists, OuterRef
+from django.db.models.functions import Cast, Floor
 from django.db import models, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import generics, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -28,6 +37,9 @@ from .models import (
     StorefrontOrder,
     StorefrontOrderItem,
     StorefrontBooking,
+    StorefrontBookingTimeline,
+    StorefrontBookingProposal,
+    VeterinarySession,
     ServicePricingTier,
     ServicePackage,
     ClinicPromotion,
@@ -36,16 +48,23 @@ from .models import (
     ClinicStaff,
     ClinicClientRecord,
     ClinicPatientRecord,
+    ClinicPatientDocument,
+    ClinicPatientNote,
     ClinicInvite,
 )
-from pets.models import Notification, ChatRoom, Pet
+from pets.models import Notification, ChatRoom, Pet, NotificationOutbox
 from pets.serializers import PublicPetSerializer
-from pets.notifications import create_notification, _send_push_notification
-from .permissions import IsClinicStaff
+from pets.notifications import create_notification, create_notification_once
+from pets.notification_events import enqueue_notification_event
+from pets.push_targets import attach_push_targets
+from .permissions import IsClinicStaff, IsPlatformAdmin
+from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_categories_for_group
 from .serializers import (
     ClinicSerializer,
     ClinicPublicSerializer,
     ClinicListSerializer,
+    ClinicMapPointSerializer,
+    MarketplaceServiceSerializer,
     ClinicServiceSerializer,
     ClinicProductSerializer,
     StorefrontOrderSerializer,
@@ -53,6 +72,19 @@ from .serializers import (
     StorefrontBookingSerializer,
     StorefrontBookingUpdateSerializer,
     StorefrontBookingCreateSerializer,
+    StorefrontBookingProposalCreateSerializer,
+    StorefrontBookingAcceptSerializer,
+    StorefrontBookingAssignSerializer,
+    StorefrontBookingCompleteSerializer,
+    StorefrontBookingNoteSerializer,
+    StorefrontBookingPatientLinkSerializer,
+    StorefrontBookingRejectSerializer,
+    StorefrontBookingScheduleSerializer,
+    VeterinarySessionSerializer,
+    VeterinarySessionEndSerializer,
+    ClinicPatientCompletedSessionSerializer,
+    normalize_appointment_status,
+    normalize_booking_status,
     ServicePricingTierSerializer,
     ServicePackageSerializer,
     ClinicPromotionSerializer,
@@ -62,6 +94,12 @@ from .serializers import (
     ClinicDashboardStatsSerializer,
     ClinicRegistrationSerializer,
     ClinicPatientRecordSerializer,
+    ClinicPatientDocumentSerializer,
+    ClinicPatientMedicalRecordCreateSerializer,
+    ClinicPatientNoteSerializer,
+    ClinicPatientProfileSerializer,
+    _absolute_file_url,
+    get_or_create_patient_record_for_pet,
     ClinicInviteSerializer,
     VeterinarianSerializer,
 )
@@ -79,11 +117,441 @@ SERVICE_CATEGORY_APPOINTMENT_TYPE = {
     'emergency': 'emergency',
 }
 
+logger = logging.getLogger(__name__)
+
+
+PETMATCH_APP_TYPE = 'petmatch_mobile'
+CLINIC_APP_TYPE = 'clinic_app'
+
+
+def _booking_notification_payload(booking, notification_type, app_type, extra=None):
+    payload = {
+        'type': notification_type,
+        'app_type': app_type,
+        'kind': 'storefront_booking',
+        'booking_public_id': str(booking.public_id),
+        'clinic_id': str(booking.clinic_id),
+        'service_id': str(booking.service_id),
+        'status': booking.status,
+    }
+    if booking.service_id and getattr(booking, 'service', None):
+        payload['service_name'] = booking.service.name
+    if extra:
+        payload.update({key: value for key, value in extra.items() if value is not None})
+    return payload
+
+
+def _enqueue_booking_push(user, booking, notification_type, title, message, app_type, event_suffix, extra=None):
+    if not user:
+        return None
+
+    payload = _booking_notification_payload(booking, notification_type, app_type, extra)
+    event_key = f"storefront_booking:{booking.public_id}:{event_suffix}:{user.id}"
+    notification, _ = create_notification_once(
+        user=user,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        extra_data=payload,
+        event_key=event_key,
+    )
+    push_payload = attach_push_targets(payload, notification_type)
+    enqueue_notification_event(
+        event_type=NotificationOutbox.EVENT_CLINIC_BOOKING_PUSH,
+        object_id=notification.id,
+        dedupe_key=f"clinic_booking_push:{event_key}",
+        payload={
+            'title': title,
+            'message': message,
+            'push_type': notification_type,
+            'push_payload': push_payload,
+        },
+    )
+    return notification
+
+
+def _notify_clinic_staff_booking_created(booking):
+    staff_users = (
+        User.objects
+        .filter(
+            Q(id=booking.clinic.owner_id) |
+            Q(clinic_memberships__clinic=booking.clinic)
+        )
+        .filter(is_active=True)
+        .distinct()
+    )
+    title = 'طلب حجز جديد'
+    message = f"وصل طلب {booking.service.name} من {booking.customer_name}."
+    for user in staff_users:
+        _enqueue_booking_push(
+            user=user,
+            booking=booking,
+            notification_type='clinic_booking_new',
+            title=title,
+            message=message,
+            app_type=CLINIC_APP_TYPE,
+            event_suffix='new',
+        )
+
 
 class ClinicListPagination(PageNumberPagination):
     page_size = settings.REST_FRAMEWORK.get('PAGE_SIZE', 20)
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+MAP_DEFAULT_POINT_LIMIT = 300
+MAP_MAX_POINT_LIMIT = 1000
+MAP_CLUSTER_ZOOM_THRESHOLD = 13
+MAP_LOW_ZOOM_POINT_LIMIT = 200
+NOTIFICATION_PUSH_BATCH_SIZE = max(1, int(getattr(settings, 'NOTIFICATION_PUSH_BATCH_SIZE', 500)))
+
+
+def _parse_bool_param(raw_value, default=True):
+    if raw_value is None:
+        return default
+    normalized = str(raw_value).strip().lower()
+    if normalized in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    return default
+
+
+def _parse_bbox_param(raw_bbox):
+    if not raw_bbox:
+        raise ValueError('bbox مطلوب بصيغة min_lng,min_lat,max_lng,max_lat')
+    try:
+        min_lng, min_lat, max_lng, max_lat = [float(part.strip()) for part in str(raw_bbox).split(',')]
+    except (TypeError, ValueError):
+        raise ValueError('صيغة bbox غير صحيحة')
+
+    if min_lng >= max_lng or min_lat >= max_lat:
+        raise ValueError('حدود bbox غير صحيحة')
+    if min_lat < -90 or max_lat > 90 or min_lng < -180 or max_lng > 180:
+        raise ValueError('bbox خارج نطاق الإحداثيات المسموح')
+
+    return min_lng, min_lat, max_lng, max_lat
+
+
+def _parse_zoom_param(raw_zoom):
+    if raw_zoom in (None, ''):
+        raise ValueError('zoom مطلوب')
+    try:
+        zoom = int(float(raw_zoom))
+    except (TypeError, ValueError):
+        raise ValueError('zoom يجب أن يكون رقمًا صحيحًا')
+    if zoom < 0 or zoom > 25:
+        raise ValueError('zoom خارج النطاق المتوقع')
+    return zoom
+
+
+def _parse_optional_float(raw_value, field_name):
+    if raw_value in (None, ''):
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} غير صالح')
+
+
+def _parse_point_limit(raw_limit):
+    if raw_limit in (None, ''):
+        return MAP_DEFAULT_POINT_LIMIT
+    try:
+        parsed = int(raw_limit)
+    except (TypeError, ValueError):
+        raise ValueError('limit_points يجب أن يكون رقمًا صحيحًا')
+    if parsed <= 0:
+        raise ValueError('limit_points يجب أن يكون أكبر من 0')
+    return min(parsed, MAP_MAX_POINT_LIMIT)
+
+
+def _build_service_category_filter(service_category):
+    if not service_category:
+        return None
+    categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
+    if not categories:
+        return None
+
+    category_labels = dict(ClinicService.CATEGORY_CHOICES)
+    text_query = None
+    for cat in categories:
+        label = category_labels.get(cat)
+        for term in (cat, label):
+            if not term:
+                continue
+            clause = Q(services__icontains=term)
+            text_query = clause if text_query is None else text_query | clause
+
+    filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
+    if text_query is not None:
+        filter_query |= text_query
+    return filter_query
+
+
+def _cap_limit_points_for_zoom(limit_points, zoom):
+    if zoom <= 8:
+        return min(limit_points, MAP_LOW_ZOOM_POINT_LIMIT)
+    return limit_points
+
+
+def _cell_size_meters_for_zoom(zoom):
+    meters_per_pixel = 40075016.686 / (256 * (2 ** max(zoom, 1)))
+    return max(meters_per_pixel * 64, 25.0)
+
+
+def _build_map_cache_key(prefix, params):
+    parts = [f"{key}={params.get(key, '')}" for key in sorted(params.keys())]
+    digest = hashlib.md5("&".join(parts).encode('utf-8')).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+class ClinicMapMarkersView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        started_at = time.perf_counter()
+        try:
+            min_lng, min_lat, max_lng, max_lat = _parse_bbox_param(request.query_params.get('bbox'))
+            zoom = _parse_zoom_param(request.query_params.get('zoom'))
+            cluster_enabled = _parse_bool_param(request.query_params.get('cluster'), default=True)
+            limit_points = _cap_limit_points_for_zoom(
+                _parse_point_limit(request.query_params.get('limit_points')),
+                zoom,
+            )
+
+            user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
+            user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
+            if (user_lat is None) != (user_lng is None):
+                raise ValueError('يجب تمرير user_lat و user_lng معًا')
+            if user_lat is not None and (user_lat < -90 or user_lat > 90):
+                raise ValueError('user_lat خارج النطاق المسموح')
+            if user_lng is not None and (user_lng < -180 or user_lng > 180):
+                raise ValueError('user_lng خارج النطاق المسموح')
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        service_category = request.query_params.get('service_category')
+        search_term = request.query_params.get('search')
+
+        cache_key = _build_map_cache_key(
+            'clinics_map_markers',
+            {
+                'bbox': request.query_params.get('bbox'),
+                'zoom': zoom,
+                'cluster': cluster_enabled,
+                'limit_points': limit_points,
+                'user_lat': user_lat,
+                'user_lng': user_lng,
+                'service_category': service_category,
+                'search': search_term,
+            },
+        )
+        cached_payload = cache.get(cache_key)
+        if cached_payload is not None:
+            return Response(cached_payload)
+
+        try:
+            bbox = Polygon.from_bbox((min_lng, min_lat, max_lng, max_lat))
+            bbox.srid = 4326
+
+            queryset = (
+                Clinic.objects
+                .filter(is_active=True)
+                .annotate(staff_count=Count('staff_members', distinct=True))
+                .distinct()
+                .annotate(
+                    effective_point_geom=Cast(
+                        'location_point',
+                        output_field=gis_models.PointField(srid=4326),
+                    )
+                )
+                .exclude(location_point__isnull=True)
+                .filter(location_point__intersects=bbox)
+                .annotate(
+                    map_latitude=Cast(
+                        Func(F('effective_point_geom'), function='ST_Y'),
+                        FloatField(),
+                    ),
+                    map_longitude=Cast(
+                        Func(F('effective_point_geom'), function='ST_X'),
+                        FloatField(),
+                    ),
+                )
+            )
+
+            category_filter = _build_service_category_filter(service_category)
+            if category_filter is not None:
+                queryset = queryset.filter(category_filter)
+
+            if search_term:
+                queryset = queryset.filter(
+                    Q(name__icontains=search_term) |
+                    Q(address__icontains=search_term) |
+                    Q(phone__icontains=search_term) |
+                    Q(email__icontains=search_term) |
+                    Q(services__icontains=search_term)
+                )
+
+            user_point = (
+                Point(user_lng, user_lat, srid=4326)
+                if user_lat is not None and user_lng is not None
+                else None
+            )
+            if user_point is not None:
+                queryset = queryset.annotate(map_distance_m=Distance('location_point', user_point))
+
+            total_matched = queryset.count()
+            clusters_payload = []
+            points_queryset = queryset
+
+            use_clusters = cluster_enabled and zoom < MAP_CLUSTER_ZOOM_THRESHOLD
+            if use_clusters:
+                cell_size_meters = _cell_size_meters_for_zoom(zoom)
+                clustered_queryset = queryset.annotate(
+                    point_mercator=Transform('effective_point_geom', 3857),
+                ).annotate(
+                    grid_x=Cast(
+                        Floor(
+                            ExpressionWrapper(
+                                Func(F('point_mercator'), function='ST_X') /
+                                Value(cell_size_meters),
+                                output_field=FloatField(),
+                            )
+                        ),
+                        IntegerField(),
+                    ),
+                    grid_y=Cast(
+                        Floor(
+                            ExpressionWrapper(
+                                Func(F('point_mercator'), function='ST_Y') /
+                                Value(cell_size_meters),
+                                output_field=FloatField(),
+                            )
+                        ),
+                        IntegerField(),
+                    ),
+                )
+
+                grouped = clustered_queryset.values('grid_x', 'grid_y').annotate(
+                    bucket_count=Count('id'),
+                    latitude=Avg('map_latitude'),
+                    longitude=Avg('map_longitude'),
+                    point_id=Min('id'),
+                )
+
+                cluster_rows = list(grouped.filter(bucket_count__gt=1).order_by('-bucket_count'))
+                clusters_payload = [
+                    {
+                        'id': f"clinic-{zoom}-{row['grid_x']}-{row['grid_y']}",
+                        'latitude': float(row['latitude']) if row['latitude'] is not None else None,
+                        'longitude': float(row['longitude']) if row['longitude'] is not None else None,
+                        'count': int(row['bucket_count']),
+                        'entity_type': 'clinic',
+                    }
+                    for row in cluster_rows
+                ]
+
+                singleton_groups = grouped.filter(bucket_count=1)
+                singleton_total = singleton_groups.count()
+                if user_point is not None:
+                    singleton_groups = singleton_groups.annotate(
+                        sort_distance=Min('map_distance_m'),
+                    ).order_by('sort_distance', '-point_id')
+                else:
+                    singleton_groups = singleton_groups.order_by('-point_id')
+
+                point_ids = [row['point_id'] for row in singleton_groups[:limit_points]]
+                points_queryset = queryset.filter(id__in=point_ids)
+                if user_point is not None:
+                    points_queryset = points_queryset.order_by('map_distance_m', 'name')
+                else:
+                    points_queryset = points_queryset.order_by('name')
+                truncated = singleton_total > len(point_ids)
+            else:
+                if user_point is not None:
+                    points_queryset = queryset.order_by('map_distance_m', 'name')
+                else:
+                    points_queryset = queryset.order_by('name')
+                points_queryset = points_queryset[:limit_points]
+                truncated = total_matched > limit_points
+
+            points_queryset = points_queryset.prefetch_related(
+                models.Prefetch(
+                    'services_list',
+                    queryset=ClinicService.objects.filter(is_active=True).only(
+                        'category',
+                        'clinic_id',
+                    )
+                )
+            )
+            points = list(points_queryset)
+            serializer = ClinicMapPointSerializer(points, many=True, context={'request': request})
+            points_payload = list(serializer.data)
+
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            request_summary = {
+                'bbox': request.query_params.get('bbox'),
+                'zoom': zoom,
+                'cluster': use_clusters,
+                'service_category': service_category,
+                'search': search_term,
+            }
+            logger.info(
+                "clinics_map_markers params=%s total=%s clusters=%s points=%s truncated=%s duration_ms=%s",
+                request_summary,
+                total_matched,
+                len(clusters_payload),
+                len(points_payload),
+                truncated,
+                duration_ms,
+            )
+
+            payload = {
+                'clusters': clusters_payload,
+                'points': points_payload,
+                'meta': {
+                    'zoom': zoom,
+                    'bbox': {
+                        'min_lng': min_lng,
+                        'min_lat': min_lat,
+                        'max_lng': max_lng,
+                        'max_lat': max_lat,
+                    },
+                    'total_matched': total_matched,
+                    'returned_clusters': len(clusters_payload),
+                    'returned_points': len(points_payload),
+                    'truncated': bool(truncated),
+                }
+            }
+            cache.set(
+                cache_key,
+                payload,
+                timeout=max(
+                    1,
+                    int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30)),
+                ),
+            )
+            return Response(payload)
+        except Exception:
+            logger.exception(
+                "clinics_map_markers failed release_marker=%s bbox=%s zoom=%s cluster=%s service_category=%s search=%s",
+                "clinic-map-json-error-v2",
+                request.query_params.get('bbox'),
+                zoom,
+                cluster_enabled,
+                service_category,
+                search_term,
+            )
+            return Response(
+                {
+                    'error': 'تعذر تحميل الخدمات على الخريطة. حاول مرة أخرى لاحقاً.',
+                    'release_marker': 'clinic-map-json-error-v2',
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
@@ -186,6 +654,17 @@ class ClinicLoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if user.is_staff and user.is_superuser:
+            token, _ = Token.objects.get_or_create(user=user)
+            return Response(
+                {
+                    'token': token.key,
+                    'clinic': None,
+                    'user': UserSerializer(user).data,
+                    'is_platform_admin': True,
+                }
+            )
+
         if getattr(user, 'user_type', '') != 'clinic_staff':
             return Response(
                 {'error': 'هذا الحساب غير مخول للوصول إلى لوحة تحكم العيادة'},
@@ -206,6 +685,7 @@ class ClinicLoginView(APIView):
                 'token': token.key,
                 'clinic': ClinicSerializer(clinic).data,
                 'user': UserSerializer(user).data,
+                'is_platform_admin': False,
             }
         )
 
@@ -228,9 +708,12 @@ class ClinicDashboardOverviewView(ClinicContextMixin, APIView):
         todays_appointments = appointments_qs.filter(scheduled_date=today).count()
         upcoming_appointments = appointments_qs.filter(
             scheduled_date__gt=today,
-            status__in=['scheduled', 'rescheduled'],
+            status__in=[
+                VeterinaryAppointment.STATUS_ACCEPTED,
+                VeterinaryAppointment.STATUS_IN_SESSION,
+            ],
         ).count()
-        pending_requests = appointments_qs.filter(status='scheduled').count()
+        pending_requests = appointments_qs.filter(status=VeterinaryAppointment.STATUS_PENDING).count()
 
         revenue_this_month = appointments_qs.filter(
             scheduled_date__gte=start_of_month,
@@ -512,6 +995,122 @@ class PublicStorefrontView(APIView):
         return Response(payload)
 
 
+class PublicMarketplaceServicesView(APIView):
+    permission_classes = [AllowAny]
+
+    def _parse_coordinates(self, request):
+        user_lat = _parse_optional_float(request.query_params.get('user_lat'), 'user_lat')
+        user_lng = _parse_optional_float(request.query_params.get('user_lng'), 'user_lng')
+        if (user_lat is None) != (user_lng is None):
+            raise ValueError('يجب تمرير user_lat و user_lng معًا')
+        if user_lat is not None and (user_lat < -90 or user_lat > 90):
+            raise ValueError('user_lat خارج النطاق المسموح')
+        if user_lng is not None and (user_lng < -180 or user_lng > 180):
+            raise ValueError('user_lng خارج النطاق المسموح')
+        return user_lat, user_lng
+
+    def _resolve_categories(self, request):
+        valid_categories = {choice[0] for choice in ClinicService.CATEGORY_CHOICES}
+        category_param = request.query_params.get('category')
+        if category_param:
+            categories = [cat.strip() for cat in category_param.split(',') if cat.strip()]
+            invalid = [cat for cat in categories if cat not in valid_categories]
+            if invalid:
+                raise ValueError(f"فئة خدمة غير مدعومة: {', '.join(invalid)}")
+            return categories
+
+        group_key = request.query_params.get('group') or 'clinic_vaccination'
+        categories = get_marketplace_categories_for_group(group_key)
+        if categories is None:
+            raise ValueError('مجموعة الخدمات غير مدعومة')
+        return categories
+
+    def get(self, request):
+        try:
+            user_lat, user_lng = self._parse_coordinates(request)
+            service_id = request.query_params.get('service_id')
+            clinic_id = request.query_params.get('clinic_id')
+            service_id_value = int(service_id) if service_id else None
+            clinic_id_value = int(clinic_id) if clinic_id else None
+            categories = None if service_id_value else self._resolve_categories(request)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            queryset = (
+                ClinicService.objects
+                .filter(is_active=True, clinic__is_active=True)
+                .annotate(has_staff=Exists(ClinicStaff.objects.filter(clinic_id=OuterRef('clinic_id'))))
+                .annotate(
+                    marketplace_min_price=Min(
+                        'pricing_tiers__price',
+                        filter=Q(pricing_tiers__is_active=True),
+                    ),
+                    marketplace_max_price=Max(
+                        'pricing_tiers__price',
+                        filter=Q(pricing_tiers__is_active=True),
+                    ),
+                )
+                .select_related('clinic')
+            )
+            if categories is not None:
+                queryset = queryset.filter(category__in=categories)
+            if service_id_value:
+                queryset = queryset.filter(id=service_id_value)
+            if clinic_id_value:
+                queryset = queryset.filter(clinic_id=clinic_id_value)
+
+            search_term = (request.query_params.get('search') or '').strip()
+            if search_term:
+                queryset = queryset.filter(
+                    Q(name__icontains=search_term) |
+                    Q(description__icontains=search_term) |
+                    Q(clinic__name__icontains=search_term) |
+                    Q(clinic__address__icontains=search_term) |
+                    Q(clinic__services__icontains=search_term)
+                )
+
+            user_point = Point(user_lng, user_lat, srid=4326) if user_lat is not None and user_lng is not None else None
+            if user_point is not None:
+                queryset = queryset.annotate(
+                    marketplace_distance_m=Distance('clinic__location_point', user_point),
+                ).order_by(
+                    F('marketplace_distance_m').asc(nulls_last=True),
+                    'display_order',
+                    '-is_featured',
+                    'base_price',
+                    'name',
+                )
+            else:
+                queryset = queryset.order_by('display_order', '-is_featured', 'base_price', 'name')
+
+            paginator = ClinicListPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            serializer = MarketplaceServiceSerializer(
+                page,
+                many=True,
+                context={
+                    'request': request,
+                    'marketplace_groups': MARKETPLACE_SERVICE_GROUPS,
+                },
+            )
+            return paginator.get_paginated_response(serializer.data)
+        except Exception:
+            logger.exception(
+                'Unexpected marketplace services error',
+                extra={
+                    'group': request.query_params.get('group'),
+                    'category': request.query_params.get('category'),
+                    'search': request.query_params.get('search'),
+                    'has_location': user_lat is not None and user_lng is not None,
+                },
+            )
+            return Response(
+                {'error': 'تعذر تحميل خدمات السوق حالياً. حاول مرة أخرى.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class PublicClinicListView(APIView):
     permission_classes = [AllowAny]
 
@@ -520,26 +1119,11 @@ class PublicClinicListView(APIView):
             Clinic.objects
             .filter(is_active=True)
             .annotate(staff_count=Count('staff_members', distinct=True))
-            .filter(Q(owner__isnull=False) | Q(staff_members__isnull=False))
             .distinct()
         )
-        service_category = request.query_params.get('service_category')
-        if service_category:
-            categories = [cat.strip() for cat in service_category.split(',') if cat.strip()]
-            if categories:
-                category_labels = dict(ClinicService.CATEGORY_CHOICES)
-                text_query = None
-                for cat in categories:
-                    label = category_labels.get(cat)
-                    for term in (cat, label):
-                        if not term:
-                            continue
-                        clause = Q(services__icontains=term)
-                        text_query = clause if text_query is None else text_query | clause
-                filter_query = Q(services_list__category__in=categories, services_list__is_active=True)
-                if text_query is not None:
-                    filter_query |= text_query
-                clinics = clinics.filter(filter_query)
+        category_filter = _build_service_category_filter(request.query_params.get('service_category'))
+        if category_filter is not None:
+            clinics = clinics.filter(category_filter)
         clinics = clinics.prefetch_related(
             models.Prefetch(
                 'services_list',
@@ -573,6 +1157,23 @@ class PublicStorefrontOrderView(APIView):
         if not customer_name or not customer_phone:
             raise ValidationError({'detail': 'الاسم ورقم الهاتف مطلوبان'})
 
+        product_ids = [item['product_id'] for item in items]
+        products_by_id = {
+            product.id: product
+            for product in ClinicProduct.objects.filter(
+                id__in=product_ids,
+                clinic=clinic,
+                is_active=True,
+            )
+        }
+        if len(products_by_id) != len(set(product_ids)):
+            raise ValidationError({'items': ['بعض المنتجات غير متاحة']})
+
+        order_currencies = {product.currency or 'EGP' for product in products_by_id.values()}
+        if len(order_currencies) > 1:
+            raise ValidationError({'currency': 'لا يمكن طلب منتجات بعملات مختلفة في طلب واحد.'})
+        order_currency = next(iter(order_currencies), 'EGP')
+
         with transaction.atomic():
             order = StorefrontOrder.objects.create(
                 clinic=clinic,
@@ -582,16 +1183,12 @@ class PublicStorefrontOrderView(APIView):
                 delivery_address=delivery_address,
                 notes=notes,
                 status='new',
+                currency=order_currency,
             )
 
             total = Decimal('0')
             for item in items:
-                product = get_object_or_404(
-                    ClinicProduct,
-                    id=item['product_id'],
-                    clinic=clinic,
-                    is_active=True
-                )
+                product = products_by_id[item['product_id']]
                 quantity = item['quantity']
                 unit_price = Decimal(str(product.price))
                 line_total = unit_price * quantity
@@ -631,24 +1228,34 @@ class PublicStorefrontBookingView(APIView):
         booking = StorefrontBooking.objects.create(
             clinic=clinic,
             service=service,
+            customer_user=request.user if request.user.is_authenticated else None,
             customer_name=data['customer_name'],
             customer_phone=data['customer_phone'],
             customer_email=data.get('customer_email'),
             pet_name=data.get('pet_name'),
+            pet_type=data.get('pet_type'),
+            pet_breed=data.get('pet_breed'),
+            pet_age=data.get('pet_age'),
+            pet_photo=data.get('pet_photo'),
             preferred_date=data.get('preferred_date'),
             preferred_time=data.get('preferred_time'),
             notes=data.get('notes'),
-            status='new',
+            request_type=data.get('request_type', 'appointment'),
+            source=data.get('source') or 'PetMatch',
+            contact_channel=data.get('contact_channel', 'app'),
+            status=StorefrontBooking.STATUS_PENDING,
             quoted_price=service.base_price,
+            quoted_currency=service.currency or 'EGP',
         )
 
+        request_type = data.get('request_type', 'appointment')
         preferred_date = data.get('preferred_date')
         preferred_time = data.get('preferred_time')
         customer_phone = data.get('customer_phone')
         customer_email = data.get('customer_email')
         pet_name = data.get('pet_name')
 
-        if preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
+        if request_type == 'appointment' and preferred_date and preferred_time and pet_name and (customer_phone or customer_email):
             appointment_owner = None
             appointment_pet = None
 
@@ -688,16 +1295,16 @@ class PublicStorefrontBookingView(APIView):
             if appointment_owner and appointment_pet:
                 appointment_type = SERVICE_CATEGORY_APPOINTMENT_TYPE.get(service.category, 'other')
 
-                existing = VeterinaryAppointment.objects.filter(
+                appointment = VeterinaryAppointment.objects.filter(
                     clinic=clinic,
                     pet=appointment_pet,
                     owner=appointment_owner,
                     scheduled_date=preferred_date,
                     scheduled_time=preferred_time,
-                ).exists()
+                ).first()
 
-                if not existing:
-                    VeterinaryAppointment.objects.create(
+                if not appointment:
+                    appointment = VeterinaryAppointment.objects.create(
                         clinic=clinic,
                         pet=appointment_pet,
                         owner=appointment_owner,
@@ -707,24 +1314,50 @@ class PublicStorefrontBookingView(APIView):
                         duration_minutes=service.duration_minutes or 30,
                         reason=f"حجز متجر: {service.name}",
                         notes=data.get('notes') or '',
-                        status='scheduled',
+                        status=VeterinaryAppointment.STATUS_ACCEPTED,
                         payment_status='unpaid',
                         service_fee=service.base_price,
                     )
 
-                booking.status = 'confirmed'
-                booking.save(update_fields=['status'])
+                patient = appointment.clinic_patient
+                if not patient and appointment.pet_id:
+                    patient = get_or_create_patient_record_for_pet(
+                        clinic,
+                        appointment.pet,
+                        appointment.owner,
+                    )
+                    appointment.clinic_patient = patient
+                    appointment.save(update_fields=['clinic_patient', 'updated_at'])
+
+                booking.confirmed_appointment = appointment
+                booking.linked_patient = patient
+                booking.status = StorefrontBooking.STATUS_ACCEPTED
+                booking.confirmed_at = timezone.now()
+                booking.save(update_fields=['confirmed_appointment', 'linked_patient', 'status', 'confirmed_at'])
+                StorefrontBookingTimeline.objects.create(
+                    booking=booking,
+                    event_type='appointment_scheduled',
+                    message=f"تم إنشاء موعد تلقائي بتاريخ {preferred_date} الساعة {preferred_time}.",
+                    actor=None,
+                )
+
+        _notify_clinic_staff_booking_created(booking)
 
         return Response(StorefrontBookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     serializer_class = ClinicPatientRecordSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
         clinic = self.get_clinic()
-        queryset = ClinicPatientRecord.objects.filter(clinic=clinic).select_related('owner', 'linked_user', 'linked_pet')
+        queryset = (
+            ClinicPatientRecord.objects
+            .filter(clinic=clinic)
+            .select_related('owner', 'linked_user', 'linked_pet', 'linked_pet__breed')
+        )
         search = self.request.query_params.get('search')
         if search:
             queryset = queryset.filter(
@@ -741,6 +1374,169 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context['clinic'] = self.get_clinic()
         return context
+
+    @action(detail=True, methods=['get'])
+    def profile(self, request, pk=None):
+        patient = (
+            ClinicPatientRecord.objects
+            .filter(clinic=self.get_clinic(), pk=pk)
+            .select_related('owner', 'linked_user', 'linked_pet', 'linked_pet__breed')
+            .prefetch_related('profile_notes__created_by', 'documents__uploaded_by', 'clinic_appointments')
+            .first()
+        )
+        if not patient:
+            raise Http404
+        serializer = ClinicPatientProfileSerializer(patient, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def notes(self, request, pk=None):
+        patient = self.get_object()
+        text = (request.data.get('text') or request.data.get('note') or '').strip()
+        if not text:
+            raise ValidationError({'text': 'نص الملاحظة مطلوب.'})
+        note = ClinicPatientNote.objects.create(
+            clinic=patient.clinic,
+            patient=patient,
+            text=text,
+            created_by=request.user,
+        )
+        serializer = ClinicPatientNoteSerializer(note, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='medical-records')
+    def medical_records(self, request, pk=None):
+        patient = self.get_object()
+        serializer = ClinicPatientMedicalRecordCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        appointment = VeterinaryAppointment.objects.create(
+            clinic=patient.clinic,
+            clinic_patient=patient,
+            pet=patient.linked_pet,
+            owner=patient.linked_user,
+            appointment_type=data['appointment_type'],
+            scheduled_date=data['scheduled_date'],
+            scheduled_time=data['scheduled_time'],
+            duration_minutes=30,
+            reason=data['reason'],
+            notes=data.get('notes') or '',
+            status=VeterinaryAppointment.STATUS_COMPLETED,
+            diagnosis=data.get('diagnosis') or '',
+            treatment=data.get('treatment') or '',
+            next_appointment=data.get('next_appointment'),
+        )
+
+        update_fields = []
+        if not patient.last_visit or data['scheduled_date'] >= patient.last_visit:
+            patient.last_visit = data['scheduled_date']
+            update_fields.append('last_visit')
+        if data.get('next_appointment'):
+            patient.next_appointment = data['next_appointment']
+            update_fields.append('next_appointment')
+        if update_fields:
+            patient.save(update_fields=update_fields)
+
+        output = ClinicAppointmentSerializer(appointment, context=self.get_serializer_context())
+        return Response(output.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='sessions/complete')
+    def complete_session(self, request, pk=None):
+        patient = self.get_object()
+        completion_serializer = ClinicPatientCompletedSessionSerializer(
+            data=request.data,
+            partial=True,
+            context=self.get_serializer_context(),
+        )
+        completion_serializer.is_valid(raise_exception=True)
+        session_data = dict(completion_serializer.validated_data)
+        appointment_type = session_data.pop('appointment_type', 'checkup') or 'checkup'
+        scheduled_date = session_data.pop('scheduled_date', None) or timezone.localdate()
+        scheduled_time = (
+            session_data.pop('scheduled_time', None)
+            or timezone.localtime().time().replace(second=0, microsecond=0)
+        )
+
+        with transaction.atomic():
+            appointment = VeterinaryAppointment.objects.create(
+                clinic=patient.clinic,
+                clinic_patient=patient,
+                pet=patient.linked_pet,
+                owner=patient.linked_user,
+                appointment_type=appointment_type,
+                scheduled_date=scheduled_date,
+                scheduled_time=scheduled_time,
+                duration_minutes=30,
+                reason=session_data.get('main_complaint') or '',
+                notes=session_data.get('doctor_notes') or session_data.get('physical_exam_notes') or '',
+                status=VeterinaryAppointment.STATUS_COMPLETED,
+                diagnosis=session_data.get('diagnosis') or session_data.get('provisional_diagnosis') or '',
+                treatment=session_data.get('services_performed') or '',
+                next_appointment=session_data.get('next_appointment_date'),
+            )
+            now = timezone.now()
+            provider_name = request.user.get_full_name() or request.user.email or ''
+            care_provider = session_data.get('care_provider') or request.user
+            care_provider_name = (
+                session_data.get('care_provider_name')
+                or care_provider.get_full_name()
+                or getattr(care_provider, 'email', '')
+                or provider_name
+            )
+            session = VeterinarySession.objects.create(
+                appointment=appointment,
+                clinic=patient.clinic,
+                clinic_patient=patient,
+                pet=patient.linked_pet,
+                owner=patient.linked_user,
+                care_provider=care_provider,
+                care_provider_name=care_provider_name,
+                session_date=scheduled_date,
+                session_started_at=now,
+                session_ended_at=now,
+                service_type=appointment_type,
+            )
+            for field, value in session_data.items():
+                setattr(session, field, value)
+            session.session_ended_at = now
+            session.save()
+
+            appointment.reason = session.main_complaint or appointment.reason
+            appointment.notes = session.doctor_notes or session.physical_exam_notes or ''
+            appointment.diagnosis = session.diagnosis or session.provisional_diagnosis or ''
+            appointment.treatment = session.services_performed or ''
+            appointment.next_appointment = session.next_appointment_date
+            appointment.save(update_fields=[
+                'reason', 'notes', 'diagnosis', 'treatment', 'next_appointment', 'updated_at'
+            ])
+
+            update_fields = []
+            if not patient.last_visit or appointment.scheduled_date >= patient.last_visit:
+                patient.last_visit = appointment.scheduled_date
+                update_fields.append('last_visit')
+            if appointment.next_appointment:
+                patient.next_appointment = appointment.next_appointment
+                update_fields.append('next_appointment')
+            if update_fields:
+                patient.save(update_fields=update_fields)
+
+        output = VeterinarySessionSerializer(session, context=self.get_serializer_context())
+        return Response(output.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def documents(self, request, pk=None):
+        patient = self.get_object()
+        serializer = ClinicPatientDocumentSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        document = ClinicPatientDocument.objects.create(
+            clinic=patient.clinic,
+            patient=patient,
+            uploaded_by=request.user,
+            **serializer.validated_data,
+        )
+        output = ClinicPatientDocumentSerializer(document, context=self.get_serializer_context())
+        return Response(output.data, status=status.HTTP_201_CREATED)
 
 
 class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -770,7 +1566,7 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(pet_id=pet_id)
         status_param = self.request.query_params.get('status')
         if status_param:
-            queryset = queryset.filter(status=status_param)
+            queryset = queryset.filter(status=normalize_appointment_status(status_param))
         appointment_type = self.request.query_params.get('type')
         if appointment_type:
             queryset = queryset.filter(appointment_type=appointment_type)
@@ -781,11 +1577,192 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         context['clinic'] = self.get_clinic()
         return context
 
+    def _get_or_create_session(self, appointment):
+        now = timezone.now()
+        provider_name = self.request.user.get_full_name() or self.request.user.email or ''
+        session, created = VeterinarySession.objects.get_or_create(
+            appointment=appointment,
+            defaults={
+                'clinic': appointment.clinic,
+                'clinic_patient': appointment.clinic_patient,
+                'pet': appointment.pet,
+                'owner': appointment.owner,
+                'care_provider': self.request.user,
+                'care_provider_name': provider_name,
+                'session_date': timezone.localdate(),
+                'session_started_at': now,
+                'service_type': appointment.appointment_type,
+                'main_complaint': appointment.reason or '',
+                'owner_notes': appointment.notes or '',
+                'diagnosis': appointment.diagnosis or '',
+                'services_performed': appointment.treatment or '',
+                'next_appointment_date': appointment.next_appointment,
+            },
+        )
+        if not created and not session.care_provider_id:
+            session.care_provider = self.request.user
+            session.care_provider_name = provider_name
+            session.save(update_fields=['care_provider', 'care_provider_name', 'updated_at'])
+        return session
+
+    @action(detail=True, methods=['post'], url_path='start-session')
+    def start_session(self, request, pk=None):
+        with transaction.atomic():
+            appointment = self.get_queryset().select_for_update().get(pk=pk)
+            if appointment.status in {
+                VeterinaryAppointment.STATUS_CANCELLED,
+                VeterinaryAppointment.STATUS_REFUSED,
+                VeterinaryAppointment.STATUS_COMPLETED,
+                VeterinaryAppointment.STATUS_NO_SHOW,
+            }:
+                raise ValidationError({'status': 'لا يمكن بدء جلسة لهذا الموعد.'})
+            appointment.status = VeterinaryAppointment.STATUS_IN_SESSION
+            appointment.save(update_fields=['status', 'updated_at'])
+            session = self._get_or_create_session(appointment)
+
+            booking = appointment.storefront_bookings.select_for_update().first()
+            if booking and booking.status not in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                booking.status = StorefrontBooking.STATUS_IN_SESSION
+                booking.save(update_fields=['status'])
+                StorefrontBookingTimeline.objects.create(
+                    booking=booking,
+                    event_type='session_started',
+                    message='تم بدء جلسة الزيارة.',
+                    actor=request.user,
+                )
+
+        serializer = VeterinarySessionSerializer(session, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+
+class VeterinarySessionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+    serializer_class = VeterinarySessionSerializer
+    permission_classes = [IsAuthenticated, IsClinicStaff]
+    http_method_names = ['get', 'patch', 'post', 'head', 'options']
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {'detail': 'ابدأ الجلسة من الموعد أولاً.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    def get_queryset(self):
+        return (
+            VeterinarySession.objects
+            .filter(clinic=self.get_clinic())
+            .select_related(
+                'appointment',
+                'clinic',
+                'clinic_patient',
+                'clinic_patient__owner',
+                'pet',
+                'owner',
+                'care_provider',
+            )
+            .order_by('-session_started_at')
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['clinic'] = self.get_clinic()
+        return context
+
+    def _notify_owner_summary(self, session):
+        appointment = session.appointment
+        booking = appointment.storefront_bookings.select_related('customer_user', 'service', 'clinic').first()
+        message_parts = [
+            session.diagnosis or session.provisional_diagnosis,
+            session.services_performed,
+            session.home_care_instructions,
+            session.warning_signs,
+        ]
+        message = '\n'.join(part for part in message_parts if part) or 'تم إكمال جلسة الزيارة.'
+        if booking and booking.customer_user_id:
+            _enqueue_booking_push(
+                user=booking.customer_user,
+                booking=booking,
+                notification_type='clinic_session_completed',
+                title='ملخص زيارة العيادة',
+                message=message,
+                app_type=PETMATCH_APP_TYPE,
+                event_suffix=f'session_completed:{session.id}',
+                extra={
+                    'confirmed_appointment_id': appointment.id,
+                    'session_id': session.id,
+                },
+            )
+            return
+        if appointment.owner_id:
+            create_notification_once(
+                user=appointment.owner,
+                notification_type='clinic_session_completed',
+                title='ملخص زيارة العيادة',
+                message=message,
+                extra_data={
+                    'type': 'clinic_session_completed',
+                    'app_type': PETMATCH_APP_TYPE,
+                    'kind': 'veterinary_session',
+                    'appointment_id': str(appointment.id),
+                    'session_id': str(session.id),
+                    'clinic_id': str(session.clinic_id),
+                },
+                event_key=f'veterinary_session:{session.id}:completed:{appointment.owner_id}',
+            )
+
+    @action(detail=True, methods=['post'], url_path='end')
+    def end(self, request, pk=None):
+        with transaction.atomic():
+            session = self.get_queryset().select_for_update().get(pk=pk)
+            serializer = VeterinarySessionEndSerializer(
+                session,
+                data=request.data,
+                partial=True,
+                context=self.get_serializer_context(),
+            )
+            serializer.is_valid(raise_exception=True)
+            session = serializer.save(session_ended_at=timezone.now())
+            appointment = session.appointment
+            appointment.status = VeterinaryAppointment.STATUS_COMPLETED
+            appointment.diagnosis = session.diagnosis or session.provisional_diagnosis or ''
+            appointment.treatment = session.services_performed or ''
+            appointment.notes = session.doctor_notes or session.physical_exam_notes or ''
+            appointment.next_appointment = session.next_appointment_date
+            appointment.save(update_fields=[
+                'status', 'diagnosis', 'treatment', 'notes', 'next_appointment', 'updated_at'
+            ])
+            booking = appointment.storefront_bookings.select_for_update().first()
+            if booking:
+                booking.status = StorefrontBooking.STATUS_COMPLETED
+                booking.diagnosis = appointment.diagnosis
+                booking.treatment = appointment.treatment
+                booking.doctor_notes = session.doctor_notes or session.physical_exam_notes or ''
+                booking.completed_result = 'visit_completed'
+                booking.completed_at = timezone.now()
+                booking.save(update_fields=[
+                    'status', 'diagnosis', 'treatment', 'doctor_notes',
+                    'completed_result', 'completed_at',
+                ])
+                StorefrontBookingTimeline.objects.create(
+                    booking=booking,
+                    event_type='completed',
+                    message='تم إنهاء جلسة الزيارة وإرسال الملخص للمالك.',
+                    actor=request.user,
+                )
+            self._notify_owner_summary(session)
+            session.owner_summary_sent_at = timezone.now()
+            session.save(update_fields=['owner_summary_sent_at', 'updated_at'])
+        return Response(VeterinarySessionSerializer(session, context=self.get_serializer_context()).data)
+
 
 class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing clinic services"""
     serializer_class = ClinicServiceSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -829,10 +1806,189 @@ class ClinicServiceViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         serializer.save(clinic=clinic)
 
 
+class PlatformAdminClinicListView(APIView):
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get(self, request):
+        queryset = (
+            Clinic.objects
+            .all()
+            .annotate(staff_count=Count('staff_members'))
+            .prefetch_related('services_list')
+            .order_by('name')
+        )
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(address__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(email__icontains=search)
+            )
+
+        is_active = request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        paginator = ClinicListPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = ClinicListSerializer(page, many=True, context={'request': request})
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        serializer = ClinicRegistrationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()
+        return Response(
+            ClinicListSerializer(result['clinic'], context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
+    serializer_class = ClinicServiceSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _service_create_log_context(self, request):
+        clinic_id = request.data.get('clinic_id') or request.data.get('clinic')
+        return {
+            'method': request.method,
+            'user_id': getattr(request.user, 'id', None),
+            'clinic_id': clinic_id,
+            'content_type': request.META.get('CONTENT_TYPE', ''),
+            'file_fields': list(request.FILES.keys()),
+            'release': getattr(settings, 'RELEASE_VERSION', None) or getattr(settings, 'GIT_SHA', None),
+        }
+
+    def get_queryset(self):
+        queryset = (
+            ClinicService.objects
+            .all()
+            .select_related('clinic')
+            .prefetch_related('pricing_tiers')
+            .order_by('clinic__name', 'display_order', '-is_featured', 'name')
+        )
+
+        clinic_id = self.request.query_params.get('clinic_id')
+        if clinic_id:
+            queryset = queryset.filter(clinic_id=clinic_id)
+
+        is_active = self.request.query_params.get('is_active')
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        category = self.request.query_params.get('category')
+        if category:
+            queryset = queryset.filter(category=category)
+
+        pet_type = self.request.query_params.get('pet_type')
+        if pet_type:
+            queryset = queryset.filter(applicable_pet_types__contains=[pet_type])
+
+        is_featured = self.request.query_params.get('is_featured')
+        if is_featured is not None:
+            queryset = queryset.filter(is_featured=is_featured.lower() == 'true')
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) |
+                Q(description__icontains=search) |
+                Q(clinic__name__icontains=search)
+            )
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        if not request.query_params.get('clinic_id'):
+            return Response(
+                {'error': 'يجب اختيار العيادة أولاً'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().list(request, *args, **kwargs)
+
+    def _get_target_clinic(self):
+        clinic_id = self.request.data.get('clinic_id') or self.request.data.get('clinic')
+        if not clinic_id:
+            raise ValidationError({'clinic_id': 'يجب اختيار العيادة'})
+        try:
+            clinic_id = int(clinic_id)
+        except (TypeError, ValueError):
+            raise ValidationError({'clinic_id': 'معرف العيادة غير صالح'})
+
+        return get_object_or_404(Clinic, id=clinic_id, is_active=True)
+
+    def create(self, request, *args, **kwargs):
+        log_context = self._service_create_log_context(request)
+        logger.info('Platform admin clinic service create requested', extra=log_context)
+
+        serializer = self.get_serializer(data=request.data)
+        try:
+            is_valid = serializer.is_valid()
+        except Exception:
+            logger.exception(
+                'Unexpected platform admin clinic service validation error',
+                extra=log_context,
+            )
+            return Response(
+                {
+                    'error': 'حدث خطأ غير متوقع أثناء التحقق من بيانات الخدمة',
+                    'request_time': timezone.now().isoformat(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not is_valid:
+            logger.warning(
+                'Platform admin clinic service create validation failed',
+                extra={**log_context, 'validation_errors': str(serializer.errors)},
+            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            clinic = self._get_target_clinic()
+            self.perform_create(serializer, clinic=clinic)
+            response_data = serializer.data
+            headers = self.get_success_headers(response_data)
+        except (ValidationError, Http404):
+            logger.warning(
+                'Platform admin clinic service create rejected',
+                extra=log_context,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                'Unexpected platform admin clinic service create error',
+                extra=log_context,
+            )
+            return Response(
+                {
+                    'error': 'حدث خطأ غير متوقع أثناء إنشاء الخدمة',
+                    'request_time': timezone.now().isoformat(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        logger.info(
+            'Platform admin clinic service create completed',
+            extra={**log_context, 'service_id': serializer.instance.id},
+        )
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer, clinic=None):
+        serializer.save(clinic=clinic or self._get_target_clinic())
+
+    def perform_update(self, serializer):
+        serializer.save()
+
+
 class ClinicProductViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing clinic products"""
     serializer_class = ClinicProductSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -865,16 +2021,29 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     """ViewSet for managing storefront bookings in the clinic dashboard"""
     serializer_class = StorefrontBookingSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
-    http_method_names = ['get', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
     lookup_field = 'public_id'
 
     def get_queryset(self):
         clinic = self.get_clinic()
-        queryset = StorefrontBooking.objects.filter(clinic=clinic).select_related('service').order_by('-created_at')
+        queryset = (
+            StorefrontBooking.objects
+            .filter(clinic=clinic)
+            .select_related(
+                'service',
+                'customer_user',
+                'confirmed_appointment',
+                'linked_patient',
+                'linked_patient__owner',
+                'assigned_staff',
+            )
+            .prefetch_related('proposals', 'timeline_events__actor')
+            .order_by('-created_at')
+        )
 
         status_param = self.request.query_params.get('status')
         if status_param:
-            queryset = queryset.filter(status=status_param)
+            queryset = queryset.filter(status=normalize_booking_status(status_param))
 
         search = self.request.query_params.get('search')
         if search:
@@ -890,6 +2059,770 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         if self.action in ['update', 'partial_update']:
             return StorefrontBookingUpdateSerializer
         return StorefrontBookingSerializer
+
+    def _get_booking_for_update(self, public_id):
+        queryset = (
+            StorefrontBooking.objects
+            .select_for_update()
+        )
+        return get_object_or_404(queryset, clinic=self.get_clinic(), public_id=public_id)
+
+    def _notify_customer(self, booking, title, message, event_suffix, notification_type, extra=None):
+        if not booking.customer_user_id:
+            return
+        _enqueue_booking_push(
+            user=booking.customer_user,
+            booking=booking,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            app_type=PETMATCH_APP_TYPE,
+            event_suffix=event_suffix,
+            extra=extra,
+        )
+
+    def _find_linked_pet_owner(self, booking):
+        if not booking.pet_name or not (booking.customer_phone or booking.customer_email):
+            return None, None
+
+        contact_query = Q()
+        if booking.customer_phone:
+            contact_query |= Q(owner__phone__iexact=booking.customer_phone)
+        if booking.customer_email:
+            contact_query |= Q(owner__email__iexact=booking.customer_email)
+
+        patient = (
+            ClinicPatientRecord.objects
+            .filter(clinic=booking.clinic)
+            .filter(contact_query)
+            .filter(name__iexact=booking.pet_name)
+            .select_related('linked_user', 'linked_pet', 'owner')
+            .filter(linked_user__isnull=False, linked_pet__isnull=False)
+            .first()
+        )
+        if patient:
+            return patient.linked_pet, patient.linked_user
+
+        owner_queryset = User.objects.filter(user_type='pet_owner')
+        appointment_owner = None
+        if booking.customer_phone:
+            appointment_owner = owner_queryset.filter(phone=booking.customer_phone).first()
+        if not appointment_owner and booking.customer_email:
+            appointment_owner = owner_queryset.filter(email__iexact=booking.customer_email).first()
+        if not appointment_owner:
+            return None, None
+        return Pet.objects.filter(owner=appointment_owner, name__iexact=booking.pet_name).first(), appointment_owner
+
+    def _get_or_create_booking_patient(self, booking):
+        owner_queryset = ClinicClientRecord.objects.filter(clinic=booking.clinic)
+        owner = None
+        if booking.customer_email:
+            owner = owner_queryset.filter(email__iexact=booking.customer_email).first()
+        if not owner and booking.customer_phone:
+            owner = owner_queryset.filter(phone=booking.customer_phone).first()
+        if not owner:
+            owner = ClinicClientRecord.objects.create(
+                clinic=booking.clinic,
+                full_name=booking.customer_name or 'عميل غير محدد',
+                email=booking.customer_email,
+                phone=booking.customer_phone,
+            )
+
+        patient_name = booking.pet_name or f"حيوان {booking.customer_name or booking.customer_phone}"
+        patient = (
+            ClinicPatientRecord.objects
+            .filter(clinic=booking.clinic, owner=owner, name=patient_name)
+            .order_by('id')
+            .first()
+        )
+        if not patient:
+            patient = ClinicPatientRecord.objects.create(
+                clinic=booking.clinic,
+                owner=owner,
+                name=patient_name,
+                species=booking.pet_type or 'غير محدد',
+                breed=booking.pet_breed,
+                age_text=booking.pet_age or '',
+                linked_user=booking.customer_user,
+                notes=booking.notes or '',
+            )
+        else:
+            updates = {}
+            if booking.pet_type and not patient.species:
+                updates['species'] = booking.pet_type
+            if booking.pet_breed and not patient.breed:
+                updates['breed'] = booking.pet_breed
+            if booking.pet_age and not patient.age_text:
+                updates['age_text'] = booking.pet_age
+            if booking.customer_user_id and not patient.linked_user_id:
+                updates['linked_user'] = booking.customer_user
+            if updates:
+                for field, value in updates.items():
+                    setattr(patient, field, value)
+                patient.save(update_fields=list(updates.keys()) + ['updated_at'])
+        return patient
+
+    def _create_or_update_appointment(self, booking, scheduled_date, scheduled_time, duration_minutes=None, note=None):
+        service = booking.service
+        appointment_type = SERVICE_CATEGORY_APPOINTMENT_TYPE.get(service.category, 'other')
+        duration = duration_minutes or service.duration_minutes or 30
+        notes = booking.notes or ''
+        if note:
+            notes = f"{notes}\n{note}".strip()
+
+        appointment = booking.confirmed_appointment
+        if appointment:
+            patient = booking.linked_patient or appointment.clinic_patient
+            if not patient and appointment.pet_id:
+                patient = get_or_create_patient_record_for_pet(
+                    booking.clinic,
+                    appointment.pet,
+                    appointment.owner,
+                )
+            if not patient:
+                patient = self._get_or_create_booking_patient(booking)
+            appointment.appointment_type = appointment_type
+            appointment.scheduled_date = scheduled_date
+            appointment.scheduled_time = scheduled_time
+            appointment.duration_minutes = duration
+            appointment.reason = f"حجز متجر: {service.name}"
+            appointment.notes = notes
+            appointment.status = VeterinaryAppointment.STATUS_ACCEPTED
+            appointment.service_fee = booking.quoted_price or service.base_price
+            appointment.clinic_patient = patient
+            appointment.save(update_fields=[
+                'appointment_type', 'scheduled_date', 'scheduled_time', 'duration_minutes',
+                'reason', 'notes', 'status', 'service_fee', 'clinic_patient', 'updated_at'
+            ])
+            if patient and booking.linked_patient_id != patient.id:
+                booking.linked_patient = patient
+                booking.save(update_fields=['linked_patient'])
+            return appointment
+
+        appointment_pet, appointment_owner = self._find_linked_pet_owner(booking)
+        lookup = {
+            'clinic': booking.clinic,
+            'scheduled_date': scheduled_date,
+            'scheduled_time': scheduled_time,
+        }
+        defaults = {
+            'appointment_type': appointment_type,
+            'duration_minutes': duration,
+            'reason': f"حجز متجر: {service.name}",
+            'notes': notes,
+            'status': VeterinaryAppointment.STATUS_ACCEPTED,
+            'payment_status': 'unpaid',
+            'service_fee': booking.quoted_price or service.base_price,
+        }
+        patient = booking.linked_patient
+        if not patient and appointment_pet and appointment_owner:
+            patient = get_or_create_patient_record_for_pet(
+                booking.clinic,
+                appointment_pet,
+                appointment_owner,
+            )
+        if not patient:
+            patient = self._get_or_create_booking_patient(booking)
+
+        appointment_filter = Q(clinic_patient=patient)
+        if appointment_pet and appointment_owner:
+            appointment_filter |= Q(pet=appointment_pet, owner=appointment_owner)
+            defaults.update({'pet': appointment_pet, 'owner': appointment_owner})
+        defaults['clinic_patient'] = patient
+
+        appointment = (
+            VeterinaryAppointment.objects
+            .filter(**lookup)
+            .filter(appointment_filter)
+            .order_by('id')
+            .first()
+        )
+        if appointment:
+            for field, value in defaults.items():
+                setattr(appointment, field, value)
+            appointment.save(update_fields=list(defaults.keys()) + ['updated_at'])
+        else:
+            appointment = VeterinaryAppointment.objects.create(**lookup, **defaults)
+        booking.confirmed_appointment = appointment
+        if patient and booking.linked_patient_id != patient.id:
+            booking.linked_patient = patient
+        return appointment
+
+    def _serialize_booking(self, booking):
+        serializer = StorefrontBookingSerializer(booking, context=self.get_serializer_context())
+        return Response(serializer.data)
+
+    def _add_timeline(self, booking, event_type, message, actor=None):
+        return StorefrontBookingTimeline.objects.create(
+            booking=booking,
+            event_type=event_type,
+            message=message,
+            actor=actor,
+        )
+
+    def _set_status(self, booking, next_status, event_type, message, actor=None, update_fields=None):
+        booking.status = next_status
+        fields = ['status']
+        if update_fields:
+            fields.extend(update_fields)
+        booking.save(update_fields=list(dict.fromkeys(fields)))
+        self._add_timeline(booking, event_type, message, actor=actor)
+        return booking
+
+    @action(detail=True, methods=['post'], url_path='accept')
+    def accept(self, request, public_id=None):
+        booking = None
+        try:
+            serializer = StorefrontBookingAcceptSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            data = serializer.validated_data
+
+            with transaction.atomic():
+                booking = self._get_booking_for_update(public_id)
+                if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
+                    raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
+                scheduled_date = data.get('scheduled_date')
+                scheduled_time = data.get('scheduled_time')
+                if scheduled_date and scheduled_time:
+                    appointment = self._create_or_update_appointment(
+                        booking,
+                        scheduled_date=scheduled_date,
+                        scheduled_time=scheduled_time,
+                        duration_minutes=data.get('duration_minutes'),
+                        note=data.get('note'),
+                    )
+                    booking.confirmed_appointment = appointment
+                booking.confirmed_at = timezone.now()
+                booking.cancelled_at = None
+                booking.cancelled_reason = None
+                self._set_status(
+                    booking,
+                    StorefrontBooking.STATUS_ACCEPTED,
+                    'accepted',
+                    f"تم قبول الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
+                    actor=request.user,
+                    update_fields=[
+                        'confirmed_appointment', 'linked_patient', 'confirmed_at',
+                        'cancelled_at', 'cancelled_reason'
+                    ],
+                )
+                booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                    status=StorefrontBookingProposal.STATUS_CANCELLED,
+                    responded_at=timezone.now(),
+                )
+
+            self._notify_customer(
+                booking,
+                'تم قبول طلبك',
+                f"قبلت عيادة {booking.clinic.name} طلب {booking.service.name}.",
+                'accepted',
+                'clinic_request_accepted',
+                extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
+            )
+            return self._serialize_booking(booking)
+        except ValidationError:
+            raise
+        except Exception:
+            logger.exception(
+                'Storefront booking accept failed public_id=%s booking_id=%s user_id=%s payload_keys=%s',
+                public_id,
+                getattr(booking, 'id', None),
+                getattr(request.user, 'id', None),
+                sorted(request.data.keys()) if hasattr(request.data, 'keys') else None,
+            )
+            raise
+
+    @action(detail=True, methods=['post'], url_path='schedule-appointment')
+    def schedule_appointment(self, request, public_id=None):
+        serializer = StorefrontBookingScheduleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            scheduled_date = data.get('scheduled_date') or booking.preferred_date
+            scheduled_time = data.get('scheduled_time') or booking.preferred_time
+            if not scheduled_date or not scheduled_time:
+                raise ValidationError({'scheduled_date': 'التاريخ والوقت مطلوبان لحجز الموعد.'})
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن حجز موعد لهذا الطلب.'})
+
+            appointment = self._create_or_update_appointment(
+                booking,
+                scheduled_date=scheduled_date,
+                scheduled_time=scheduled_time,
+                duration_minutes=data.get('duration_minutes'),
+                note=data.get('note'),
+            )
+            booking.confirmed_appointment = appointment
+            booking.status = StorefrontBooking.STATUS_ACCEPTED
+            booking.confirmed_at = timezone.now()
+            booking.save(update_fields=['confirmed_appointment', 'linked_patient', 'status', 'confirmed_at'])
+            self._add_timeline(
+                booking,
+                'appointment_scheduled',
+                f"تم حجز موعد بتاريخ {scheduled_date} الساعة {scheduled_time}.",
+                actor=request.user,
+            )
+
+        self._notify_customer(
+            booking,
+            'تم تأكيد موعدك',
+            f"تم تأكيد موعد {booking.service.name}.",
+            'appointment_scheduled',
+            'clinic_booking_confirmed',
+            extra={
+                'confirmed_appointment_id': booking.confirmed_appointment_id,
+                'scheduled_date': str(scheduled_date),
+                'scheduled_time': str(scheduled_time),
+            },
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='start-processing')
+    def start_processing(self, request, public_id=None):
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن بدء معالجة هذا الطلب.'})
+            self._set_status(
+                booking,
+                StorefrontBooking.STATUS_IN_SESSION,
+                'processing_started',
+                f"بدأت معالجة الطلب بواسطة {request.user.get_full_name() or request.user.email}.",
+                actor=request.user,
+            )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='ask-info')
+    def ask_info(self, request, public_id=None):
+        serializer = StorefrontBookingNoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = serializer.validated_data['note']
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن طلب معلومات لهذا الطلب.'})
+            booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, f"طلب معلومات: {note}"]))
+            booking.save(update_fields=['internal_notes'])
+            self._set_status(
+                booking,
+                StorefrontBooking.STATUS_PENDING,
+                'waiting_owner',
+                f"تم طلب معلومات من المالك: {note}",
+                actor=request.user,
+            )
+        self._notify_customer(
+            booking,
+            'تحتاج العيادة معلومات إضافية',
+            note,
+            'ask_info',
+            'clinic_request_waiting_owner',
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='assign')
+    def assign(self, request, public_id=None):
+        serializer = StorefrontBookingAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        staff_id = serializer.validated_data.get('staff_id')
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            staff = None
+            if staff_id:
+                staff_member = ClinicStaff.objects.select_related('user').filter(
+                    clinic=booking.clinic,
+                    user_id=staff_id,
+                ).first()
+                if not staff_member:
+                    raise ValidationError({'staff_id': 'هذا الموظف لا ينتمي لهذه العيادة.'})
+                staff = staff_member.user
+            booking.assigned_staff = staff
+            booking.save(update_fields=['assigned_staff'])
+            label = staff.get_full_name() or staff.email if staff else 'بدون موظف'
+            self._add_timeline(booking, 'assigned', f"تم تعيين الطلب إلى {label}.", actor=request.user)
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='link-patient')
+    def link_patient(self, request, public_id=None):
+        serializer = StorefrontBookingPatientLinkSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        patient_id = serializer.validated_data.get('patient_id')
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if patient_id:
+                patient = ClinicPatientRecord.objects.filter(clinic=booking.clinic, id=patient_id).first()
+                if not patient:
+                    raise ValidationError({'patient_id': 'ملف المريض غير موجود في هذه العيادة.'})
+            else:
+                patient = self._get_or_create_booking_patient(booking)
+            booking.linked_patient = patient
+            booking.save(update_fields=['linked_patient'])
+            self._add_timeline(
+                booking,
+                'patient_linked',
+                f"تم ربط الطلب بملف المريض {patient.name}.",
+                actor=request.user,
+            )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='notes')
+    def notes(self, request, public_id=None):
+        serializer = StorefrontBookingNoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = serializer.validated_data['note']
+        visibility = serializer.validated_data.get('visibility') or 'internal'
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if visibility == 'doctor':
+                booking.doctor_notes = '\n'.join(filter(None, [booking.doctor_notes, note]))
+                booking.save(update_fields=['doctor_notes'])
+                event_type = 'doctor_note'
+                message = f"ملاحظة الطبيب: {note}"
+            elif visibility == 'owner':
+                booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, f"تحديث للمالك: {note}"]))
+                booking.save(update_fields=['internal_notes'])
+                event_type = 'owner_update'
+                message = f"تم إرسال تحديث للمالك: {note}"
+                self._notify_customer(
+                    booking,
+                    'تحديث من العيادة',
+                    note,
+                    'owner_update',
+                    'clinic_request_owner_update',
+                )
+            else:
+                booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, note]))
+                booking.save(update_fields=['internal_notes'])
+                event_type = 'internal_note'
+                message = f"ملاحظة داخلية: {note}"
+            self._add_timeline(booking, event_type, message, actor=request.user)
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, public_id=None):
+        serializer = StorefrontBookingRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get('reason') or ''
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            booking.status = StorefrontBooking.STATUS_REFUSED
+            booking.cancelled_reason = reason
+            booking.cancelled_at = timezone.now()
+            booking.save(update_fields=['status', 'cancelled_reason', 'cancelled_at'])
+            self._add_timeline(
+                booking,
+                'rejected',
+                reason or 'تم رفض الطلب من العيادة.',
+                actor=request.user,
+            )
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+        self._notify_customer(
+            booking,
+            'تعذر تأكيد الموعد',
+            reason or 'تم إلغاء طلب الموعد من العيادة.',
+            'rejected',
+            'clinic_booking_rejected',
+            extra={'reason': reason},
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='propose-time')
+    def propose_time(self, request, public_id=None):
+        serializer = StorefrontBookingProposalCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if booking.status in {
+                StorefrontBooking.STATUS_CANCELLED,
+                StorefrontBooking.STATUS_REFUSED,
+                StorefrontBooking.STATUS_COMPLETED,
+            }:
+                raise ValidationError({'status': 'لا يمكن اقتراح موعد لهذا الطلب.'})
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+            proposal = StorefrontBookingProposal.objects.create(
+                booking=booking,
+                proposed_date=data['proposed_date'],
+                proposed_time=data['proposed_time'],
+                duration_minutes=data.get('duration_minutes') or booking.service.duration_minutes or 30,
+                note=data.get('note'),
+                proposed_by=request.user,
+            )
+            booking.status = StorefrontBooking.STATUS_PENDING
+            booking.save(update_fields=['status'])
+            self._add_timeline(
+                booking,
+                'waiting_owner',
+                f"تم اقتراح موعد جديد بتاريخ {proposal.proposed_date} الساعة {proposal.proposed_time}.",
+                actor=request.user,
+            )
+        self._notify_customer(
+            booking,
+            'اقتراح موعد جديد',
+            f"اقترحت العيادة موعدًا بديلًا لخدمة {booking.service.name}.",
+            f'proposal:{proposal.id}',
+            'clinic_booking_counter_proposed',
+            extra={
+                'proposal_id': proposal.id,
+                'proposed_date': str(proposal.proposed_date),
+                'proposed_time': str(proposal.proposed_time),
+            },
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='complete')
+    def complete(self, request, public_id=None):
+        serializer = StorefrontBookingCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if booking.status not in {
+                StorefrontBooking.STATUS_ACCEPTED,
+                StorefrontBooking.STATUS_IN_SESSION,
+                StorefrontBooking.STATUS_PENDING,
+            }:
+                raise ValidationError({'status': 'يجب قبول الطلب أو بدء معالجته قبل إكماله.'})
+            for field in ['internal_notes', 'doctor_notes', 'diagnosis', 'treatment', 'price_estimate', 'completed_result']:
+                if field in data:
+                    setattr(booking, field, data.get(field))
+            booking.status = StorefrontBooking.STATUS_COMPLETED
+            booking.completed_at = timezone.now()
+            booking.save(update_fields=[
+                'internal_notes', 'doctor_notes', 'diagnosis', 'treatment',
+                'price_estimate', 'completed_result', 'status', 'completed_at'
+            ])
+            if booking.confirmed_appointment_id:
+                booking.confirmed_appointment.status = VeterinaryAppointment.STATUS_COMPLETED
+                if data.get('diagnosis') is not None:
+                    booking.confirmed_appointment.diagnosis = data.get('diagnosis') or ''
+                if data.get('treatment') is not None:
+                    booking.confirmed_appointment.treatment = data.get('treatment') or ''
+                if data.get('doctor_notes') is not None:
+                    booking.confirmed_appointment.notes = data.get('doctor_notes') or ''
+                if data.get('next_appointment') is not None:
+                    booking.confirmed_appointment.next_appointment = data.get('next_appointment')
+                booking.confirmed_appointment.save(update_fields=[
+                    'status', 'diagnosis', 'treatment', 'notes', 'next_appointment', 'updated_at'
+                ])
+            self._add_timeline(
+                booking,
+                'completed',
+                f"تم إكمال الطلب بنتيجة {booking.get_completed_result_display() or 'مكتمل'}.",
+                actor=request.user,
+            )
+        self._notify_customer(
+            booking,
+            'اكتمل موعدك',
+            f"تم إكمال طلب {booking.service.name}.",
+            'completed',
+            'clinic_request_completed',
+            extra={'confirmed_appointment_id': booking.confirmed_appointment_id},
+        )
+        return self._serialize_booking(booking)
+
+
+class PublicStorefrontBookingDetailView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, public_id):
+        booking = get_object_or_404(
+            StorefrontBooking.objects.select_related('service', 'clinic', 'confirmed_appointment').prefetch_related('proposals'),
+            public_id=public_id,
+        )
+        return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
+
+
+class PublicStorefrontBookingProposalRespondView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request, public_id, proposal_id, action_name):
+        if action_name not in {'accept', 'decline'}:
+            raise Http404()
+        viewset = ClinicStorefrontBookingViewSet()
+
+        with transaction.atomic():
+            booking = get_object_or_404(
+                StorefrontBooking.objects.select_related('service', 'clinic', 'customer_user', 'confirmed_appointment').prefetch_related('proposals').select_for_update(),
+                public_id=public_id,
+            )
+            proposal = get_object_or_404(
+                StorefrontBookingProposal.objects.select_for_update(),
+                id=proposal_id,
+                booking=booking,
+                status=StorefrontBookingProposal.STATUS_PENDING,
+            )
+            if action_name == 'decline':
+                proposal.status = StorefrontBookingProposal.STATUS_DECLINED
+                proposal.responded_at = timezone.now()
+                proposal.save(update_fields=['status', 'responded_at'])
+                if not booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).exists():
+                    booking.status = 'new'
+                    booking.save(update_fields=['status'])
+                return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
+
+            appointment = viewset._create_or_update_appointment(
+                booking,
+                scheduled_date=proposal.proposed_date,
+                scheduled_time=proposal.proposed_time,
+                duration_minutes=proposal.duration_minutes,
+                note=proposal.note,
+            )
+            proposal.status = StorefrontBookingProposal.STATUS_ACCEPTED
+            proposal.responded_at = timezone.now()
+            proposal.save(update_fields=['status', 'responded_at'])
+            booking.proposals.exclude(id=proposal.id).filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED,
+                responded_at=timezone.now(),
+            )
+            booking.confirmed_appointment = appointment
+            booking.status = StorefrontBooking.STATUS_ACCEPTED
+            booking.confirmed_at = timezone.now()
+            booking.save(update_fields=['confirmed_appointment', 'linked_patient', 'status', 'confirmed_at'])
+            StorefrontBookingTimeline.objects.create(
+                booking=booking,
+                event_type='appointment_scheduled',
+                message=f"وافق المالك على الموعد المقترح بتاريخ {proposal.proposed_date} الساعة {proposal.proposed_time}.",
+                actor=None,
+            )
+
+        return Response(StorefrontBookingSerializer(booking, context={'request': request}).data)
+
+
+def _owner_booking_queryset(user):
+    phone = (getattr(user, 'phone', '') or '').strip()
+    email = (getattr(user, 'email', '') or '').strip()
+    query = Q(customer_user=user)
+    if phone:
+        query |= Q(customer_phone=phone)
+    if email:
+        query |= Q(customer_email__iexact=email)
+    return (
+        StorefrontBooking.objects
+        .filter(query)
+        .select_related('clinic', 'service', 'confirmed_appointment', 'linked_patient')
+        .prefetch_related('proposals', 'timeline_events')
+        .distinct()
+        .order_by('-created_at')
+    )
+
+
+class OwnerStorefrontBookingListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        raw_limit = request.query_params.get('limit')
+        try:
+            limit = min(max(int(raw_limit or 30), 1), 100)
+        except (TypeError, ValueError):
+            limit = 30
+        bookings = list(_owner_booking_queryset(request.user)[:limit])
+        serializer = StorefrontBookingSerializer(bookings, many=True, context={'request': request})
+        return Response({'count': len(serializer.data), 'results': serializer.data})
+
+
+class OwnerPetMedicalRecordsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pet_id):
+        pet = get_object_or_404(Pet, id=pet_id, owner=request.user)
+        patient_records = ClinicPatientRecord.objects.filter(linked_user=request.user, linked_pet=pet)
+        patient_ids = list(patient_records.values_list('id', flat=True))
+
+        active_statuses = {
+            StorefrontBooking.STATUS_PENDING,
+            StorefrontBooking.STATUS_ACCEPTED,
+            StorefrontBooking.STATUS_IN_SESSION,
+        }
+        active_bookings = _owner_booking_queryset(request.user).filter(
+            Q(linked_patient_id__in=patient_ids) | Q(pet_name__iexact=pet.name),
+            request_type='appointment',
+            status__in=active_statuses,
+        )[:5]
+
+        appointment_query = Q(pet=pet, owner=request.user)
+        if patient_ids:
+            appointment_query |= Q(clinic_patient_id__in=patient_ids)
+        appointments = (
+            VeterinaryAppointment.objects
+            .filter(appointment_query)
+            .select_related('clinic', 'clinic_patient')
+            .order_by('-scheduled_date', '-scheduled_time')[:20]
+        )
+
+        medical_records = []
+        vaccination_records = []
+        for appointment in appointments:
+            base = {
+                'id': appointment.id,
+                'clinic_id': appointment.clinic_id,
+                'clinic_name': appointment.clinic.name if appointment.clinic_id else '',
+                'patient_name': (
+                    appointment.pet.name if appointment.pet_id else
+                    appointment.clinic_patient.name if appointment.clinic_patient_id else
+                    pet.name
+                ),
+                'title': appointment.get_appointment_type_display() or 'زيارة عيادة',
+                'appointment_type': appointment.appointment_type,
+                'date': appointment.scheduled_date,
+                'time': appointment.scheduled_time,
+                'status': normalize_appointment_status(appointment.status),
+                'status_display': appointment.get_status_display(),
+                'reason': appointment.reason or '',
+                'diagnosis': appointment.diagnosis or '',
+                'treatment': appointment.treatment or '',
+                'notes': appointment.notes or '',
+                'next_appointment': appointment.next_appointment,
+            }
+            medical_records.append(base)
+            if appointment.appointment_type == 'vaccination':
+                vaccination_records.append(base)
+
+        documents = ClinicPatientDocument.objects.filter(patient_id__in=patient_ids).select_related('clinic', 'patient')
+        files = []
+        for document in documents[:30]:
+            files.append({
+                'id': document.id,
+                'clinic_id': document.clinic_id,
+                'clinic_name': document.clinic.name if document.clinic_id else '',
+                'title': document.title,
+                'category': document.category,
+                'category_display': document.get_category_display(),
+                'file_url': _absolute_file_url(request, document.file),
+                'notes': document.notes or '',
+                'issued_at': document.issued_at,
+                'expires_at': document.expires_at,
+                'created_at': document.created_at,
+            })
+
+        return Response({
+            'pet': {'id': pet.id, 'name': pet.name},
+            'active_appointments': StorefrontBookingSerializer(active_bookings, many=True, context={'request': request}).data,
+            'medical_records': medical_records,
+            'vaccinations': vaccination_records,
+            'files': files,
+        })
 
 
 
@@ -908,6 +2841,36 @@ class ServicePricingTierViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(service_id=service_id)
             
         return queryset
+
+    def _get_target_service(self):
+        service_id = self.request.data.get('service_id') or self.request.data.get('service')
+        if not service_id:
+            raise ValidationError({'service': 'يجب اختيار الخدمة'})
+        return get_object_or_404(ClinicService, id=service_id, clinic=self.get_clinic())
+
+    def perform_create(self, serializer):
+        serializer.save(service=self._get_target_service())
+
+
+class PlatformAdminServicePricingTierViewSet(viewsets.ModelViewSet):
+    serializer_class = ServicePricingTierSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get_queryset(self):
+        queryset = ServicePricingTier.objects.all().select_related('service', 'service__clinic')
+        service_id = self.request.query_params.get('service_id')
+        if service_id:
+            queryset = queryset.filter(service_id=service_id)
+        return queryset
+
+    def _get_target_service(self):
+        service_id = self.request.data.get('service_id') or self.request.data.get('service')
+        if not service_id:
+            raise ValidationError({'service': 'يجب اختيار الخدمة'})
+        return get_object_or_404(ClinicService, id=service_id)
+
+    def perform_create(self, serializer):
+        serializer.save(service=self._get_target_service())
 
 
 class ServicePackageViewSet(ClinicContextMixin, viewsets.ModelViewSet):
@@ -1081,57 +3044,68 @@ class ClinicMessageSendPushView(ClinicContextMixin, APIView):
         push_sent = 0
         results = []
 
-        for entry in targeted_users.values():
-            user = entry['user']
-            patient = entry['patient']
-            chat_room = entry['chat_room']
+        targeted_entries = list(targeted_users.values())
+        for start in range(0, len(targeted_entries), NOTIFICATION_PUSH_BATCH_SIZE):
+            batch = targeted_entries[start:start + NOTIFICATION_PUSH_BATCH_SIZE]
+            for entry in batch:
+                user = entry['user']
+                patient = entry['patient']
+                chat_room = entry['chat_room']
 
-            extra_data = {
-                'clinic_id': str(clinic.id),
-                'clinic_name': clinic.name,
-                'clinic_message_id': str(base_message.id),
-                'sender_name': sender_name,
-                'patient_id': str(patient.id),
-                'patient_name': patient.name or 'Pet',
-            }
-            if chat_room:
-                extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
-                extra_data['chat_room_id'] = chat_room.id
+                extra_data = {
+                    'type': 'clinic_chat_message',
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                    'patient_id': str(patient.id),
+                    'patient_name': patient.name or 'Pet',
+                }
+                if chat_room:
+                    extra_data['firebase_chat_id'] = chat_room.firebase_chat_id
+                    extra_data['chat_room_id'] = chat_room.id
 
-            notification = create_notification(
-                user=user,
-                notification_type='chat_message_received',
-                title=title,
-                message=message_body,
-                extra_data=extra_data,
-            )
+                notification = create_notification(
+                    user=user,
+                    notification_type='chat_message_received',
+                    title=title,
+                    message=message_body,
+                    extra_data=extra_data,
+                )
 
-            payload = {
-                'type': 'clinic_chat_message',
-                'clinic_id': str(clinic.id),
-                'clinic_message_id': str(base_message.id),
-                'sender_name': sender_name,
-            }
-            if chat_room:
-                payload['firebase_chat_id'] = chat_room.firebase_chat_id
-                payload['chat_room_id'] = str(chat_room.id)
+                payload = {
+                    'type': 'clinic_chat_message',
+                    'clinic_id': str(clinic.id),
+                    'clinic_message_id': str(base_message.id),
+                    'sender_name': sender_name,
+                }
+                if chat_room:
+                    payload['firebase_chat_id'] = chat_room.firebase_chat_id
+                    payload['chat_room_id'] = str(chat_room.id)
+                payload = attach_push_targets(payload, 'clinic_chat_message')
 
-            delivered = _send_push_notification(user, title, message_body, payload)
-            if delivered:
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CLINIC_CHAT_MESSAGE_PUSH,
+                    object_id=notification.id,
+                    dedupe_key=f"clinic_chat_push:{base_message.id}:{notification.id}",
+                    payload={
+                        'title': title,
+                        'message': message_body,
+                        'push_payload': payload,
+                    },
+                )
                 push_sent += 1
-                notification.extra_data['delivered'] = True
-                notification.save(update_fields=['extra_data'])
 
-            if chat_room:
-                chat_room.updated_at = timezone.now()
-                chat_room.save(update_fields=['updated_at'])
+                if chat_room:
+                    chat_room.updated_at = timezone.now()
+                    chat_room.save(update_fields=['updated_at'])
 
-            results.append({
-                'user_id': user.id,
-                'delivered': bool(delivered),
-                'notification_id': notification.id,
-                'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
-            })
+                results.append({
+                    'user_id': user.id,
+                    'delivered': True,
+                    'notification_id': notification.id,
+                    'firebase_chat_id': chat_room.firebase_chat_id if chat_room else None,
+                })
 
         base_message.status = 'in_progress'
         base_message.save(update_fields=['status', 'updated_at'])
@@ -1332,7 +3306,14 @@ class ClinicRecipientGroupsView(ClinicContextMixin, APIView):
         )
         upcoming_owner_ids = set(
             VeterinaryAppointment.objects
-            .filter(clinic=clinic, scheduled_date__gte=today, status__in=['scheduled', 'rescheduled'])
+            .filter(
+                clinic=clinic,
+                scheduled_date__gte=today,
+                status__in=[
+                    VeterinaryAppointment.STATUS_ACCEPTED,
+                    VeterinaryAppointment.STATUS_IN_SESSION,
+                ],
+            )
             .values_list('owner_id', flat=True)
         )
         active_ids = set(owner_ids) & (active_owner_ids | upcoming_owner_ids)
@@ -1340,7 +3321,11 @@ class ClinicRecipientGroupsView(ClinicContextMixin, APIView):
         # Overdue: scheduled in past and still scheduled
         overdue_ids = set(
             VeterinaryAppointment.objects
-            .filter(clinic=clinic, scheduled_date__lt=today, status='scheduled')
+            .filter(
+                clinic=clinic,
+                scheduled_date__lt=today,
+                status=VeterinaryAppointment.STATUS_ACCEPTED,
+            )
             .values_list('owner_id', flat=True)
         )
         overdue_ids = set(owner_ids) & overdue_ids
@@ -1464,54 +3449,63 @@ class ClinicBroadcastView(ClinicContextMixin, APIView):
         skipped = []
         results = []
 
-        for patient in patients:
-            user = patient.linked_user
-            if not user:
-                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
-                continue
+        for start in range(0, len(patients), NOTIFICATION_PUSH_BATCH_SIZE):
+            batch = patients[start:start + NOTIFICATION_PUSH_BATCH_SIZE]
+            for patient in batch:
+                user = patient.linked_user
+                if not user:
+                    skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'unlinked'})
+                    continue
 
-            token = (user.fcm_token or '').strip()
-            if not token:
-                skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
-                continue
+                token = (user.fcm_token or '').strip()
+                if not token:
+                    skipped.append({'patient_id': str(patient.id), 'patient_name': patient.name or 'Pet', 'reason': 'no_token'})
+                    continue
 
-            targeted += 1
-            pet_name = patient.name or 'Pet'
-            payload = {
-                'type': 'clinic_broadcast',
-                'clinic_id': str(clinic.id),
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-            }
-            extra_data = {
-                'clinic_id': str(clinic.id),
-                'clinic_name': clinic.name,
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-                'delivered': False,
-            }
+                targeted += 1
+                pet_name = patient.name or 'Pet'
+                payload = attach_push_targets({
+                    'type': 'clinic_broadcast',
+                    'clinic_id': str(clinic.id),
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                }, 'clinic_broadcast')
+                extra_data = {
+                    'type': 'clinic_broadcast',
+                    'clinic_id': str(clinic.id),
+                    'clinic_name': clinic.name,
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                    'delivered': False,
+                }
 
-            notification = create_notification(
-                user=user,
-                notification_type='clinic_broadcast',
-                title=title,
-                message=message,
-                extra_data=extra_data,
-            )
+                notification = create_notification(
+                    user=user,
+                    notification_type='clinic_broadcast',
+                    title=title,
+                    message=message,
+                    extra_data=extra_data,
+                )
 
-            delivered = _send_push_notification(user, title, message, payload)
-            if delivered:
+                enqueue_notification_event(
+                    event_type=NotificationOutbox.EVENT_CLINIC_BROADCAST_PUSH,
+                    object_id=notification.id,
+                    dedupe_key=f"clinic_broadcast_push:{clinic.id}:{notification.id}",
+                    payload={
+                        'title': title,
+                        'message': message,
+                        'push_payload': payload,
+                    },
+                )
                 push_sent += 1
-                notification.extra_data['delivered'] = True
-                notification.save(update_fields=['extra_data'])
 
-            results.append({
-                'patient_id': str(patient.id),
-                'patient_name': pet_name,
-                'user_id': user.id,
-                'delivered': bool(delivered),
-                'notification_id': notification.id,
-            })
+                results.append({
+                    'patient_id': str(patient.id),
+                    'patient_name': pet_name,
+                    'user_id': user.id,
+                    'delivered': True,
+                    'notification_id': notification.id,
+                })
 
         if targeted == 0:
             return Response({

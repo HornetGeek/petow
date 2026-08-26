@@ -10,6 +10,7 @@ from django.db import transaction
 from accounts.models import User
 from accounts.firebase_service import firebase_service
 from pets.notifications import create_notification
+from pets.push_targets import attach_push_targets
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class Command(BaseCommand):
                 if not isinstance(custom_extra, dict):
                     raise CommandError("--extra-data must be a JSON object.")
                 extra_data.update(custom_extra)
+        notification_extra_data = attach_push_targets(extra_data, extra_data.get('type') or 'system_issue_apology')
 
         users = User.objects.all().order_by("id")
         total_users = users.count()
@@ -105,7 +107,7 @@ class Command(BaseCommand):
                         notification_type="system_message",
                         title=title,
                         message=message,
-                        extra_data=extra_data,
+                        extra_data=notification_extra_data,
                     )
                     created_notifications += 1
             except Exception as exc:
@@ -116,7 +118,7 @@ class Command(BaseCommand):
                 skipped_push += 1
                 continue
 
-            payload = extra_data.copy()
+            payload = notification_extra_data.copy()
             payload.update({"title": title, "body": message})
 
             try:

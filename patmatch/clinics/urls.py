@@ -8,10 +8,14 @@ from .views import (
     ClinicClientsView,
     ClinicSettingsView,
     ClinicAppointmentViewSet,
+    VeterinarySessionViewSet,
     ClinicServiceViewSet,
+    PlatformAdminClinicListView,
+    PlatformAdminClinicServiceViewSet,
     ClinicProductViewSet,
     ClinicStorefrontBookingViewSet,
     ServicePricingTierViewSet,
+    PlatformAdminServicePricingTierViewSet,
     ServicePackageViewSet,
     ClinicPromotionViewSet,
     ClinicMessageViewSet,
@@ -30,15 +34,24 @@ from .views import (
     PublicStorefrontView,
     PublicStorefrontOrderView,
     PublicStorefrontBookingView,
+    PublicStorefrontBookingDetailView,
+    PublicStorefrontBookingProposalRespondView,
+    OwnerStorefrontBookingListView,
+    OwnerPetMedicalRecordsView,
     PublicClinicListView,
+    PublicMarketplaceServicesView,
+    ClinicMapMarkersView,
 )
 
 router = DefaultRouter()
 router.register(r'appointments', ClinicAppointmentViewSet, basename='clinic-appointments')
+router.register(r'sessions', VeterinarySessionViewSet, basename='clinic-sessions')
 router.register(r'services', ClinicServiceViewSet, basename='clinic-services')
+router.register(r'admin/services', PlatformAdminClinicServiceViewSet, basename='platform-admin-services')
 router.register(r'products', ClinicProductViewSet, basename='clinic-products')
 router.register(r'storefront-bookings', ClinicStorefrontBookingViewSet, basename='clinic-storefront-bookings')
 router.register(r'service-tiers', ServicePricingTierViewSet, basename='service-tiers')
+router.register(r'admin/service-tiers', PlatformAdminServicePricingTierViewSet, basename='platform-admin-service-tiers')
 router.register(r'service-packages', ServicePackageViewSet, basename='service-packages')
 router.register(r'promotions', ClinicPromotionViewSet, basename='clinic-promotions')
 router.register(r'messages', ClinicMessageViewSet, basename='clinic-messages')
@@ -50,10 +63,17 @@ urlpatterns = [
     path('dashboard/', ClinicDashboardOverviewView.as_view(), name='clinic-dashboard'),
     path('clients/', ClinicClientsView.as_view(), name='clinic-clients'),
     path('settings/', ClinicSettingsView.as_view(), name='clinic-settings'),
+    path('admin/clinics/', PlatformAdminClinicListView.as_view(), name='platform-admin-clinics'),
     path('storefront/<int:clinic_id>/', PublicStorefrontView.as_view(), name='clinic-storefront'),
     path('storefront/<int:clinic_id>/orders/', PublicStorefrontOrderView.as_view(), name='clinic-storefront-orders'),
     path('storefront/<int:clinic_id>/bookings/', PublicStorefrontBookingView.as_view(), name='clinic-storefront-bookings'),
+    path('storefront-bookings/public/<uuid:public_id>/', PublicStorefrontBookingDetailView.as_view(), name='clinic-storefront-booking-public-detail'),
+    path('storefront-bookings/public/<uuid:public_id>/proposals/<int:proposal_id>/<str:action_name>/', PublicStorefrontBookingProposalRespondView.as_view(), name='clinic-storefront-booking-public-proposal-response'),
+    path('my/appointments/', OwnerStorefrontBookingListView.as_view(), name='clinic-owner-appointments'),
+    path('my/pets/<int:pet_id>/medical-records/', OwnerPetMedicalRecordsView.as_view(), name='clinic-owner-pet-medical-records'),
+    path('marketplace/services/', PublicMarketplaceServicesView.as_view(), name='clinic-marketplace-services'),
     path('clinic/', PublicClinicListView.as_view(), name='clinic-list-public'),
+    path('map/markers/', ClinicMapMarkersView.as_view(), name='clinic-map-markers'),
     path('veterinarians/<int:pk>/', VeterinariansView.as_view(), name='clinic-veterinarian-detail'),
     path('veterinarians/', VeterinariansView.as_view(), name='clinic-veterinarians'),
     path('recipient-groups/', ClinicRecipientGroupsView.as_view(), name='clinic-recipient-groups'),

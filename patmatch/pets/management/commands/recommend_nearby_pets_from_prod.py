@@ -13,6 +13,7 @@ from django.core.mail import send_mail
 
 from accounts.models import User
 from accounts.firebase_service import firebase_service
+from pets.push_targets import attach_push_targets
 
 logger = logging.getLogger(__name__)
 
@@ -299,11 +300,12 @@ class Command(BaseCommand):
                 best_pet, best_distance = recs[0]
                 push_title = title
                 push_body = f"{best_pet['name']} على بعد {best_distance} كم. لديك {len(recs)} ترشيحات."
-                push_data = {
+                push_data = attach_push_targets({
+                    'type': 'recommended_pets',
                     'notification_type': 'recommended_pets',
                     'best_pet_name': best_pet['name'],
                     'count': str(len(recs)),
-                }
+                }, 'recommended_pets')
                 # Preferred: if we have a token from prod mapping, send directly via Firebase
                 token_lookup_email = (owner_email or '').strip().lower()
                 token = tokens_map.get(token_lookup_email)
