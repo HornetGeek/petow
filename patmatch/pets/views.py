@@ -14,7 +14,7 @@ from django.db.models import Q
 from django.db import connection, transaction
 from django.db.utils import DatabaseError
 from django.utils import timezone
-from django.utils.translation import gettext as _
+from django.utils.translation import gettext as _, gettext_noop
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
@@ -168,14 +168,14 @@ CHAT_ROOM_SELECT_RELATED_FIELDS = (
 )
 
 REQUEST_STATUS_LABELS = {
-    'pending': 'Pending review',
-    'approved': 'Approved',
-    'accepted': 'Accepted',
-    'rejected': 'Rejected',
-    'completed': 'Completed',
-    'cancelled': 'Cancelled',
-    'new': 'New',
-    'confirmed': 'Confirmed',
+    'pending': gettext_noop('Pending review'),
+    'approved': gettext_noop('Approved'),
+    'accepted': gettext_noop('Accepted'),
+    'rejected': gettext_noop('Rejected'),
+    'completed': gettext_noop('Completed'),
+    'cancelled': gettext_noop('Cancelled'),
+    'new': gettext_noop('New'),
+    'confirmed': gettext_noop('Confirmed'),
 }
 
 
@@ -474,7 +474,7 @@ def _serialize_saved_search_match(match, request):
     target_type = match.target_type
     item = None
     title = search.name
-    subtitle = 'نتيجة جديدة لبحث محفوظ'
+    subtitle = _('New saved-search match')
     image = None
     deep_link = f'petow://saved-search?saved_search_id={search.id}'
 
@@ -552,10 +552,10 @@ class HomeDigestView(APIView):
         modules = [
             _digest_module('pending_actions', _('Needs your attention'), action_items, 'petow://request-center?filter=requires_action'),
             _digest_module('unread_chats', _('New messages'), unread_chat_items, 'petow://clinic-chat'),
-            _digest_module('saved_search_matches', 'نتائج مناسبة لبحثك', saved_match_items, 'petow://saved-search'),
-            _digest_module('recommended_pets', 'حيوانات قد تهمك', list(pet_items), 'petow://matches'),
-            _digest_module('nearby_services', 'خدمات قريبة', service_items, 'petow://services'),
-            _digest_module('active_stories', 'قصص نشطة', list(story_items), 'petow://stories'),
+            _digest_module('saved_search_matches', _('Matches for your search'), saved_match_items, 'petow://saved-search'),
+            _digest_module('recommended_pets', _('Pets you may like'), list(pet_items), 'petow://matches'),
+            _digest_module('nearby_services', _('Nearby services'), service_items, 'petow://services'),
+            _digest_module('active_stories', _('Active stories'), list(story_items), 'petow://stories'),
         ]
 
         return Response({

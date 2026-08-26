@@ -1388,7 +1388,6 @@ class RequestCenterSavedSearchDigestTests(TestCase):
             owner=self.owner,
             name='Digest Clinic',
             address='Cairo',
-            city='Cairo',
             phone='+201000000003',
             opening_hours='9-5',
             services='Care',
@@ -1471,6 +1470,39 @@ class RequestCenterSavedSearchDigestTests(TestCase):
         self.assertIn('breeding_received', kinds)
         self.assertIn('chat_unread', kinds)
         self.assertTrue(any(item['requires_action'] for item in response.data['results']))
+
+    def test_request_center_localizes_storefront_booking_action(self):
+        booking = StorefrontBooking.objects.create(
+            clinic=self.clinic,
+            service=self.service,
+            customer_user=self.owner,
+            customer_name=self.owner.get_full_name(),
+            customer_phone=self.owner.phone,
+            customer_email=self.owner.email,
+            request_type='inquiry',
+            status='new',
+        )
+        self.client.force_authenticate(self.owner)
+
+        english_response = self.client.get(
+            '/api/pets/request-center/',
+            HTTP_ACCEPT_LANGUAGE='en',
+        )
+        english_card = next(
+            item for item in english_response.data['results']
+            if item['object_id'] == booking.id and item['kind'] == 'provider_inquiry'
+        )
+        self.assertEqual(english_card['action_label'], 'Follow up inquiry')
+
+        arabic_response = self.client.get(
+            '/api/pets/request-center/',
+            HTTP_ACCEPT_LANGUAGE='ar',
+        )
+        arabic_card = next(
+            item for item in arabic_response.data['results']
+            if item['object_id'] == booking.id and item['kind'] == 'provider_inquiry'
+        )
+        self.assertEqual(arabic_card['action_label'], 'متابعة الاستفسار')
 
     def test_pending_adoption_chat_create_is_idempotent_and_context_has_viewer_role(self):
         self.client.force_authenticate(self.owner)
@@ -1616,6 +1648,61 @@ class RequestCenterSavedSearchDigestTests(TestCase):
         module_keys = {module['key'] for module in digest_response.data['modules']}
         self.assertIn('pending_actions', module_keys)
         self.assertIn('saved_search_matches', module_keys)
+
+    @patch('pets.views.serialize_service_card', return_value={'id': 1})
+    def test_home_digest_localizes_all_module_titles(self, _serialize_service):
+        self.client.force_authenticate(self.owner)
+        Story.objects.create(
+            author=self.owner,
+            pet=self.owner_pet,
+            image=self._image('digest-story.jpg'),
+            caption='Digest story',
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        saved_search = SavedSearch.objects.create(
+            user=self.owner,
+            name='خدمات تنظيف',
+            target_type='service',
+            filters={'group': 'grooming'},
+        )
+        SavedSearchMatch.objects.create(
+            saved_search=saved_search,
+            target_type='service',
+            target_id=self.service.id,
+        )
+
+        english_response = self.client.get(
+            '/api/pets/home/digest/',
+            HTTP_ACCEPT_LANGUAGE='en',
+        )
+        self.assertEqual(english_response.status_code, 200)
+        english_titles = {
+            module['key']: module['title'] for module in english_response.data['modules']
+        }
+        self.assertEqual(english_titles, {
+            'pending_actions': 'Needs your attention',
+            'unread_chats': 'New messages',
+            'saved_search_matches': 'Matches for your search',
+            'recommended_pets': 'Pets you may like',
+            'nearby_services': 'Nearby services',
+            'active_stories': 'Active stories',
+        })
+
+        arabic_response = self.client.get(
+            '/api/pets/home/digest/',
+            HTTP_ACCEPT_LANGUAGE='ar',
+        )
+        arabic_titles = {
+            module['key']: module['title'] for module in arabic_response.data['modules']
+        }
+        self.assertEqual(arabic_titles, {
+            'pending_actions': 'يتطلب انتباهك',
+            'unread_chats': 'رسائل جديدة',
+            'saved_search_matches': 'نتائج مناسبة لبحثك',
+            'recommended_pets': 'حيوانات قد تهمك',
+            'nearby_services': 'خدمات قريبة',
+            'active_stories': 'قصص نشطة',
+        })
 
     def test_storefront_booking_links_authenticated_user(self):
         self.client.force_authenticate(self.requester)
