@@ -17,7 +17,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.cache import cache
-from rest_framework import generics, status, viewsets
+from rest_framework import generics, mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import ValidationError
@@ -29,7 +29,7 @@ from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from django.conf import settings
 
 from accounts.serializers import UserSerializer
-from accounts.models import User
+from accounts.models import MobileAppConfig, User
 from .models import (
     Clinic,
     ClinicService,
@@ -51,6 +51,7 @@ from .models import (
     ClinicPatientDocument,
     ClinicPatientNote,
     ClinicInvite,
+    ProviderServiceRequest,
 )
 from pets.models import Notification, ChatRoom, Pet, NotificationOutbox
 from pets.serializers import PublicPetSerializer
@@ -102,6 +103,9 @@ from .serializers import (
     get_or_create_patient_record_for_pet,
     ClinicInviteSerializer,
     VeterinarianSerializer,
+    ProviderServiceRequestMobileSerializer,
+    ProviderServiceRequestCreateSerializer,
+    ProviderServiceRequestAdminSerializer,
 )
 from .invite_service import claim_invites_for_user, respond_to_invite, _build_phone_lookup_query, _normalize_email, _normalize_phone
 
@@ -1124,6 +1128,13 @@ class PublicClinicListView(APIView):
         category_filter = _build_service_category_filter(request.query_params.get('service_category'))
         if category_filter is not None:
             clinics = clinics.filter(category_filter)
+        search_term = (request.query_params.get('search') or '').strip()
+        if search_term:
+            clinics = clinics.filter(
+                Q(name__icontains=search_term) |
+                Q(address__icontains=search_term)
+            )
+        clinics = clinics.order_by('name')
         clinics = clinics.prefetch_related(
             models.Prefetch(
                 'services_list',
@@ -1134,6 +1145,162 @@ class PublicClinicListView(APIView):
         page = paginator.paginate_queryset(clinics, request, view=self)
         serializer = ClinicListSerializer(page, many=True, context={'request': request})
         return paginator.get_paginated_response(serializer.data)
+
+
+def _provider_request_handoff(provider_request, config):
+    group_labels = [
+        MARKETPLACE_SERVICE_GROUPS[group_key]['label']
+        for group_key in provider_request.service_groups
+        if group_key in MARKETPLACE_SERVICE_GROUPS
+    ]
+    listing_label = (
+        'نشاط موجود على Petow'
+        if provider_request.request_kind == ProviderServiceRequest.REQUEST_EXISTING_LISTING
+        else 'نشاط جديد'
+    )
+    message = '\n'.join([
+        'مرحباً فريق Petow، قدمت طلب إضافة خدمة من التطبيق.',
+        f"رقم الطلب: {provider_request.reference}",
+        f"النشاط: {provider_request.business_name}",
+        f"نوع الطلب: {listing_label}",
+        f"الخدمات: {'، '.join(group_labels)}",
+    ])
+    whatsapp_number = re.sub(r'\D', '', config.provider_onboarding_whatsapp or '')
+    return {
+        'request': ProviderServiceRequestMobileSerializer(provider_request).data,
+        'whatsapp_number': whatsapp_number,
+        'whatsapp_message': message,
+    }
+
+
+class ProviderServiceRequestCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        config = MobileAppConfig.get_solo()
+        if not config.provider_onboarding_enabled:
+            return Response(
+                {'detail': 'إضافة الخدمات غير متاحة حالياً'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if not re.sub(r'\D', '', config.provider_onboarding_whatsapp or ''):
+            return Response(
+                {'detail': 'قناة التواصل غير مضبوطة حالياً'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        active_request = (
+            ProviderServiceRequest.objects
+            .filter(requester=request.user, status__in=ProviderServiceRequest.OPEN_STATUSES)
+            .select_related('existing_clinic', 'converted_clinic')
+            .first()
+        )
+        if active_request:
+            return Response(_provider_request_handoff(active_request, config))
+
+        serializer = ProviderServiceRequestCreateSerializer(
+            data=request.data,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        provider_request = serializer.save()
+
+        duplicate_query = Q(
+            normalized_whatsapp=provider_request.normalized_whatsapp,
+            status__in=ProviderServiceRequest.OPEN_STATUSES,
+        )
+        if provider_request.existing_clinic_id:
+            duplicate_query |= Q(
+                existing_clinic_id=provider_request.existing_clinic_id,
+                status__in=ProviderServiceRequest.OPEN_STATUSES,
+            )
+        provider_request.possible_duplicate = (
+            ProviderServiceRequest.objects
+            .filter(duplicate_query)
+            .exclude(pk=provider_request.pk)
+            .exists()
+        )
+        if provider_request.possible_duplicate:
+            provider_request.save(update_fields=['possible_duplicate', 'updated_at'])
+
+        return Response(
+            _provider_request_handoff(provider_request, config),
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CurrentProviderServiceRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        config = MobileAppConfig.get_solo()
+        provider_request = (
+            ProviderServiceRequest.objects
+            .filter(requester=request.user)
+            .exclude(status=ProviderServiceRequest.STATUS_CLOSED)
+            .select_related('existing_clinic', 'converted_clinic')
+            .first()
+        )
+        if not provider_request:
+            return Response({
+                'request': None,
+                'whatsapp_number': re.sub(r'\D', '', config.provider_onboarding_whatsapp or ''),
+            })
+        return Response(_provider_request_handoff(provider_request, config))
+
+
+class PlatformAdminProviderServiceRequestViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+    serializer_class = ProviderServiceRequestAdminSerializer
+    pagination_class = ClinicListPagination
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        queryset = ProviderServiceRequest.objects.select_related(
+            'requester', 'existing_clinic', 'converted_clinic'
+        )
+        status_filter = (self.request.query_params.get('status') or '').strip()
+        if status_filter:
+            queryset = queryset.filter(status__in=status_filter.split(','))
+        request_kind = (self.request.query_params.get('request_kind') or '').strip()
+        if request_kind:
+            queryset = queryset.filter(request_kind=request_kind)
+        service_group = (self.request.query_params.get('service_group') or '').strip()
+        if service_group:
+            queryset = queryset.filter(service_groups__contains=[service_group])
+        search_term = (self.request.query_params.get('search') or '').strip()
+        if search_term:
+            queryset = queryset.filter(
+                Q(business_name__icontains=search_term) |
+                Q(whatsapp_phone__icontains=search_term) |
+                Q(requester__email__icontains=search_term) |
+                Q(requester__first_name__icontains=search_term) |
+                Q(requester__last_name__icontains=search_term)
+            )
+        return queryset.order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        summary_source = ProviderServiceRequest.objects.all()
+        summary = {
+            row['status']: row['count']
+            for row in summary_source.values('status').annotate(count=Count('id'))
+        }
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        response = self.get_paginated_response(serializer.data)
+        response.data['summary'] = {
+            'new': summary.get(ProviderServiceRequest.STATUS_NEW, 0),
+            'open': summary_source.filter(status__in=ProviderServiceRequest.OPEN_STATUSES).count(),
+            'converted': summary.get(ProviderServiceRequest.STATUS_CONVERTED, 0),
+            'closed': summary.get(ProviderServiceRequest.STATUS_CLOSED, 0),
+        }
+        return response
 
 class PublicStorefrontOrderView(APIView):
     permission_classes = [AllowAny]

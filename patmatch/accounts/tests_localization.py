@@ -1,0 +1,96 @@
+from django.test import SimpleTestCase
+from django.urls import reverse
+from django.utils import translation
+from django.utils.translation import gettext
+from rest_framework.test import APITestCase
+
+from .models import PushDevice, User
+
+
+class ArabicCatalogTests(SimpleTestCase):
+    def test_arabic_catalog_and_english_source(self):
+        with translation.override('ar'):
+            self.assertEqual(gettext('Email is required.'), 'البريد الإلكتروني مطلوب.')
+        with translation.override('en'):
+            self.assertEqual(gettext('Email is required.'), 'Email is required.')
+
+
+class PushDeviceLanguageApiTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='localized-device',
+            email='localized-device@example.com',
+            password='testpass123',
+            phone='1000000099',
+        )
+        self.client.force_authenticate(self.user)
+        self.url = reverse('accounts:update_notification_token')
+
+    def test_registration_persists_account_and_device_language(self):
+        response = self.client.post(
+            self.url,
+            {
+                'fcm_token': 'english-device-token',
+                'device_id': 'installation-1',
+                'platform': 'android',
+                'app_type': 'petmatch_mobile',
+                'language': 'en',
+            },
+            format='json',
+            HTTP_ACCEPT_LANGUAGE='en',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['code'], 'push_device_registered')
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.preferred_language, 'en')
+        device = PushDevice.objects.get(user=self.user, device_id='installation-1')
+        self.assertEqual(device.language, 'en')
+        self.assertTrue(device.is_active)
+
+    def test_logout_cleanup_deactivates_only_selected_installation(self):
+        first = PushDevice.objects.create(
+            user=self.user, device_id='installation-1', token='token-1', language='ar'
+        )
+        second = PushDevice.objects.create(
+            user=self.user, device_id='installation-2', token='token-2', language='en'
+        )
+
+        response = self.client.delete(
+            self.url,
+            {'device_id': 'installation-1', 'app_type': 'petmatch_mobile'},
+            format='json',
+            HTTP_ACCEPT_LANGUAGE='en',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertFalse(first.is_active)
+        self.assertTrue(second.is_active)
+
+    def test_last_device_logout_clears_legacy_push_fallback(self):
+        self.user.fcm_token = 'token-1'
+        self.user.save(update_fields=['fcm_token'])
+        PushDevice.objects.create(
+            user=self.user, device_id='installation-1', token='token-1', language='ar'
+        )
+
+        response = self.client.delete(
+            self.url,
+            {'device_id': 'installation-1', 'app_type': 'petmatch_mobile'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertIsNone(self.user.fcm_token)
+
+    def test_unsupported_language_returns_stable_code(self):
+        response = self.client.post(
+            self.url,
+            {'fcm_token': 'token', 'device_id': 'device', 'language': 'fr'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'unsupported_language')

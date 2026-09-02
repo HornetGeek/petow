@@ -30,6 +30,7 @@ from .models import (
     ClinicPatientDocument,
     ClinicPatientNote,
     ClinicInvite,
+    ProviderServiceRequest,
     VeterinaryAppointment,
     VeterinarySession,
 )
@@ -472,7 +473,8 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
     def get_pet_type_display(self, obj):
         """Get human-readable pet types"""
         return obj.pet_type_display
-    
+
+
     def validate_applicable_pet_types(self, value):
         """Ensure at least one pet type is selected"""
         if isinstance(value, str):
@@ -510,6 +512,208 @@ class ClinicServiceSerializer(serializers.ModelSerializer):
             instance.service_image.delete(save=False)
             instance.service_image = None
         return super().update(instance, validated_data)
+
+
+def normalize_provider_whatsapp(value):
+    digits = ''.join(character for character in str(value or '') if character.isdigit())
+    if digits.startswith('00'):
+        digits = digits[2:]
+    if digits.startswith('01') and len(digits) == 11:
+        digits = f"20{digits[1:]}"
+    if len(digits) < 8 or len(digits) > 15:
+        raise serializers.ValidationError('أدخل رقم واتساب صحيحاً')
+    return digits
+
+
+class ProviderServiceRequestMobileSerializer(serializers.ModelSerializer):
+    reference = serializers.CharField(read_only=True)
+    status_label = serializers.CharField(source='get_status_display', read_only=True)
+    existing_clinic_name = serializers.CharField(source='existing_clinic.name', read_only=True)
+    converted_clinic_name = serializers.CharField(source='converted_clinic.name', read_only=True)
+
+    class Meta:
+        model = ProviderServiceRequest
+        fields = [
+            'public_id', 'reference', 'request_kind', 'existing_clinic',
+            'existing_clinic_name', 'business_name', 'whatsapp_phone',
+            'service_groups', 'address', 'latitude', 'longitude', 'status',
+            'status_label', 'converted_clinic', 'converted_clinic_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class ProviderServiceRequestCreateSerializer(serializers.ModelSerializer):
+    consent = serializers.BooleanField(write_only=True)
+
+    class Meta:
+        model = ProviderServiceRequest
+        fields = [
+            'request_kind', 'existing_clinic', 'business_name', 'whatsapp_phone',
+            'service_groups', 'address', 'latitude', 'longitude', 'consent',
+        ]
+        extra_kwargs = {'business_name': {'required': False}}
+
+    def validate_service_groups(self, value):
+        if not isinstance(value, list) or not value:
+            raise serializers.ValidationError('اختر نوع خدمة واحداً على الأقل')
+        normalized = list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+        invalid = [item for item in normalized if item not in MARKETPLACE_SERVICE_GROUPS]
+        if invalid:
+            raise serializers.ValidationError('توجد فئة خدمة غير مدعومة')
+        return normalized
+
+    def validate_whatsapp_phone(self, value):
+        normalize_provider_whatsapp(value)
+        return value.strip()
+
+    def validate_consent(self, value):
+        if value is not True:
+            raise serializers.ValidationError('يجب الموافقة على التواصل وتمثيل النشاط')
+        return value
+
+    def validate(self, attrs):
+        request_kind = attrs.get('request_kind')
+        existing_clinic = attrs.get('existing_clinic')
+        if request_kind == ProviderServiceRequest.REQUEST_EXISTING_LISTING:
+            if not existing_clinic or not existing_clinic.is_active:
+                raise serializers.ValidationError({
+                    'existing_clinic': 'اختر نشاطاً منشوراً على Petow',
+                })
+            attrs['business_name'] = existing_clinic.name
+        elif existing_clinic:
+            raise serializers.ValidationError({
+                'existing_clinic': 'لا يمكن ربط نشاط موجود بطلب نشاط جديد',
+            })
+        elif len((attrs.get('business_name') or '').strip()) < 2:
+            raise serializers.ValidationError({
+                'business_name': 'أدخل اسم النشاط',
+            })
+
+        latitude = attrs.get('latitude')
+        longitude = attrs.get('longitude')
+        if latitude is not None and not -90 <= latitude <= 90:
+            raise serializers.ValidationError({'latitude': 'خط العرض غير صالح'})
+        if longitude is not None and not -180 <= longitude <= 180:
+            raise serializers.ValidationError({'longitude': 'خط الطول غير صالح'})
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop('consent', None)
+        validated_data['requester'] = self.context['request'].user
+        validated_data['normalized_whatsapp'] = normalize_provider_whatsapp(
+            validated_data['whatsapp_phone'],
+        )
+        validated_data['consented_at'] = timezone.now()
+        return super().create(validated_data)
+
+
+class ProviderServiceRequestAdminSerializer(serializers.ModelSerializer):
+    reference = serializers.CharField(read_only=True)
+    status_label = serializers.CharField(source='get_status_display', read_only=True)
+    requester_name = serializers.SerializerMethodField()
+    requester_email = serializers.EmailField(source='requester.email', read_only=True)
+    requester_phone = serializers.CharField(source='requester.phone', read_only=True)
+    existing_clinic_name = serializers.CharField(source='existing_clinic.name', read_only=True)
+    converted_clinic_name = serializers.CharField(source='converted_clinic.name', read_only=True)
+
+    class Meta:
+        model = ProviderServiceRequest
+        fields = [
+            'id', 'public_id', 'reference', 'requester', 'requester_name',
+            'requester_email', 'requester_phone', 'request_kind', 'existing_clinic',
+            'existing_clinic_name', 'business_name', 'whatsapp_phone',
+            'normalized_whatsapp', 'service_groups', 'address', 'latitude',
+            'longitude', 'consented_at', 'status', 'status_label', 'close_reason',
+            'internal_notes', 'possible_duplicate', 'converted_clinic',
+            'converted_clinic_name', 'contacted_at', 'converted_at',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'public_id', 'reference', 'requester', 'requester_name',
+            'requester_email', 'requester_phone', 'request_kind', 'existing_clinic',
+            'existing_clinic_name', 'business_name', 'whatsapp_phone',
+            'normalized_whatsapp', 'service_groups', 'address', 'latitude',
+            'longitude', 'consented_at', 'status_label', 'possible_duplicate',
+            'converted_clinic_name', 'contacted_at', 'converted_at',
+            'created_at', 'updated_at',
+        ]
+
+    def get_requester_name(self, obj):
+        return obj.requester.get_full_name() or obj.requester.email
+
+    def validate(self, attrs):
+        next_status = attrs.get('status', self.instance.status)
+        allowed_transitions = {
+            ProviderServiceRequest.STATUS_NEW: {
+                ProviderServiceRequest.STATUS_NEW,
+                ProviderServiceRequest.STATUS_CONTACTED,
+                ProviderServiceRequest.STATUS_QUALIFIED,
+                ProviderServiceRequest.STATUS_CLOSED,
+            },
+            ProviderServiceRequest.STATUS_CONTACTED: {
+                ProviderServiceRequest.STATUS_CONTACTED,
+                ProviderServiceRequest.STATUS_QUALIFIED,
+                ProviderServiceRequest.STATUS_CLOSED,
+            },
+            ProviderServiceRequest.STATUS_QUALIFIED: {
+                ProviderServiceRequest.STATUS_QUALIFIED,
+                ProviderServiceRequest.STATUS_CONTACTED,
+                ProviderServiceRequest.STATUS_CONVERTED,
+                ProviderServiceRequest.STATUS_CLOSED,
+            },
+            ProviderServiceRequest.STATUS_CONVERTED: {
+                ProviderServiceRequest.STATUS_CONVERTED,
+            },
+            ProviderServiceRequest.STATUS_CLOSED: {
+                ProviderServiceRequest.STATUS_CLOSED,
+                ProviderServiceRequest.STATUS_NEW,
+                ProviderServiceRequest.STATUS_CONTACTED,
+            },
+        }
+        if next_status not in allowed_transitions.get(self.instance.status, set()):
+            raise serializers.ValidationError({'status': 'انتقال حالة الطلب غير مسموح'})
+        converted_clinic = attrs.get('converted_clinic', self.instance.converted_clinic)
+        if next_status == ProviderServiceRequest.STATUS_CONVERTED:
+            if not converted_clinic or not converted_clinic.is_active:
+                raise serializers.ValidationError({
+                    'converted_clinic': 'اربط الطلب بنشاط فعال قبل التحويل',
+                })
+            categories = {
+                category
+                for group_key in self.instance.service_groups
+                for category in MARKETPLACE_SERVICE_GROUPS.get(group_key, {}).get('categories', ())
+            }
+            has_requested_service = converted_clinic.services_list.filter(
+                is_active=True,
+                category__in=categories,
+            ).exists()
+            if not has_requested_service:
+                raise serializers.ValidationError({
+                    'status': 'أضف خدمة فعالة ضمن الفئات المطلوبة قبل التحويل',
+                })
+        if next_status == ProviderServiceRequest.STATUS_CLOSED and not attrs.get(
+            'close_reason', self.instance.close_reason
+        ):
+            raise serializers.ValidationError({'close_reason': 'سبب الإغلاق مطلوب'})
+        return attrs
+
+    def update(self, instance, validated_data):
+        previous_status = instance.status
+        instance = super().update(instance, validated_data)
+        update_fields = []
+        if instance.status == ProviderServiceRequest.STATUS_CONTACTED and not instance.contacted_at:
+            instance.contacted_at = timezone.now()
+            update_fields.append('contacted_at')
+        if instance.status == ProviderServiceRequest.STATUS_CONVERTED and not instance.converted_at:
+            instance.converted_at = timezone.now()
+            update_fields.append('converted_at')
+        if previous_status == ProviderServiceRequest.STATUS_CLOSED and instance.status != previous_status:
+            instance.close_reason = ''
+            update_fields.append('close_reason')
+        if update_fields:
+            instance.save(update_fields=[*update_fields, 'updated_at'])
+        return instance
 
 
 class MarketplaceServiceSerializer(serializers.ModelSerializer):

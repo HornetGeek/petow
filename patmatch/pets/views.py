@@ -9,11 +9,13 @@ import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
+from django.core import signing
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.db import connection, transaction
 from django.db.utils import DatabaseError
 from django.utils import timezone
+from django.utils.translation import gettext as _
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
@@ -60,6 +62,8 @@ from clinics.models import StorefrontBooking, ClinicService
 import logging
 import time
 import hashlib
+import os
+import uuid
 from django.db import models
 from django.db.models import F, Value, FloatField, ExpressionWrapper, Count, Avg, Min, Max, IntegerField, Func
 from django.db.models.functions import Coalesce, Cast, Floor
@@ -135,6 +139,8 @@ MAP_LOW_ZOOM_POINT_LIMIT = 200
 
 CHAT_ROOM_DEFAULT_LIMIT = 20
 CHAT_ROOM_MAX_LIMIT = 100
+CHAT_IMAGE_CLEANUP_SALT = 'pets.chat-image-cleanup.v1'
+CHAT_IMAGE_CLEANUP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 BREEDING_REQUEST_SELECT_RELATED_FIELDS = (
     'target_pet__breed',
@@ -167,14 +173,14 @@ CHAT_ROOM_SELECT_RELATED_FIELDS = (
 )
 
 REQUEST_STATUS_LABELS = {
-    'pending': 'قيد المراجعة',
-    'approved': 'تم القبول',
-    'accepted': 'تم القبول',
-    'rejected': 'تم الرفض',
-    'completed': 'مكتمل',
-    'cancelled': 'ملغي',
-    'new': 'جديد',
-    'confirmed': 'مؤكد',
+    'pending': 'Pending review',
+    'approved': 'Approved',
+    'accepted': 'Accepted',
+    'rejected': 'Rejected',
+    'completed': 'Completed',
+    'cancelled': 'Cancelled',
+    'new': 'New',
+    'confirmed': 'Confirmed',
 }
 
 
@@ -191,7 +197,7 @@ def _absolute_url(request, value):
 
 
 def _status_label(status_value):
-    return REQUEST_STATUS_LABELS.get(status_value or '', status_value or 'جارٍ المتابعة')
+    return _(REQUEST_STATUS_LABELS.get(status_value or '', status_value or 'In progress'))
 
 
 def _request_card_priority(card):
@@ -215,13 +221,13 @@ def _build_adoption_card(adoption_request, request, direction):
     is_received = direction == 'received'
     status_value = adoption_request.status
     requires_action = is_received and status_value == 'pending'
-    title = 'طلب تبني وارد' if is_received else 'طلب تبني مرسل'
+    title = _('Received adoption request') if is_received else _('Sent adoption request')
     actor_name = (
         adoption_request.adopter.get_full_name()
         if is_received
         else getattr(getattr(pet, 'owner', None), 'get_full_name', lambda: '')()
-    ) or adoption_request.adopter_email or 'مستخدم'
-    subtitle = f"{pet.name if pet else 'حيوان'} • {actor_name}"
+    ) or adoption_request.adopter_email or _('User')
+    subtitle = f"{pet.name if pet else _('Pet')} • {actor_name}"
     return {
         'id': f'adoption_{direction}_{adoption_request.id}',
         'object_id': adoption_request.id,
@@ -234,7 +240,7 @@ def _build_adoption_card(adoption_request, request, direction):
         'created_at': adoption_request.created_at,
         'updated_at': adoption_request.updated_at,
         'requires_action': requires_action,
-        'action_label': 'راجع طلب التبني' if requires_action else 'عرض الطلب',
+        'action_label': _('Review adoption request') if requires_action else _('View request'),
         'deep_link': f'petow://adoption-requests?adoption_request_id={adoption_request.id}',
         'metadata': {
             'adoption_request_id': adoption_request.id,
@@ -250,8 +256,11 @@ def _build_breeding_card(breeding_request, request, direction):
     partner_pet = breeding_request.requester_pet if is_received else breeding_request.target_pet
     my_pet = breeding_request.target_pet if is_received else breeding_request.requester_pet
     requires_action = is_received and status_value == 'pending'
-    title = 'طلب تزاوج وارد' if is_received else 'طلب تزاوج مرسل'
-    subtitle = f"{partner_pet.name if partner_pet else 'حيوان'} مع {my_pet.name if my_pet else 'حيوانك'}"
+    title = _('Received breeding request') if is_received else _('Sent breeding request')
+    subtitle = _('%(partner)s with %(mine)s') % {
+        'partner': partner_pet.name if partner_pet else _('Pet'),
+        'mine': my_pet.name if my_pet else _('your pet'),
+    }
     return {
         'id': f'breeding_{direction}_{breeding_request.id}',
         'object_id': breeding_request.id,
@@ -264,7 +273,7 @@ def _build_breeding_card(breeding_request, request, direction):
         'created_at': breeding_request.created_at,
         'updated_at': breeding_request.updated_at,
         'requires_action': requires_action,
-        'action_label': 'راجع طلب التزاوج' if requires_action else 'عرض الطلب',
+        'action_label': _('Review breeding request') if requires_action else _('View request'),
         'deep_link': f'petow://breeding-requests?breeding_request_id={breeding_request.id}',
         'metadata': {
             'breeding_request_id': breeding_request.id,
@@ -288,25 +297,25 @@ def _build_chat_card(chat_room, unread_count, request):
         pet = None
 
     other = chat_room.get_other_participant(request.user)
-    title = 'رسائل جديدة'
+    title = _('New messages')
     subtitle = other.get_full_name() if other else None
     if not subtitle and getattr(chat_room, 'clinic_patient', None) and chat_room.clinic_patient.clinic:
         subtitle = chat_room.clinic_patient.clinic.name
     if pet:
-        subtitle = f"{subtitle or 'محادثة'} • {pet.name}"
+        subtitle = f"{subtitle or _('Chat')} • {pet.name}"
     return {
         'id': f'chat_{chat_room.id}',
         'object_id': chat_room.id,
         'kind': 'chat_unread',
         'status': 'unread',
-        'status_label': f'{unread_count} غير مقروء',
+        'status_label': _('%(count)d unread') % {'count': unread_count},
         'title': title,
-        'subtitle': subtitle or 'محادثة نشطة',
+        'subtitle': subtitle or _('Active chat'),
         'primary_image': _pet_image(request, pet),
         'created_at': chat_room.created_at,
         'updated_at': chat_room.updated_at,
         'requires_action': unread_count > 0,
-        'action_label': 'فتح المحادثة',
+        'action_label': _('Open chat'),
         'deep_link': f'petow://clinic-chat?firebase_chat_id={chat_room.firebase_chat_id}',
         'metadata': {
             'chat_room_id': chat_room.id,
@@ -319,21 +328,21 @@ def _build_chat_card(chat_room, unread_count, request):
 def _build_storefront_booking_card(booking, request):
     is_inquiry = booking.request_type == 'inquiry'
     status_value = booking.status
-    service_name = booking.service.name if booking.service else 'خدمة'
-    clinic_name = booking.clinic.name if booking.clinic else 'عيادة'
+    service_name = booking.service.name if booking.service else _('Service')
+    clinic_name = booking.clinic.name if booking.clinic else _('Clinic')
     return {
         'id': f'storefront_booking_{booking.id}',
         'object_id': booking.id,
         'kind': 'provider_inquiry' if is_inquiry else 'provider_booking',
         'status': status_value,
         'status_label': _status_label(status_value),
-        'title': 'استفسار خدمة' if is_inquiry else 'حجز خدمة',
+        'title': _('Service inquiry') if is_inquiry else _('Service booking'),
         'subtitle': f'{service_name} • {clinic_name}',
         'primary_image': _absolute_url(request, getattr(booking.clinic, 'logo', None)),
         'created_at': booking.created_at,
         'updated_at': booking.created_at,
         'requires_action': status_value in {'new', 'confirmed'},
-        'action_label': 'متابعة الاستفسار' if is_inquiry else 'متابعة الحجز',
+        'action_label': _('Follow up inquiry') if is_inquiry else _('Follow up booking'),
         'deep_link': f'petow://clinic-booking?booking_public_id={booking.public_id}',
         'metadata': {
             'booking_id': booking.id,
@@ -546,8 +555,8 @@ class HomeDigestView(APIView):
         story_items = StorySerializer(active_stories, many=True, context={'request': request}).data
 
         modules = [
-            _digest_module('pending_actions', 'يتطلب انتباهك', action_items, 'petow://request-center?filter=requires_action'),
-            _digest_module('unread_chats', 'رسائل جديدة', unread_chat_items, 'petow://clinic-chat'),
+            _digest_module('pending_actions', _('Needs your attention'), action_items, 'petow://request-center?filter=requires_action'),
+            _digest_module('unread_chats', _('New messages'), unread_chat_items, 'petow://clinic-chat'),
             _digest_module('saved_search_matches', 'نتائج مناسبة لبحثك', saved_match_items, 'petow://saved-search'),
             _digest_module('recommended_pets', 'حيوانات قد تهمك', list(pet_items), 'petow://matches'),
             _digest_module('nearby_services', 'خدمات قريبة', service_items, 'petow://services'),
@@ -2274,59 +2283,7 @@ def chat_room_status(request, chat_id):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        participants = chat_room.get_participants()
-        request_kind = None
-        request_status = None
-        viewer_role = None
-
-        if chat_room.breeding_request:
-            request_kind = 'breeding'
-            request_status = chat_room.breeding_request.status
-            if chat_room.breeding_request.requester_id == request.user.id:
-                viewer_role = 'requester'
-            else:
-                viewer_role = 'owner'
-        elif chat_room.adoption_request:
-            request_kind = 'adoption'
-            request_status = chat_room.adoption_request.status
-            if chat_room.adoption_request.adopter_id == request.user.id:
-                viewer_role = 'requester'
-            else:
-                viewer_role = 'owner'
-        elif chat_room.clinic_patient:
-            request_kind = 'clinic'
-            request_status = 'active' if chat_room.is_active else 'archived'
-            if getattr(chat_room, 'clinic_staff_id', None) == request.user.id:
-                viewer_role = 'clinic_staff'
-            else:
-                viewer_role = 'patient'
-
-        if not chat_room.is_active:
-            chat_status = 'rejected'
-        elif request_kind == 'clinic':
-            chat_status = 'approved'
-        elif request_status == 'pending':
-            chat_status = 'pending'
-        elif request_status == 'rejected':
-            chat_status = 'rejected'
-        elif request_kind == 'adoption' and viewer_role == 'requester' and not getattr(request.user, 'is_verified', False):
-            chat_status = 'approved_pending_kyc'
-        else:
-            chat_status = 'approved'
-
-        return Response({
-            'id': chat_room.id,
-            'firebase_chat_id': chat_room.firebase_chat_id,
-            'is_active': chat_room.is_active,
-            'created_at': chat_room.created_at,
-            'updated_at': chat_room.updated_at,
-            'request_kind': request_kind,
-            'request_status': request_status,
-            'chat_status': chat_status,
-            'viewer_role': viewer_role,
-            'breeding_request_status': request_status,
-            'participants_count': len(participants)
-        })
+        return Response(ChatStatusSerializer(chat_room, context={'request': request}).data)
         
     except ChatRoom.DoesNotExist:
         return Response(
@@ -2523,7 +2480,7 @@ def reactivate_chat_room(request, chat_id):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-@api_view(['POST'])
+@api_view(['POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def upload_chat_image(request):
     """رفع صورة للمحادثة"""
@@ -2553,6 +2510,42 @@ def upload_chat_image(request):
                 {'error': 'غير مسموح لك بإرسال صور في هذه المحادثة'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        if request.method == 'DELETE':
+            cleanup_token = request.data.get('cleanup_token')
+            filename = request.data.get('filename')
+            if not cleanup_token or not filename:
+                return Response(
+                    {'error': 'بيانات حذف الصورة غير مكتملة'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                token_data = signing.loads(
+                    cleanup_token,
+                    salt=CHAT_IMAGE_CLEANUP_SALT,
+                    max_age=CHAT_IMAGE_CLEANUP_MAX_AGE_SECONDS,
+                )
+            except (signing.BadSignature, signing.SignatureExpired):
+                return Response(
+                    {'error': 'رمز حذف الصورة غير صالح أو منتهي'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            saved_name = str(token_data.get('saved_name') or '')
+            token_matches = (
+                token_data.get('user_id') == request.user.id
+                and token_data.get('chat_id') == chat_room.id
+                and saved_name.startswith('chat_images/')
+                and os.path.basename(saved_name) == os.path.basename(str(filename))
+            )
+            if not token_matches:
+                return Response(
+                    {'error': 'غير مسموح بحذف هذه الصورة'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if default_storage.exists(saved_name):
+                default_storage.delete(saved_name)
+            return Response(status=status.HTTP_204_NO_CONTENT)
         
         if 'image' not in request.FILES:
             logger.warning("No image file in request")
@@ -2586,9 +2579,6 @@ def upload_chat_image(request):
             )
         
         # حفظ الصورة عبر default_storage لتدعم التخزين المحلي أو S3
-        import os
-        import uuid
-
         file_extension = os.path.splitext(image_file.name)[1] or '.jpg'
         unique_filename = f"{uuid.uuid4().hex}{file_extension}"
         storage_path = f"chat_images/{unique_filename}"
@@ -2602,7 +2592,15 @@ def upload_chat_image(request):
         return Response({
             'success': True,
             'image_url': image_url,
-            'filename': os.path.basename(saved_name)
+            'filename': os.path.basename(saved_name),
+            'cleanup_token': signing.dumps(
+                {
+                    'user_id': request.user.id,
+                    'chat_id': chat_room.id,
+                    'saved_name': saved_name,
+                },
+                salt=CHAT_IMAGE_CLEANUP_SALT,
+            ),
         })
         
     except Exception as e:

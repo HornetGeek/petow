@@ -11,6 +11,7 @@ from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
 from pets.models import Breed, Notification, NotificationOutbox, Pet
@@ -29,11 +30,186 @@ from .models import (
     StorefrontBookingTimeline,
     VeterinaryAppointment,
     VeterinarySession,
+    ProviderServiceRequest,
 )
+from accounts.models import MobileAppConfig
 from .views import ClinicMapMarkersView, ClinicStorefrontBookingViewSet
 
 
 User = get_user_model()
+
+
+class ProviderServiceRequestApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='provider@example.com',
+            email='provider@example.com',
+            password='pass12345',
+            first_name='Service',
+            last_name='Owner',
+            phone='01000000000',
+        )
+        self.config = MobileAppConfig.get_solo()
+        self.config.provider_onboarding_enabled = True
+        self.config.provider_onboarding_whatsapp = '+20 127 201 1482'
+        self.config.save()
+        self.client.force_authenticate(self.user)
+        self.payload = {
+            'request_kind': 'new_business',
+            'business_name': 'Happy Paws',
+            'whatsapp_phone': '01012345678',
+            'service_groups': ['grooming', 'boarding'],
+            'address': 'Nasr City, Cairo',
+            'consent': True,
+        }
+
+    def test_create_provider_request_returns_reference_and_handoff(self):
+        response = self.client.post(
+            reverse('provider-service-request-create'),
+            self.payload,
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.data['request']['reference'].startswith('SRV-'))
+        self.assertEqual(response.data['whatsapp_number'], '201272011482')
+        self.assertIn(response.data['request']['reference'], response.data['whatsapp_message'])
+        lead = ProviderServiceRequest.objects.get(requester=self.user)
+        self.assertEqual(lead.normalized_whatsapp, '201012345678')
+        self.assertEqual(lead.service_groups, ['grooming', 'boarding'])
+
+    def test_repeat_submission_returns_same_open_request(self):
+        first = self.client.post(reverse('provider-service-request-create'), self.payload, format='json')
+        second = self.client.post(reverse('provider-service-request-create'), self.payload, format='json')
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data['request']['public_id'], second.data['request']['public_id'])
+        self.assertEqual(ProviderServiceRequest.objects.count(), 1)
+
+    def test_existing_listing_requires_active_selected_clinic(self):
+        payload = {
+            **self.payload,
+            'request_kind': 'existing_listing',
+            'existing_clinic': None,
+        }
+        response = self.client.post(reverse('provider-service-request-create'), payload, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('existing_clinic', response.data)
+
+    def test_existing_listing_uses_selected_clinic_name(self):
+        clinic = Clinic.objects.create(
+            name='Published Groomer',
+            address='Dokki',
+            phone='01011111111',
+            opening_hours='9-5',
+            services='Grooming',
+        )
+        payload = {
+            key: value
+            for key, value in self.payload.items()
+            if key != 'business_name'
+        }
+        payload.update({
+            'request_kind': 'existing_listing',
+            'existing_clinic': clinic.id,
+        })
+
+        response = self.client.post(
+            reverse('provider-service-request-create'),
+            payload,
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['request']['business_name'], clinic.name)
+
+    def test_feature_flag_blocks_new_requests(self):
+        self.config.provider_onboarding_enabled = False
+        self.config.save(update_fields=['provider_onboarding_enabled'])
+        response = self.client.post(reverse('provider-service-request-create'), self.payload, format='json')
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(ProviderServiceRequest.objects.exists())
+
+    def test_current_request_is_scoped_to_authenticated_user(self):
+        self.client.post(reverse('provider-service-request-create'), self.payload, format='json')
+        other = User.objects.create_user(
+            username='other-provider@example.com',
+            email='other-provider@example.com',
+            password='pass12345',
+        )
+        self.client.force_authenticate(other)
+        response = self.client.get(reverse('provider-service-request-current'))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data['request'])
+
+
+class PlatformAdminProviderServiceRequestApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(
+            username='lead-admin@example.com',
+            email='lead-admin@example.com',
+            password='pass12345',
+        )
+        requester = User.objects.create_user(
+            username='lead@example.com',
+            email='lead@example.com',
+            password='pass12345',
+        )
+        self.lead = ProviderServiceRequest.objects.create(
+            requester=requester,
+            business_name='Boarding House',
+            whatsapp_phone='01099999999',
+            normalized_whatsapp='201099999999',
+            service_groups=['boarding'],
+            address='Cairo',
+            consented_at=timezone.now(),
+        )
+        self.clinic = Clinic.objects.create(
+            name='Boarding House',
+            address='Cairo',
+            phone='01099999999',
+            opening_hours='9-5',
+            services='Boarding',
+        )
+        self.client.force_authenticate(self.admin)
+
+    def test_admin_queue_returns_summary(self):
+        response = self.client.get(reverse('platform-admin-provider-service-requests-list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['summary']['new'], 1)
+        self.assertEqual(response.data['results'][0]['reference'], self.lead.reference)
+
+    def test_conversion_requires_live_requested_service(self):
+        url = reverse(
+            'platform-admin-provider-service-requests-detail',
+            kwargs={'pk': self.lead.pk},
+        )
+        qualified = self.client.patch(url, {'status': 'qualified'}, format='json')
+        self.assertEqual(qualified.status_code, 200)
+        rejected = self.client.patch(
+            url,
+            {'status': 'converted', 'converted_clinic': self.clinic.id},
+            format='json',
+        )
+        self.assertEqual(rejected.status_code, 400)
+
+        ClinicService.objects.create(
+            clinic=self.clinic,
+            name='Hotel stay',
+            category='boarding',
+            applicable_pet_types=['all'],
+            base_price=500,
+            is_active=True,
+        )
+        converted = self.client.patch(
+            url,
+            {'status': 'converted', 'converted_clinic': self.clinic.id},
+            format='json',
+        )
+        self.assertEqual(converted.status_code, 200)
+        self.assertIsNotNone(converted.data['converted_at'])
 
 
 class PlatformAdminClinicCreationTests(TestCase):

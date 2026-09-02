@@ -48,6 +48,12 @@ class User(AbstractUser):
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     is_verified = models.BooleanField(default=False)
     fcm_token = models.TextField(blank=True, null=True, help_text="FCM token للإشعارات")
+    preferred_language = models.CharField(
+        max_length=2,
+        choices=(("ar", "العربية"), ("en", "English")),
+        default="ar",
+        db_index=True,
+    )
     user_type = models.CharField(
         max_length=30, choices=USER_TYPE_CHOICES, default="pet_owner"
     )
@@ -81,6 +87,38 @@ class User(AbstractUser):
     def get_or_create_notification_settings(self):
         settings_obj, _ = UserNotificationSettings.objects.get_or_create(user=self)
         return settings_obj
+
+
+class PushDevice(models.Model):
+    """Per-installation push target, including the language used for async delivery."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="push_devices")
+    device_id = models.CharField(max_length=128)
+    token = models.TextField(unique=True)
+    platform = models.CharField(max_length=20, blank=True, default="")
+    app_type = models.CharField(max_length=40, default="petmatch_mobile")
+    language = models.CharField(
+        max_length=2,
+        choices=(("ar", "العربية"), ("en", "English")),
+        default="ar",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "device_id", "app_type"),
+                name="accounts_push_device_installation_unique",
+            )
+        ]
+        indexes = [
+            models.Index(fields=("user", "is_active"), name="accounts_push_user_active_idx")
+        ]
+
+    def __str__(self):
+        return f"PushDevice(user={self.user_id}, device={self.device_id}, language={self.language})"
 
 
 class UserNotificationSettings(models.Model):
@@ -433,6 +471,8 @@ class MobileAppConfig(models.Model):
     request_center_enabled = models.BooleanField(default=True)
     saved_searches_enabled = models.BooleanField(default=True)
     home_digest_enabled = models.BooleanField(default=True)
+    provider_onboarding_enabled = models.BooleanField(default=False)
+    provider_onboarding_whatsapp = models.CharField(max_length=30, blank=True, default='')
     android_min_supported_version = models.CharField(
         max_length=32, blank=True, default=""
     )
