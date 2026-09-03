@@ -286,6 +286,13 @@ class ProviderServiceRequest(models.Model):
             models.Index(fields=['status', '-created_at'], name='clinic_provider_status_idx'),
             models.Index(fields=['requester', '-created_at'], name='clinic_provider_user_idx'),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['requester'],
+                condition=models.Q(status__in=('new', 'contacted', 'qualified')),
+                name='clinic_provider_one_open_per_user',
+            ),
+        ]
         verbose_name = 'طلب إضافة مقدم خدمة'
         verbose_name_plural = 'طلبات إضافة مقدمي الخدمات'
 

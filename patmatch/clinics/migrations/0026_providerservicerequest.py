@@ -52,4 +52,12 @@ class Migration(migrations.Migration):
             model_name='providerservicerequest',
             index=models.Index(fields=['requester', '-created_at'], name='clinic_provider_user_idx'),
         ),
+        migrations.AddConstraint(
+            model_name='providerservicerequest',
+            constraint=models.UniqueConstraint(
+                condition=models.Q(status__in=('new', 'contacted', 'qualified')),
+                fields=('requester',),
+                name='clinic_provider_one_open_per_user',
+            ),
+        ),
     ]
