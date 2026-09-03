@@ -9,6 +9,7 @@ import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
+from django.core import signing
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.db import connection, transaction
@@ -61,6 +62,8 @@ from clinics.models import StorefrontBooking, ClinicService
 import logging
 import time
 import hashlib
+import os
+import uuid
 from django.db import models
 from django.db.models import F, Value, FloatField, ExpressionWrapper, Count, Avg, Min, Max, IntegerField, Func
 from django.db.models.functions import Coalesce, Cast, Floor
@@ -136,6 +139,8 @@ MAP_LOW_ZOOM_POINT_LIMIT = 200
 
 CHAT_ROOM_DEFAULT_LIMIT = 20
 CHAT_ROOM_MAX_LIMIT = 100
+CHAT_IMAGE_CLEANUP_SALT = 'pets.chat-image-cleanup.v1'
+CHAT_IMAGE_CLEANUP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 BREEDING_REQUEST_SELECT_RELATED_FIELDS = (
     'target_pet__breed',
@@ -2278,59 +2283,7 @@ def chat_room_status(request, chat_id):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        participants = chat_room.get_participants()
-        request_kind = None
-        request_status = None
-        viewer_role = None
-
-        if chat_room.breeding_request:
-            request_kind = 'breeding'
-            request_status = chat_room.breeding_request.status
-            if chat_room.breeding_request.requester_id == request.user.id:
-                viewer_role = 'requester'
-            else:
-                viewer_role = 'owner'
-        elif chat_room.adoption_request:
-            request_kind = 'adoption'
-            request_status = chat_room.adoption_request.status
-            if chat_room.adoption_request.adopter_id == request.user.id:
-                viewer_role = 'requester'
-            else:
-                viewer_role = 'owner'
-        elif chat_room.clinic_patient:
-            request_kind = 'clinic'
-            request_status = 'active' if chat_room.is_active else 'archived'
-            if getattr(chat_room, 'clinic_staff_id', None) == request.user.id:
-                viewer_role = 'clinic_staff'
-            else:
-                viewer_role = 'patient'
-
-        if not chat_room.is_active:
-            chat_status = 'rejected'
-        elif request_kind == 'clinic':
-            chat_status = 'approved'
-        elif request_status == 'pending':
-            chat_status = 'pending'
-        elif request_status == 'rejected':
-            chat_status = 'rejected'
-        elif request_kind == 'adoption' and viewer_role == 'requester' and not getattr(request.user, 'is_verified', False):
-            chat_status = 'approved_pending_kyc'
-        else:
-            chat_status = 'approved'
-
-        return Response({
-            'id': chat_room.id,
-            'firebase_chat_id': chat_room.firebase_chat_id,
-            'is_active': chat_room.is_active,
-            'created_at': chat_room.created_at,
-            'updated_at': chat_room.updated_at,
-            'request_kind': request_kind,
-            'request_status': request_status,
-            'chat_status': chat_status,
-            'viewer_role': viewer_role,
-            'breeding_request_status': request_status,
-            'participants_count': len(participants)
-        })
+        return Response(ChatStatusSerializer(chat_room, context={'request': request}).data)
         
     except ChatRoom.DoesNotExist:
         return Response(
@@ -2527,7 +2480,7 @@ def reactivate_chat_room(request, chat_id):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-@api_view(['POST'])
+@api_view(['POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def upload_chat_image(request):
     """رفع صورة للمحادثة"""
@@ -2557,6 +2510,42 @@ def upload_chat_image(request):
                 {'error': 'غير مسموح لك بإرسال صور في هذه المحادثة'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        if request.method == 'DELETE':
+            cleanup_token = request.data.get('cleanup_token')
+            filename = request.data.get('filename')
+            if not cleanup_token or not filename:
+                return Response(
+                    {'error': 'بيانات حذف الصورة غير مكتملة'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                token_data = signing.loads(
+                    cleanup_token,
+                    salt=CHAT_IMAGE_CLEANUP_SALT,
+                    max_age=CHAT_IMAGE_CLEANUP_MAX_AGE_SECONDS,
+                )
+            except (signing.BadSignature, signing.SignatureExpired):
+                return Response(
+                    {'error': 'رمز حذف الصورة غير صالح أو منتهي'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            saved_name = str(token_data.get('saved_name') or '')
+            token_matches = (
+                token_data.get('user_id') == request.user.id
+                and token_data.get('chat_id') == chat_room.id
+                and saved_name.startswith('chat_images/')
+                and os.path.basename(saved_name) == os.path.basename(str(filename))
+            )
+            if not token_matches:
+                return Response(
+                    {'error': 'غير مسموح بحذف هذه الصورة'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if default_storage.exists(saved_name):
+                default_storage.delete(saved_name)
+            return Response(status=status.HTTP_204_NO_CONTENT)
         
         if 'image' not in request.FILES:
             logger.warning("No image file in request")
@@ -2590,9 +2579,6 @@ def upload_chat_image(request):
             )
         
         # حفظ الصورة عبر default_storage لتدعم التخزين المحلي أو S3
-        import os
-        import uuid
-
         file_extension = os.path.splitext(image_file.name)[1] or '.jpg'
         unique_filename = f"{uuid.uuid4().hex}{file_extension}"
         storage_path = f"chat_images/{unique_filename}"
@@ -2606,7 +2592,15 @@ def upload_chat_image(request):
         return Response({
             'success': True,
             'image_url': image_url,
-            'filename': os.path.basename(saved_name)
+            'filename': os.path.basename(saved_name),
+            'cleanup_token': signing.dumps(
+                {
+                    'user_id': request.user.id,
+                    'chat_id': chat_room.id,
+                    'saved_name': saved_name,
+                },
+                salt=CHAT_IMAGE_CLEANUP_SALT,
+            ),
         })
         
     except Exception as e:

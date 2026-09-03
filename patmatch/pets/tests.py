@@ -14,7 +14,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
-from accounts.models import User, UserNotificationSettings
+from accounts.models import AccountVerification, User, UserNotificationSettings
 from clinics.models import Clinic, ClinicService, StorefrontBooking
 from clinics.signals import claim_invites_when_user_updates
 
@@ -1221,11 +1221,16 @@ class ChatOtherPetDisplayTests(TestCase):
     def _serialize_list(self, user: User):
         request = self.factory.get('/api/pets/chat/rooms/')
         force_authenticate(request, user=user)
+        # Serializers receive an authenticated DRF request in production. When
+        # invoked directly, force_authenticate only records the forced user for
+        # APIView.initialize_request(), so expose it on this raw request too.
+        request.user = user
         return ChatRoomListSerializer(self.chat_room, context={'request': request}).data
 
     def _serialize_context(self, user: User):
         request = self.factory.get(f'/api/pets/chat/rooms/{self.chat_room.id}/context/')
         force_authenticate(request, user=user)
+        request.user = user
         return ChatContextSerializer(self.chat_room, context={'request': request}).data['chat_context']
 
     def test_requester_sees_target_pet_as_other_pet(self):
@@ -1245,6 +1250,14 @@ class ChatOtherPetDisplayTests(TestCase):
         ctx = self._serialize_context(self.user_b)
         self.assertEqual(ctx['pet']['id'], self.pet_a.id)
         self.assertEqual(ctx['pet']['main_image'], self.pet_a.main_image.url)
+
+    def test_chat_list_exposes_other_participant_avatar(self):
+        self.user_b.profile_picture = self._test_image('participant.jpg')
+        self.user_b.save(update_fields=['profile_picture'])
+
+        data = self._serialize_list(self.user_a)
+
+        self.assertTrue(data['other_participant_avatar'].endswith(self.user_b.profile_picture.url))
 
     def test_upload_chat_image_requires_authentication(self):
         request = self.factory.post(
@@ -1292,6 +1305,44 @@ class ChatOtherPetDisplayTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['image_url'], '/media/chat_images/chat_upload.jpg')
+        self.assertTrue(response.data['cleanup_token'])
+
+    @patch('pets.views.default_storage.delete')
+    @patch('pets.views.default_storage.exists', return_value=True)
+    @patch('pets.views.default_storage.url', return_value='/media/chat_images/chat_upload.jpg')
+    @patch('pets.views.default_storage.save', return_value='chat_images/chat_upload.jpg')
+    def test_uploaded_chat_image_can_be_cleaned_up_by_uploader(
+        self,
+        _mock_save,
+        _mock_url,
+        _mock_exists,
+        mock_delete,
+    ):
+        upload_request = self.factory.post(
+            '/api/pets/chat/upload-image/',
+            {
+                'chat_id': self.chat_room.firebase_chat_id,
+                'image': self._test_image('chat_upload.jpg'),
+            },
+            format='multipart',
+        )
+        force_authenticate(upload_request, user=self.user_a)
+        upload_response = upload_chat_image(upload_request)
+
+        delete_request = self.factory.delete(
+            '/api/pets/chat/upload-image/',
+            {
+                'chat_id': self.chat_room.firebase_chat_id,
+                'filename': upload_response.data['filename'],
+                'cleanup_token': upload_response.data['cleanup_token'],
+            },
+            format='json',
+        )
+        force_authenticate(delete_request, user=self.user_a)
+        delete_response = upload_chat_image(delete_request)
+
+        self.assertEqual(delete_response.status_code, 204)
+        mock_delete.assert_called_once_with('chat_images/chat_upload.jpg')
 
     def test_inactive_chat_can_be_fetched_by_participant_via_firebase_id(self):
         self.chat_room.archive()
@@ -1598,6 +1649,48 @@ class RequestCenterSavedSearchDigestTests(TestCase):
         self.assertEqual(breeding_status.data['request_status'], 'pending')
         self.assertEqual(breeding_status.data['chat_status'], 'pending')
         self.assertEqual(breeding_status.data['viewer_role'], 'owner')
+
+    def test_adoption_chat_status_uses_requester_verification_for_owner(self):
+        self.adoption_request.status = 'approved'
+        self.adoption_request.save(update_fields=['status'])
+        chat_room = ChatRoom.objects.create(adoption_request=self.adoption_request)
+        AccountVerification.objects.create(
+            user=self.requester,
+            id_photo=self._image('requester-id.jpg'),
+            status='pending',
+        )
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+
+        self.client.force_authenticate(self.owner)
+        status_response = self.client.get(f'/api/pets/chat/rooms/{chat_room.id}/status/')
+        context_response = self.client.get(f'/api/pets/chat/rooms/{chat_room.id}/context/')
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data['chat_status'], 'approved_kyc_pending_review')
+        self.assertEqual(status_response.data['requester_verification_status'], 'pending')
+        self.assertEqual(
+            context_response.data['chat_context']['adoption_request'][
+                'requester_verification_status'
+            ],
+            'pending',
+        )
+
+    def test_adoption_chat_status_reports_rejected_requester_verification(self):
+        self.adoption_request.status = 'approved'
+        self.adoption_request.save(update_fields=['status'])
+        chat_room = ChatRoom.objects.create(adoption_request=self.adoption_request)
+        AccountVerification.objects.create(
+            user=self.requester,
+            id_photo=self._image('requester-id-rejected.jpg'),
+            status='rejected',
+        )
+
+        self.client.force_authenticate(self.requester)
+        response = self.client.get(f'/api/pets/chat/rooms/{chat_room.id}/status/')
+
+        self.assertEqual(response.data['chat_status'], 'approved_kyc_rejected')
+        self.assertEqual(response.data['requester_verification_status'], 'rejected')
 
     def test_saved_search_crud_and_preview(self):
         self.client.force_authenticate(self.owner)

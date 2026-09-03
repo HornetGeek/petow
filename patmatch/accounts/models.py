@@ -471,6 +471,8 @@ class MobileAppConfig(models.Model):
     request_center_enabled = models.BooleanField(default=True)
     saved_searches_enabled = models.BooleanField(default=True)
     home_digest_enabled = models.BooleanField(default=True)
+    provider_onboarding_enabled = models.BooleanField(default=False)
+    provider_onboarding_whatsapp = models.CharField(max_length=30, blank=True, default='')
     android_min_supported_version = models.CharField(
         max_length=32, blank=True, default=""
     )

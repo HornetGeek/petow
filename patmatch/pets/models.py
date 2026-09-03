@@ -1178,6 +1178,11 @@ class ChatRoom(models.Model):
                         'email': participant.email,
                         'phone': participant.phone,
                         'is_verified': getattr(participant, 'is_verified', False),
+                        'avatar': (
+                            participant.profile_picture.url
+                            if getattr(participant, 'profile_picture', None)
+                            else None
+                        ),
                     }
             return data
         except Exception:

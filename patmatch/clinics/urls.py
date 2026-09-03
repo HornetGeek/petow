@@ -41,6 +41,9 @@ from .views import (
     PublicClinicListView,
     PublicMarketplaceServicesView,
     ClinicMapMarkersView,
+    ProviderServiceRequestCreateView,
+    CurrentProviderServiceRequestView,
+    PlatformAdminProviderServiceRequestViewSet,
 )
 
 router = DefaultRouter()
@@ -48,6 +51,7 @@ router.register(r'appointments', ClinicAppointmentViewSet, basename='clinic-appo
 router.register(r'sessions', VeterinarySessionViewSet, basename='clinic-sessions')
 router.register(r'services', ClinicServiceViewSet, basename='clinic-services')
 router.register(r'admin/services', PlatformAdminClinicServiceViewSet, basename='platform-admin-services')
+router.register(r'admin/provider-service-requests', PlatformAdminProviderServiceRequestViewSet, basename='platform-admin-provider-service-requests')
 router.register(r'products', ClinicProductViewSet, basename='clinic-products')
 router.register(r'storefront-bookings', ClinicStorefrontBookingViewSet, basename='clinic-storefront-bookings')
 router.register(r'service-tiers', ServicePricingTierViewSet, basename='service-tiers')
@@ -72,6 +76,8 @@ urlpatterns = [
     path('my/appointments/', OwnerStorefrontBookingListView.as_view(), name='clinic-owner-appointments'),
     path('my/pets/<int:pet_id>/medical-records/', OwnerPetMedicalRecordsView.as_view(), name='clinic-owner-pet-medical-records'),
     path('marketplace/services/', PublicMarketplaceServicesView.as_view(), name='clinic-marketplace-services'),
+    path('provider-service-requests/', ProviderServiceRequestCreateView.as_view(), name='provider-service-request-create'),
+    path('provider-service-requests/current/', CurrentProviderServiceRequestView.as_view(), name='provider-service-request-current'),
     path('clinic/', PublicClinicListView.as_view(), name='clinic-list-public'),
     path('map/markers/', ClinicMapMarkersView.as_view(), name='clinic-map-markers'),
     path('veterinarians/<int:pk>/', VeterinariansView.as_view(), name='clinic-veterinarian-detail'),

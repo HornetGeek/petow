@@ -1139,6 +1139,8 @@ def get_app_config(request):
                 "request_center_enabled": config.request_center_enabled,
                 "saved_searches_enabled": config.saved_searches_enabled,
                 "home_digest_enabled": config.home_digest_enabled,
+                "provider_onboarding_enabled": config.provider_onboarding_enabled,
+                "provider_onboarding_whatsapp": config.provider_onboarding_whatsapp,
                 "android_min_supported_version": config.android_min_supported_version,
                 "ios_min_supported_version": config.ios_min_supported_version,
                 "android_recommended_version": config.android_recommended_version,
