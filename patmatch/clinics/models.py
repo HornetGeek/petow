@@ -184,7 +184,8 @@ class ClinicService(models.Model):
 
     def __str__(self):
         return f"{self.name} - {self.clinic.name}"
-    
+
+
     @property
     def price_range(self):
         """Calculate price range if tiered pricing exists"""
@@ -211,6 +212,96 @@ class ClinicService(models.Model):
         
         type_map = dict(self.PET_TYPE_CHOICES)
         return ', '.join([type_map.get(pt, pt) for pt in self.applicable_pet_types])
+
+
+class ProviderServiceRequest(models.Model):
+    """Moderated marketplace-onboarding lead submitted from the mobile app."""
+
+    REQUEST_NEW_BUSINESS = 'new_business'
+    REQUEST_EXISTING_LISTING = 'existing_listing'
+    REQUEST_KIND_CHOICES = [
+        (REQUEST_NEW_BUSINESS, 'نشاط جديد'),
+        (REQUEST_EXISTING_LISTING, 'نشاط موجود على Petow'),
+    ]
+
+    STATUS_NEW = 'new'
+    STATUS_CONTACTED = 'contacted'
+    STATUS_QUALIFIED = 'qualified'
+    STATUS_CONVERTED = 'converted'
+    STATUS_CLOSED = 'closed'
+    STATUS_CHOICES = [
+        (STATUS_NEW, 'جديد'),
+        (STATUS_CONTACTED, 'تم التواصل'),
+        (STATUS_QUALIFIED, 'مؤهل'),
+        (STATUS_CONVERTED, 'تمت الإضافة'),
+        (STATUS_CLOSED, 'مغلق'),
+    ]
+    OPEN_STATUSES = (STATUS_NEW, STATUS_CONTACTED, STATUS_QUALIFIED)
+
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='provider_service_requests',
+    )
+    request_kind = models.CharField(
+        max_length=24,
+        choices=REQUEST_KIND_CHOICES,
+        default=REQUEST_NEW_BUSINESS,
+    )
+    existing_clinic = models.ForeignKey(
+        Clinic,
+        on_delete=models.SET_NULL,
+        related_name='provider_service_requests_as_existing',
+        blank=True,
+        null=True,
+    )
+    business_name = models.CharField(max_length=200)
+    whatsapp_phone = models.CharField(max_length=30)
+    normalized_whatsapp = models.CharField(max_length=20, db_index=True)
+    service_groups = models.JSONField(default=list)
+    address = models.CharField(max_length=300)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, blank=True, null=True)
+    consented_at = models.DateTimeField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_NEW)
+    close_reason = models.CharField(max_length=80, blank=True, default='')
+    internal_notes = models.TextField(blank=True, default='')
+    possible_duplicate = models.BooleanField(default=False)
+    converted_clinic = models.ForeignKey(
+        Clinic,
+        on_delete=models.SET_NULL,
+        related_name='converted_provider_service_requests',
+        blank=True,
+        null=True,
+    )
+    contacted_at = models.DateTimeField(blank=True, null=True)
+    converted_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', '-created_at'], name='clinic_provider_status_idx'),
+            models.Index(fields=['requester', '-created_at'], name='clinic_provider_user_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['requester'],
+                condition=models.Q(status__in=('new', 'contacted', 'qualified')),
+                name='clinic_provider_one_open_per_user',
+            ),
+        ]
+        verbose_name = 'طلب إضافة مقدم خدمة'
+        verbose_name_plural = 'طلبات إضافة مقدمي الخدمات'
+
+    @property
+    def reference(self):
+        return f"SRV-{str(self.public_id).split('-')[0].upper()}"
+
+    def __str__(self):
+        return f"{self.reference} - {self.business_name}"
 
 
 class ClinicProduct(models.Model):

@@ -17,6 +17,7 @@ from .models import (
     ClinicInvite,
     VeterinaryAppointment,
     VeterinaryCertificate,
+    ProviderServiceRequest,
 )
 
 
@@ -62,6 +63,24 @@ class ClinicServiceAdmin(admin.ModelAdmin):
         ('Visibility', {
             'fields': ('is_active', 'is_featured', 'display_order')
         }),
+    )
+
+
+@admin.register(ProviderServiceRequest)
+class ProviderServiceRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        'reference', 'business_name', 'requester', 'request_kind', 'status',
+        'possible_duplicate', 'created_at',
+    )
+    list_filter = ('status', 'request_kind', 'possible_duplicate', 'created_at')
+    search_fields = (
+        'business_name', 'whatsapp_phone', 'normalized_whatsapp',
+        'requester__email', 'requester__first_name', 'requester__last_name',
+    )
+    readonly_fields = (
+        'public_id', 'requester', 'normalized_whatsapp', 'service_groups',
+        'consented_at', 'possible_duplicate', 'contacted_at', 'converted_at',
+        'created_at', 'updated_at',
     )
 
 

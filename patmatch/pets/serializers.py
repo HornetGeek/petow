@@ -26,8 +26,52 @@ from .models import (
 )
 from .notifications import get_notification_category, get_notification_priority
 from .push_targets import build_mobile_deep_link, build_web_url
-from accounts.models import UserNotificationSettings
+from accounts.models import AccountVerification, UserNotificationSettings
 from accounts.google_maps_service import GoogleMapsService, GoogleMapsServiceError
+
+
+def _chat_requester_verification_status(chat_room):
+    """Return the adoption requester's KYC state without using the viewer's account."""
+    adoption_request = getattr(chat_room, 'adoption_request', None)
+    requester = getattr(adoption_request, 'adopter', None)
+    if not requester:
+        return None
+    if getattr(requester, 'is_verified', False):
+        return 'approved'
+    latest = (
+        AccountVerification.objects.filter(user_id=requester.id)
+        .order_by('-created_at', '-id')
+        .values_list('status', flat=True)
+        .first()
+    )
+    return latest or 'not_submitted'
+
+
+def _chat_status(chat_room):
+    """Canonical request/chat phase shared by context and status serializers."""
+    if not chat_room.is_active:
+        # Kept backward-compatible for older clients. New clients render
+        # inactive rooms as archived based on the separate is_active field.
+        return 'rejected'
+    if chat_room.clinic_patient:
+        return 'approved'
+
+    request_obj = chat_room.adoption_request or chat_room.breeding_request
+    request_status = getattr(request_obj, 'status', None)
+    if request_status == 'pending':
+        return 'pending'
+    if request_status == 'rejected':
+        return 'rejected'
+    if chat_room.adoption_request and request_status == 'approved':
+        verification_status = _chat_requester_verification_status(chat_room)
+        if verification_status == 'approved':
+            return 'approved'
+        if verification_status == 'pending':
+            return 'approved_kyc_pending_review'
+        if verification_status == 'rejected':
+            return 'approved_kyc_rejected'
+        return 'approved_pending_kyc'
+    return 'approved'
 
 def reverse_geocode_address(lat: float, lng: float) -> str:
     fallback = f"{lat:.4f}, {lng:.4f}"
@@ -1132,6 +1176,10 @@ class ChatRoomSerializer(serializers.ModelSerializer):
                     'email': other_user.email,
                     'phone': other_user.phone,
                     'is_verified': getattr(other_user, 'is_verified', False),
+                    'avatar': _absolute_file_url(
+                        getattr(other_user, 'profile_picture', None),
+                        request,
+                    ),
                 }
 
         if obj.clinic_patient and obj.clinic_patient.clinic:
@@ -1178,6 +1226,7 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
     """سيريلايزر مبسط لقائمة المحادثات"""
     other_participant = serializers.SerializerMethodField()
     other_participant_is_verified = serializers.SerializerMethodField()
+    other_participant_avatar = serializers.SerializerMethodField()
     pet_name = serializers.SerializerMethodField()
     pet_image = serializers.SerializerMethodField()
     
@@ -1185,7 +1234,8 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
         model = ChatRoom
         fields = [
             'id', 'firebase_chat_id', 'created_at', 'updated_at',
-            'other_participant', 'other_participant_is_verified', 'pet_name', 'pet_image'
+            'other_participant', 'other_participant_is_verified',
+            'other_participant_avatar', 'pet_name', 'pet_image'
         ]
     
     def get_other_participant(self, obj):
@@ -1224,6 +1274,20 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return False
+
+    def get_other_participant_avatar(self, obj):
+        try:
+            request = self.context.get('request')
+            if request and request.user.is_authenticated:
+                other_user = obj.get_other_participant(request.user)
+                if other_user:
+                    return _absolute_file_url(
+                        getattr(other_user, 'profile_picture', None),
+                        request,
+                    )
+        except Exception:
+            pass
+        return None
     
     def get_pet_name(self, obj):
         """اسم الحيوان او المريض"""
@@ -1270,6 +1334,12 @@ class ChatContextSerializer(serializers.ModelSerializer):
             return ctx
 
         ctx['viewer_role'] = self.get_viewer_role(obj, user)
+
+        if obj.adoption_request and ctx.get('adoption_request') is not None:
+            ctx['adoption_request']['requester_verification_status'] = (
+                _chat_requester_verification_status(obj)
+            )
+        ctx['chat_status'] = _chat_status(obj)
 
         # For breeding chats, override the pet shown in the context to be the other user's pet.
         if obj.breeding_request:
@@ -1328,13 +1398,15 @@ class ChatStatusSerializer(serializers.ModelSerializer):
     breeding_request_status = serializers.SerializerMethodField()
     pet_name = serializers.SerializerMethodField()
     other_participant_name = serializers.SerializerMethodField()
+    requester_verification_status = serializers.SerializerMethodField()
     
     class Meta:
         model = ChatRoom
         fields = [
             'id', 'firebase_chat_id', 'is_active', 'created_at', 'updated_at',
             'participants_count', 'request_kind', 'request_status', 'chat_status',
-            'viewer_role', 'breeding_request_status', 'pet_name', 'other_participant_name'
+            'viewer_role', 'breeding_request_status', 'pet_name', 'other_participant_name',
+            'requester_verification_status'
         ]
     
     def get_participants_count(self, obj):
@@ -1375,22 +1447,10 @@ class ChatStatusSerializer(serializers.ModelSerializer):
         return ChatContextSerializer().get_viewer_role(obj, user)
 
     def get_chat_status(self, obj):
-        request_kind = self.get_request_kind(obj)
-        request_status = self.get_request_status(obj)
-        viewer_role = self.get_viewer_role(obj)
-        request = self.context.get('request')
-        user = getattr(request, 'user', None) if request else None
-        if not obj.is_active:
-            return 'rejected'
-        if request_kind == 'clinic':
-            return 'approved'
-        if request_status == 'pending':
-            return 'pending'
-        if request_status == 'rejected':
-            return 'rejected'
-        if request_kind == 'adoption' and viewer_role == 'requester' and not getattr(user, 'is_verified', False):
-            return 'approved_pending_kyc'
-        return 'approved'
+        return _chat_status(obj)
+
+    def get_requester_verification_status(self, obj):
+        return _chat_requester_verification_status(obj)
     
     def get_pet_name(self, obj):
         """اسم الحيوان أو المريض"""

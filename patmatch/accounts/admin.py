@@ -155,6 +155,7 @@ class MobileAppConfigAdmin(admin.ModelAdmin):
         'request_center_enabled',
         'saved_searches_enabled',
         'home_digest_enabled',
+        'provider_onboarding_enabled',
         'android_min_supported_version',
         'ios_min_supported_version',
         'updated_at',
@@ -172,6 +173,8 @@ class MobileAppConfigAdmin(admin.ModelAdmin):
                 'request_center_enabled',
                 'saved_searches_enabled',
                 'home_digest_enabled',
+                'provider_onboarding_enabled',
+                'provider_onboarding_whatsapp',
             ),
         }),
         ('Force Update', {
