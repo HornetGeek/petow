@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('accounts', '0020_mobileappconfig_engagement_flags'),
+        ('accounts', '0021_user_language_push_device'),
     ]
 
     operations = [

@@ -12,7 +12,7 @@ from django.contrib.gis.db.models.functions import Distance, Transform
 from django.contrib.gis.geos import Point, Polygon
 from django.db.models import Count, Q, Sum, Avg, Min, Max, FloatField, IntegerField, F, Value, Func, ExpressionWrapper, Exists, OuterRef
 from django.db.models.functions import Cast, Floor
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -1173,6 +1173,15 @@ def _provider_request_handoff(provider_request, config):
     }
 
 
+def _active_provider_request(user):
+    return (
+        ProviderServiceRequest.objects
+        .filter(requester=user, status__in=ProviderServiceRequest.OPEN_STATUSES)
+        .select_related('existing_clinic', 'converted_clinic')
+        .first()
+    )
+
+
 class ProviderServiceRequestCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1189,12 +1198,7 @@ class ProviderServiceRequestCreateView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        active_request = (
-            ProviderServiceRequest.objects
-            .filter(requester=request.user, status__in=ProviderServiceRequest.OPEN_STATUSES)
-            .select_related('existing_clinic', 'converted_clinic')
-            .first()
-        )
+        active_request = _active_provider_request(request.user)
         if active_request:
             return Response(_provider_request_handoff(active_request, config))
 
@@ -1203,7 +1207,15 @@ class ProviderServiceRequestCreateView(APIView):
             context={'request': request},
         )
         serializer.is_valid(raise_exception=True)
-        provider_request = serializer.save()
+        try:
+            with transaction.atomic():
+                provider_request = serializer.save()
+        except IntegrityError:
+            # Another request may have committed after the initial lookup.
+            active_request = _active_provider_request(request.user)
+            if not active_request:
+                raise
+            return Response(_provider_request_handoff(active_request, config))
 
         duplicate_query = Q(
             normalized_whatsapp=provider_request.normalized_whatsapp,

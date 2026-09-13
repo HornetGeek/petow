@@ -25,6 +25,7 @@ from .models import (
 from .email_notifications import send_welcome_email, send_password_reset_email
 from .google_maps_service import GoogleMapsService, GoogleMapsServiceError
 from django.conf import settings
+from django.db import transaction
 import requests
 import logging
 import hashlib
@@ -39,11 +40,11 @@ logger = logging.getLogger(__name__)
 
 
 def _error(code, message, http_status=status.HTTP_400_BAD_REQUEST):
-    return Response({"code": code, "error": _(message)}, status=http_status)
+    return Response({"code": code, "error": message}, status=http_status)
 
 
 def _message(code, message, **extra):
-    return Response({"code": code, "message": _(message), **extra})
+    return Response({"code": code, "message": message, **extra})
 
 
 class GoogleMapsAutocompleteThrottle(UserRateThrottle):
@@ -307,7 +308,7 @@ class UserProfileView(generics.RetrieveUpdateDestroyAPIView):
         user.email = f"deleted_{timestamp}_{user.email}"
         user.save()
 
-        return _message("account_deleted", "Your account was deleted successfully.")
+        return _message("account_deleted", _("Your account was deleted successfully."))
 
 
 @api_view(["POST"])
@@ -318,14 +319,14 @@ def login(request):
     password = request.data.get("password")
 
     if not email or not password:
-        return _error("credentials_required", "Email and password are required.")
+        return _error("credentials_required", _("Email and password are required."))
 
     user = authenticate(username=email, password=password)
     if user:
         token, created = Token.objects.get_or_create(user=user)
         return Response({"key": token.key, "user": UserSerializer(user).data})
 
-    return _error("invalid_credentials", "The email or password is incorrect.")
+    return _error("invalid_credentials", _("The email or password is incorrect."))
 
 
 @api_view(["POST"])
@@ -358,7 +359,7 @@ def register(request):
 
         except Exception as e:
             logger.error(f"Error creating user: {str(e)}")
-            return _error("account_creation_failed", "Could not create the account.", status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return _error("account_creation_failed", _("Could not create the account."), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response(
         {
@@ -381,7 +382,7 @@ def google_login(request):
         preferred_language = "ar"
 
     if not id_token_str:
-        return _error("google_token_required", "Google token is required.")
+        return _error("google_token_required", _("Google token is required."))
 
     try:
         idinfo = google_id_token.verify_oauth2_token(
@@ -390,7 +391,7 @@ def google_login(request):
         )
     except Exception as exc:
         logger.error("Google token verification failed: %s", exc)
-        return _error("google_token_invalid", "The Google token is invalid or expired.")
+        return _error("google_token_invalid", _("The Google token is invalid or expired."))
 
     google_id = idinfo.get("sub")
     email = idinfo.get("email", "")
@@ -399,7 +400,7 @@ def google_login(request):
     picture = idinfo.get("picture", "")
 
     if not email:
-        return _error("google_email_missing", "The Google account does not provide an email address.")
+        return _error("google_email_missing", _("The Google account does not provide an email address."))
 
     is_new_user = False
 
@@ -459,9 +460,9 @@ def logout(request):
     """تسجيل الخروج"""
     try:
         request.user.auth_token.delete()
-        return _message("logout_succeeded", "You were logged out successfully.")
+        return _message("logout_succeeded", _("You were logged out successfully."))
     except:
-        return _error("logout_failed", "Could not log out.")
+        return _error("logout_failed", _("Could not log out."))
 
 
 @api_view(["POST"])
@@ -700,22 +701,27 @@ def update_notification_token(request):
 
     try:
         user = request.user
-        user.fcm_token = fcm_token
-        user.preferred_language = language
-        user.save(update_fields=["fcm_token", "preferred_language", "updated_at"])
+        with transaction.atomic():
+            user.fcm_token = fcm_token
+            user.preferred_language = language
+            user.save(update_fields=["fcm_token", "preferred_language", "updated_at"])
 
-        PushDevice.objects.filter(token=fcm_token).exclude(user=user, device_id=device_id).delete()
-        PushDevice.objects.update_or_create(
-            user=user,
-            device_id=device_id,
-            app_type=app_type,
-            defaults={
-                "token": fcm_token,
-                "platform": (request.data.get("platform") or "").strip(),
-                "language": language,
-                "is_active": True,
-            },
-        )
+            PushDevice.objects.filter(token=fcm_token).exclude(
+                user=user,
+                device_id=device_id,
+                app_type=app_type,
+            ).delete()
+            PushDevice.objects.update_or_create(
+                user=user,
+                device_id=device_id,
+                app_type=app_type,
+                defaults={
+                    "token": fcm_token,
+                    "platform": (request.data.get("platform") or "").strip(),
+                    "language": language,
+                    "is_active": True,
+                },
+            )
 
         return Response({"success": True, "code": "push_device_registered", "message": _("Notification device updated successfully.")})
     except Exception as e:
@@ -733,7 +739,7 @@ def send_password_reset_otp(request):
     email = request.data.get("email")
 
     if not email:
-        return _error("email_required", "Email is required.")
+        return _error("email_required", _("Email is required."))
 
     generic_response = {
         "success": True,
@@ -775,7 +781,7 @@ def verify_password_reset_otp(request):
     otp_code = request.data.get("otp_code")
 
     if not email or not otp_code:
-        return _error("email_and_code_required", "Email and verification code are required.")
+        return _error("email_and_code_required", _("Email and verification code are required."))
 
     try:
         user = User.objects.get(email=email)
@@ -786,10 +792,10 @@ def verify_password_reset_otp(request):
         ).first()
 
         if not password_reset_otp:
-            return _error("verification_code_invalid", "The verification code is incorrect.")
+            return _error("verification_code_invalid", _("The verification code is incorrect."))
 
         if password_reset_otp.is_expired():
-            return _error("verification_code_expired", "The verification code has expired.")
+            return _error("verification_code_expired", _("The verification code has expired."))
 
         # تمييز الكود كمستخدم (لكن لا نحذفه حتى يتم تغيير كلمة المرور)
         password_reset_otp.is_used = True
@@ -805,11 +811,11 @@ def verify_password_reset_otp(request):
         )
 
     except User.DoesNotExist:
-        return _error("email_not_found", "The email address was not found.")
+        return _error("email_not_found", _("The email address was not found."))
 
     except Exception as e:
         logger.error(f"Error in verify_password_reset_otp: {str(e)}")
-        return _error("verification_failed", "Could not verify the code.", status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _error("verification_failed", _("Could not verify the code."), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["POST"])
@@ -821,13 +827,13 @@ def reset_password_confirm(request):
     confirm_password = request.data.get("confirm_password")
 
     if not reset_token or not new_password or not confirm_password:
-        return _error("required_fields_missing", "All fields are required.")
+        return _error("required_fields_missing", _("All fields are required."))
 
     if new_password != confirm_password:
-        return _error("passwords_do_not_match", "Passwords do not match.")
+        return _error("passwords_do_not_match", _("Passwords do not match."))
 
     if len(new_password) < 8:
-        return _error("password_too_short", "Password must contain at least 8 characters.")
+        return _error("password_too_short", _("Password must contain at least 8 characters."))
 
     try:
         # البحث عن الـ OTP token
@@ -838,7 +844,7 @@ def reset_password_confirm(request):
 
         # التأكد أن الكود لم ينته
         if password_reset_otp.is_expired():
-            return _error("password_reset_expired", "The password reset session has expired.")
+            return _error("password_reset_expired", _("The password reset session has expired."))
 
         # تغيير كلمة المرور
         user = password_reset_otp.user
@@ -853,11 +859,11 @@ def reset_password_confirm(request):
         return Response({"success": True, "code": "password_changed", "message": _("Password changed successfully.")})
 
     except PasswordResetOTP.DoesNotExist:
-        return _error("password_reset_token_invalid", "The password reset token is invalid.")
+        return _error("password_reset_token_invalid", _("The password reset token is invalid."))
 
     except Exception as e:
         logger.error(f"Error in reset_password_confirm: {str(e)}")
-        return _error("password_change_failed", "Could not change the password.", status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return _error("password_change_failed", _("Could not change the password."), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["POST"])

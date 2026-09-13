@@ -19,7 +19,7 @@ def backfill_push_devices(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('accounts', '0021_mobileappconfig_provider_onboarding')]
+    dependencies = [('accounts', '0020_mobileappconfig_engagement_flags')]
 
     operations = [
         migrations.AddField(
