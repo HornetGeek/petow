@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -7,37 +7,47 @@ import {
   StyleSheet,
   ActivityIndicator,
   SafeAreaView,
-  KeyboardAvoidingView,
   Platform,
-  ScrollView,
   TouchableWithoutFeedback,
   Keyboard,
   Image,
   Linking,
 } from 'react-native';
+import PhoneInput from 'react-native-phone-number-input';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { useAuth } from '../../contexts/AuthContext';
+import AppIcon, { IconSize } from '../../components/icons/AppIcon';
 
 const PRIVACY_POLICY_URL = 'https://petow.app/privacy-policy';
 const TERMS_URL = 'https://petow.app/terms';
 
+const GOOGLE_WEB_CLIENT_ID = '171353883247-d3qfgch4tkiihlc212bkpbm62adllfr3.apps.googleusercontent.com';
+const GOOGLE_IOS_CLIENT_ID = '171353883247-0u0t3567pgbb48ijjmif5is0s62h5os4.apps.googleusercontent.com';
+
 interface RegisterScreenProps {
   onNavigateToLogin: () => void;
+  onGoogleNewUser?: (googlePicture?: string) => void;
 }
 
-const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) => {
+const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin, onGoogleNewUser }) => {
+  const phoneInputRef = useRef<PhoneInput>(null);
   const [formData, setFormData] = useState({
     email: '',
     password: '',
     confirmPassword: '',
     firstName: '',
     lastName: '',
+    phone: '',
   });
+  const [phoneValue, setPhoneValue] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [acceptedTerms, setAcceptedTerms] = useState(false);
-  const { register } = useAuth();
+  const { register, googleLogin } = useAuth();
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -55,15 +65,22 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
   };
 
   const handleRegister = async () => {
-    const { email, password, confirmPassword, firstName, lastName } = formData;
+    const { email, password, confirmPassword, firstName, lastName, phone } = formData;
 
-    if (!email.trim() || !password || !confirmPassword || !firstName.trim() || !lastName.trim()) {
+    if (
+      !email.trim() ||
+      !password ||
+      !confirmPassword ||
+      !firstName.trim() ||
+      !lastName.trim() ||
+      !phone.trim()
+    ) {
       setErrorMessage('برجاء استكمال جميع الحقول');
       return;
     }
 
-    if (password.length < 6) {
-      setErrorMessage('كلمة المرور يجب أن تكون 6 أحرف على الأقل');
+    if (password.length < 4) {
+      setErrorMessage('كلمة المرور يجب أن تكون 4 أحرف على الأقل');
       return;
     }
 
@@ -86,6 +103,7 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
         password2: confirmPassword,
         first_name: firstName.trim(),
         last_name: lastName.trim(),
+        phone: phone.trim(),
       });
 
       if (!result.success) {
@@ -98,17 +116,60 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
     }
   };
 
+  const onGoogleButtonPress = async () => {
+    setErrorMessage('');
+    setGoogleLoading(true);
+    try {
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const signInResponse = await GoogleSignin.signIn();
+
+      let idToken: string | null = null;
+      if (signInResponse.type === 'success' && signInResponse.data) {
+        idToken = signInResponse.data.idToken ?? null;
+      } else if (signInResponse.type === 'cancelled') {
+        setGoogleLoading(false);
+        return;
+      }
+
+      if (!idToken) {
+        setErrorMessage('فشل الحصول على رمز الدخول من Google');
+        setGoogleLoading(false);
+        return;
+      }
+
+      const result = await googleLogin(idToken);
+
+      if (result.success) {
+        if (result.isNewUser && onGoogleNewUser) {
+          onGoogleNewUser(result.googlePicture);
+        }
+      } else {
+        setErrorMessage(result.error || 'فشل التسجيل باستخدام Google');
+      }
+    } catch (error: any) {
+      console.error('Google Sign-In Error:', error);
+      if (error.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+        setErrorMessage('خدمات Google Play غير متوفرة');
+      } else {
+        setErrorMessage('حدث خطأ أثناء التسجيل باستخدام Google');
+      }
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <ScrollView
-            contentContainerStyle={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
-          >
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <KeyboardAwareScrollView
+          enableOnAndroid
+          extraScrollHeight={Platform.select({ ios: 60, android: 30 })}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          alwaysBounceVertical={false}
+          overScrollMode="never"
+          showsVerticalScrollIndicator={false}
+        >
             <View style={styles.brandContainer}>
               <Image
                 source={require('../../../assets/icon.png')}
@@ -162,6 +223,34 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
               </View>
 
               <View style={styles.fieldGroup}>
+                <Text style={styles.inputLabel}>رقم الهاتف</Text>
+                <PhoneInput
+                  ref={phoneInputRef}
+                  defaultCode="EG"
+                  layout="first"
+                  value={phoneValue}
+                  onChangeText={(value) => setPhoneValue(value)}
+                  onChangeFormattedText={(text) => {
+                    const sanitized = text ? text.replace(/\s+/g, '') : '';
+                    handleInputChange('phone', sanitized);
+                  }}
+                  countryPickerProps={{
+                    withFilter: true,
+                  }}
+                  textInputProps={{
+                    keyboardType: 'phone-pad',
+                    returnKeyType: 'next',
+                    placeholder: '10 1234 5678',
+                    placeholderTextColor: '#95a5a6',
+                  }}
+                  containerStyle={styles.phoneInputContainer}
+                  textContainerStyle={styles.phoneTextContainer}
+                  textInputStyle={styles.phoneTextInput}
+                  codeTextStyle={styles.phoneCodeText}
+                />
+              </View>
+
+              <View style={styles.fieldGroup}>
                 <Text style={styles.inputLabel}>كلمة المرور</Text>
                 <View style={styles.passwordRow}>
                   <TextInput
@@ -179,9 +268,12 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     accessibilityLabel={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
                   >
-                    <Text style={styles.togglePasswordText}>
-                      {showPassword ? '🙈' : '👁'}
-                    </Text>
+                    <AppIcon
+                      name={showPassword ? 'eye-off' : 'eye'}
+                      size={IconSize.md}
+                      color="#64748B"
+                      accessibilityLabel={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                    />
                   </TouchableOpacity>
                 </View>
               </View>
@@ -204,9 +296,12 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     accessibilityLabel={showConfirmPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
                   >
-                    <Text style={styles.togglePasswordText}>
-                      {showConfirmPassword ? '🙈' : '👁'}
-                    </Text>
+                    <AppIcon
+                      name={showConfirmPassword ? 'eye-off' : 'eye'}
+                      size={IconSize.md}
+                      color="#64748B"
+                      accessibilityLabel={showConfirmPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                    />
                   </TouchableOpacity>
                 </View>
               </View>
@@ -215,7 +310,7 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
                 <Text style={styles.errorText}>{errorMessage}</Text>
               ) : (
                 <Text style={styles.helperText}>
-                  كلمة المرور يجب أن تتكون من 6 أحرف على الأقل
+                  كلمة المرور يجب أن تتكون من 4 أحرف على الأقل
                 </Text>
               )}
 
@@ -226,9 +321,14 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
                 accessibilityState={{ checked: acceptedTerms }}
                 accessibilityLabel="أوافق على سياسة الخصوصية والشروط والأحكام"
               >
-                <Text style={[styles.checkbox, acceptedTerms && styles.checkboxChecked]}>
-                  {acceptedTerms ? '☑' : '☐'}
-                </Text>
+                <View style={styles.checkboxIconWrapper}>
+                  <AppIcon
+                    name={acceptedTerms ? 'shield-check' : 'circle'}
+                    size={IconSize.sm}
+                    color={acceptedTerms ? '#14B8A6' : '#5f6c7b'}
+                    accessibilityLabel={acceptedTerms ? 'تم القبول' : 'غير مقبول'}
+                  />
+                </View>
                 <Text style={styles.consentText}>
                   أوافق على{' '}
                   <Text style={styles.linkText} onPress={() => openExternalLink(PRIVACY_POLICY_URL)}>
@@ -252,6 +352,30 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
                   <Text style={styles.primaryButtonText}>إنشاء الحساب</Text>
                 )}
               </TouchableOpacity>
+
+              <View style={styles.dividerContainer}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>أو</Text>
+                <View style={styles.dividerLine} />
+              </View>
+
+              <TouchableOpacity
+                style={[styles.googleButton, googleLoading && styles.buttonDisabled]}
+                onPress={onGoogleButtonPress}
+                disabled={googleLoading}
+                activeOpacity={0.7}
+              >
+                {googleLoading ? (
+                  <ActivityIndicator color="#444" />
+                ) : (
+                  <>
+                    <View style={styles.googleIconWrap}>
+                      <Text style={styles.googleIconG}>G</Text>
+                    </View>
+                    <Text style={styles.googleButtonText}>التسجيل باستخدام Google</Text>
+                  </>
+                )}
+              </TouchableOpacity>
             </View>
 
             <View style={styles.termsContainer}>
@@ -266,9 +390,8 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({ onNavigateToLogin }) =>
                 <Text style={styles.switchAuthHighlight}>تسجيل الدخول</Text>
               </Text>
             </TouchableOpacity>
-          </ScrollView>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
+        </KeyboardAwareScrollView>
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 };
@@ -277,9 +400,6 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#f4f7fb',
-  },
-  flex: {
-    flex: 1,
   },
   scrollContent: {
     flexGrow: 1,
@@ -321,7 +441,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   row: {
-    flexDirection: 'row',
+    flexDirection: 'row-reverse',
     justifyContent: 'space-between',
   },
   fieldGroup: {
@@ -346,6 +466,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e1e8f0',
   },
+  phoneInputContainer: {
+    width: '100%',
+    backgroundColor: '#f7f9fc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e1e8f0',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+  },
+  phoneTextContainer: {
+    backgroundColor: 'transparent',
+    borderRadius: 12,
+    paddingVertical: 0,
+  },
+  phoneTextInput: {
+    fontSize: 16,
+    color: '#1c344d',
+    paddingVertical: 12,
+  },
+  phoneCodeText: {
+    fontSize: 16,
+    color: '#1c344d',
+  },
   passwordRow: {
     position: 'relative',
   },
@@ -358,10 +501,6 @@ const styles = StyleSheet.create({
     right: 12,
     top: 12,
     padding: 4,
-  },
-  togglePasswordText: {
-    fontSize: 18,
-    color: '#0a84ff',
   },
   errorText: {
     color: '#e74c3c',
@@ -378,13 +517,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 14,
   },
-  checkbox: {
-    fontSize: 18,
+  checkboxIconWrapper: {
     marginRight: 10,
-    color: '#5f6c7b',
-  },
-  checkboxChecked: {
-    color: '#02B7B4',
   },
   consentText: {
     flex: 1,
@@ -411,6 +545,50 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.6,
+  },
+  dividerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 14,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#e1e8f0',
+  },
+  dividerText: {
+    marginHorizontal: 12,
+    color: '#94a3b8',
+    fontSize: 14,
+  },
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e1e8f0',
+    borderRadius: 14,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  googleIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#f1f3f4',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleIconG: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#4285F4',
+  },
+  googleButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#3c4043',
   },
   termsContainer: {
     marginTop: 20,

@@ -16,7 +16,9 @@ import { apiService, Breed, Pet } from '../../services/api';
 import MapLocationPicker from '../../components/MapLocationPicker';
 import ImagePicker from '../../components/ImagePicker';
 import DocumentPickerComponent from '../../components/DocumentPicker';
-import DocumentPicker, { DocumentPickerResponse } from 'react-native-document-picker';
+import { type DocumentPickerResponse } from '@react-native-documents/picker';
+import AppIcon from '../../components/icons/AppIcon';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface EditPetScreenProps {
   petId: number;
@@ -34,6 +36,7 @@ type EditPetFormState = {
   location: string;
   is_free: boolean;
   status: string;
+  available_for_adoption: boolean;
   
   // Breeding history
   breeding_history: string;
@@ -59,6 +62,7 @@ const INITIAL_FORM_STATE: EditPetFormState = {
   location: '',
   is_free: true,
   status: 'available',
+  available_for_adoption: false,
   breeding_history: '',
   last_breeding_date: '',
   number_of_offspring: '0',
@@ -68,14 +72,22 @@ const INITIAL_FORM_STATE: EditPetFormState = {
   hosting_preference: 'flexible',
 };
 
-const STATUS_OPTIONS = [
-  { value: 'available', label: 'متاح للتزاوج', emoji: '✅' },
-  { value: 'unavailable', label: 'غير متاح', emoji: '⛔' },
+const STATUS_OPTIONS: Array<{
+  value: string;
+  label: string;
+  iconType: 'text' | 'appicon';
+  icon: string;
+  iconColor?: string;
+}> = [
+  { value: 'available', label: 'متاح للتزاوج', iconType: 'appicon', icon: 'heart', iconColor: '#02B7B4' },
+  { value: 'available_for_adoption', label: 'متاح للتبني', iconType: 'appicon', icon: 'home', iconColor: '#FF6B35' },
+  { value: 'unavailable', label: 'غير متاح', iconType: 'appicon', icon: 'close', iconColor: '#E74C3C' },
 ];
 
 // Removed hosting preferences (no longer needed in UI)
 
 const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpdated }) => {
+  const insets = useSafeAreaInsets();
   const [formData, setFormData] = useState<EditPetFormState>(INITIAL_FORM_STATE);
   const [breeds, setBreeds] = useState<Breed[]>([]);
   const [loading, setLoading] = useState(true);
@@ -97,6 +109,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
   // Scroll refs for error handling
   const scrollViewRef = useRef<ScrollView>(null);
   const fieldPositionsRef = useRef<Record<string, number>>({});
+  const lastNonAdoptionStatusRef = useRef<string>('available');
 
   const scrollToField = useCallback((key: string) => {
     const y = fieldPositionsRef.current[key];
@@ -129,6 +142,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
           location: pet.location || '',
           is_free: pet.is_free ?? true,
           status: pet.status || 'available',
+          available_for_adoption: pet.status === 'available_for_adoption',
           breeding_history: (pet as any).breeding_history || '',
           last_breeding_date: (pet as any).last_breeding_date || '',
           number_of_offspring: (pet as any).number_of_offspring?.toString() || '0',
@@ -137,6 +151,9 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
           good_with_pets: (pet as any).good_with_pets ?? true,
           hosting_preference: (pet as any).hosting_preference || 'flexible',
         });
+        if (pet.status && pet.status !== 'available_for_adoption') {
+          lastNonAdoptionStatusRef.current = pet.status;
+        }
         
         // Load existing images
         const images: string[] = [];
@@ -178,22 +195,37 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
   };
 
   const handleChange = (field: keyof EditPetFormState, value: string | boolean) => {
-    setFormData(prev => ({
-      ...prev,
-      [field]: value,
-    }));
-    
+    setFormData(prev => {
+      let next = {
+        ...prev,
+        [field]: value,
+      };
+
+      if (field === 'pet_type') {
+        next = { ...next, breed: '' };
+      }
+
+      if (field === 'status' && typeof value === 'string') {
+        if (value === 'available_for_adoption') {
+          if (prev.status !== 'available_for_adoption') {
+            lastNonAdoptionStatusRef.current = prev.status || 'available';
+          }
+          next.available_for_adoption = true;
+        } else {
+          next.available_for_adoption = false;
+          lastNonAdoptionStatusRef.current = value;
+        }
+      }
+
+      return next;
+    });
+
     // Clear error when user starts typing
     if (errors[field]) {
       setErrors(prev => ({
         ...prev,
         [field]: '',
       }));
-    }
-
-    // Clear breed when pet type changes
-    if (field === 'pet_type') {
-      setFormData(prev => ({ ...prev, breed: '' }));
     }
   };
 
@@ -204,6 +236,32 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
     } else {
       setLocationCoordinates(null);
     }
+  };
+
+  const handleAdoptionToggle = () => {
+    setFormData(prev => {
+      const newAvailable = !prev.available_for_adoption;
+      let nextStatus = prev.status;
+
+      if (newAvailable) {
+        if (prev.status !== 'available_for_adoption') {
+          lastNonAdoptionStatusRef.current = prev.status || 'available';
+        }
+        nextStatus = 'available_for_adoption';
+      } else {
+        const fallbackStatus =
+          lastNonAdoptionStatusRef.current && lastNonAdoptionStatusRef.current !== 'available_for_adoption'
+            ? lastNonAdoptionStatusRef.current
+            : 'available';
+        nextStatus = fallbackStatus;
+      }
+
+      return {
+        ...prev,
+        available_for_adoption: newAvailable,
+        status: nextStatus,
+      };
+    });
   };
 
   const validateForm = (): boolean => {
@@ -264,7 +322,8 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
       formDataToSend.append('description', formData.description.trim());
       formDataToSend.append('location', formData.location.trim());
       formDataToSend.append('is_free', formData.is_free.toString());
-      formDataToSend.append('status', formData.status);
+      const finalStatus = formData.status || 'available';
+      formDataToSend.append('status', finalStatus);
 
       // Removed: breeding info, behavior, hosting preference
 
@@ -354,7 +413,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: Platform.OS === 'ios' ? insets.top + 10 : 50 }]}>
         <TouchableOpacity style={styles.closeButton} onPress={onClose}>
           <Text style={styles.closeButtonText}>✕</Text>
         </TouchableOpacity>
@@ -370,7 +429,10 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
       >
         {/* Pet Images */}
         <View style={styles.section} onLayout={(e) => { fieldPositionsRef.current.images = e.nativeEvent.layout.y; }}>
-          <Text style={styles.sectionTitle}>📷 صور الحيوان</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+            <AppIcon name="image" size={20} color="#3B82F6" />
+            <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 8 }]}>صور الحيوان</Text>
+          </View>
           <ImagePicker
             images={petImages}
             onImagesChange={setPetImages}
@@ -382,7 +444,10 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
 
         {/* Basic Information */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>📋 المعلومات الأساسية</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+            <AppIcon name="document" size={20} color="#3B82F6" />
+            <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 8 }]}>المعلومات الأساسية</Text>
+          </View>
           
           <View style={styles.inputGroup} onLayout={(e) => { fieldPositionsRef.current.name = e.nativeEvent.layout.y; }}>
             <Text style={styles.label}>اسم الحيوان *</Text>
@@ -406,7 +471,10 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
                 ]}
                 onPress={() => handleChange('pet_type', 'cats')}
               >
-                <Text style={[styles.typeOptionText, formData.pet_type === 'cats' && styles.typeOptionTextActive]}>🐱 قطط</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <AppIcon name="paw" size={16} color={formData.pet_type === 'cats' ? '#fff' : '#FF6B35'} />
+                  <Text style={[styles.typeOptionText, formData.pet_type === 'cats' && styles.typeOptionTextActive, { marginLeft: 6 }]}>قطط</Text>
+                </View>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
@@ -415,7 +483,10 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
                 ]}
                 onPress={() => handleChange('pet_type', 'dogs')}
               >
-                <Text style={[styles.typeOptionText, formData.pet_type === 'dogs' && styles.typeOptionTextActive]}>🐕 كلاب</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <AppIcon name="paw" size={16} color={formData.pet_type === 'dogs' ? '#fff' : '#FF6B35'} />
+                  <Text style={[styles.typeOptionText, formData.pet_type === 'dogs' && styles.typeOptionTextActive, { marginLeft: 6 }]}>كلاب</Text>
+                </View>
               </TouchableOpacity>
             </View>
           </View>
@@ -457,7 +528,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
                 ]}
                 onPress={() => handleChange('gender', 'M')}
               >
-                <Text style={[styles.genderOptionText, formData.gender === 'M' && styles.genderOptionTextActive]}>♂️ ذكر</Text>
+                <Text style={[styles.genderOptionText, formData.gender === 'M' && styles.genderOptionTextActive]}>♂ ذكر</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
@@ -466,7 +537,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
                 ]}
                 onPress={() => handleChange('gender', 'F')}
               >
-                <Text style={[styles.genderOptionText, formData.gender === 'F' && styles.genderOptionTextActive]}>♀️ أنثى</Text>
+                <Text style={[styles.genderOptionText, formData.gender === 'F' && styles.genderOptionTextActive]}>♀ أنثى</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -474,7 +545,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
 
         {/* Description */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>📝 الوصف</Text>
+          <Text style={styles.sectionTitle}>الوصف</Text>
           <View style={styles.inputGroup} onLayout={(e) => { fieldPositionsRef.current.description = e.nativeEvent.layout.y; }}>
             <TextInput
               style={[
@@ -495,11 +566,17 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
 
         {/* Location */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>📍 الموقع</Text>
+          <Text style={styles.sectionTitle}>الموقع</Text>
           <View style={styles.inputGroup} onLayout={(e) => { fieldPositionsRef.current.location = e.nativeEvent.layout.y; }}>
             <MapLocationPicker
               value={formData.location}
               onChange={handleLocationChange}
+              onLocationSelected={(loc) => {
+                handleLocationChange(loc.address || formData.location, {
+                  lat: loc.latitude,
+                  lng: loc.longitude,
+                });
+              }}
               placeholder="ابحث عن موقعك أو اختر من الخريطة"
             />
             {errors.location ? <Text style={styles.errorText}>{errors.location}</Text> : null}
@@ -510,7 +587,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
 
         {/* Status */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>⚡ حالة الحيوان</Text>
+          <Text style={styles.sectionTitle}>حالة الحيوان</Text>
           <View style={styles.inputGroup}>
             <View style={styles.statusGrid}>
               {STATUS_OPTIONS.map((option) => (
@@ -522,7 +599,13 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
                   ]}
                   onPress={() => handleChange('status', option.value)}
                 >
-                  <Text style={styles.statusEmoji}>{option.emoji}</Text>
+                  {option.iconType === 'appicon' ? (
+                    <View style={styles.statusEmoji}>
+                      <AppIcon name={option.icon as any} size={24} color={option.iconColor} />
+                    </View>
+                  ) : (
+                    <Text style={styles.statusEmoji}>{option.icon}</Text>
+                  )}
                   <Text style={[
                     styles.statusText,
                     formData.status === option.value && styles.statusTextActive
@@ -535,13 +618,37 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
           </View>
         </View>
 
+        {/* Adoption Toggle */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>التبني</Text>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>متاح للتبني</Text>
+            <TouchableOpacity
+              style={styles.toggleRow}
+              onPress={handleAdoptionToggle}
+            >
+              <Text style={styles.toggleLabel}>
+                هل تريد عرض هذا الحيوان للتبني؟
+              </Text>
+              <View style={[styles.toggle, formData.available_for_adoption && styles.toggleActive]}>
+                <View style={[styles.toggleThumb, formData.available_for_adoption && styles.toggleThumbActive]} />
+              </View>
+            </TouchableOpacity>
+            {formData.available_for_adoption && (
+              <Text style={styles.helpText}>
+                سيتمكن المستخدمون الموثقون من تقديم طلبات تبني لهذا الحيوان
+              </Text>
+            )}
+          </View>
+        </View>
+
         {/* Removed: Price section */}
 
         {/* Health Certificates */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>🏥 الشهادات الصحية (اختيارية)</Text>
+          <Text style={styles.sectionTitle}>الشهادات الصحية (اختيارية)</Text>
           <Text style={styles.sectionSubtitle}>
-            📋 رفع الشهادات الصحية اختياري ويزيد من ثقة المالكين الآخرين
+            رفع الشهادات الصحية اختياري ويزيد من ثقة المالكين الآخرين
           </Text>
           
           <View style={styles.inputGroup}>
@@ -576,7 +683,7 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
           {submitting ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text style={styles.submitButtonText}>💾 حفظ التغييرات</Text>
+            <Text style={styles.submitButtonText}>حفظ التغييرات</Text>
           )}
         </TouchableOpacity>
 
@@ -650,6 +757,13 @@ const EditPetScreen: React.FC<EditPetScreenProps> = ({ petId, onClose, onPetUpda
               handleLocationChange(location, coordinates);
               setShowLocationPicker(false);
             }}
+            onLocationSelected={(loc) => {
+              handleLocationChange(loc.address || formData.location, {
+                lat: loc.latitude,
+                lng: loc.longitude,
+              });
+              setShowLocationPicker(false);
+            }}
           />
         </View>
       </Modal>
@@ -678,9 +792,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
     backgroundColor: '#02B7B4',
-    paddingTop: 50,
     elevation: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -1029,6 +1143,51 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#7f8c8d',
     textAlign: 'center',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+  },
+  toggleLabel: {
+    fontSize: 15,
+    color: '#333',
+    flex: 1,
+  },
+  toggle: {
+    width: 50,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#ddd',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleActive: {
+    backgroundColor: '#4CAF50',
+  },
+  toggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  toggleThumbActive: {
+    alignSelf: 'flex-end',
+  },
+  helpText: {
+    fontSize: 13,
+    color: '#666',
+    marginTop: 8,
+    paddingHorizontal: 4,
   },
 });
 

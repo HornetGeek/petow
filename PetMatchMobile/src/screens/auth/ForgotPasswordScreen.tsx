@@ -65,6 +65,9 @@ const ForgotPasswordScreen: React.FC<ForgotPasswordScreenProps> = ({ onClose, on
 
     try {
       const response = await apiService.sendPasswordResetOTP(email.trim());
+      if (!response.success) {
+        throw new Error(response.error || 'حدث خطأ في إرسال كود التحقق');
+      }
       const info = response.data?.message || 'تم إرسال كود التحقق إلى بريدك الإلكتروني';
       setMessage(info);
       setStep('otp');
@@ -107,6 +110,9 @@ const ForgotPasswordScreen: React.FC<ForgotPasswordScreenProps> = ({ onClose, on
 
     try {
       const response = await apiService.sendPasswordResetOTP(email.trim());
+      if (!response.success) {
+        throw new Error(response.error || 'حدث خطأ في إعادة إرسال الكود');
+      }
       setMessage(response.data?.message || 'تم إعادة إرسال كود التحقق');
       if ((response.data as any)?.debug_otp) {
         console.log('🔑 Debug OTP Code:', (response.data as any).debug_otp);

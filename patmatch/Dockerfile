@@ -1,5 +1,5 @@
-# Use Python 3.8 slim image
-FROM python:3.8-slim
+# Use Python 3.11 slim image
+FROM python:3.11-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -15,6 +15,12 @@ RUN apt-get update \
         gcc \
         g++ \
         libpq-dev \
+        gdal-bin \
+        libgdal-dev \
+        libproj-dev \
+        binutils \
+        libgeos-dev \
+        gettext \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -25,6 +31,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Collect static files
+RUN python manage.py compilemessages
 RUN python manage.py collectstatic --noinput
 
 # Expose port

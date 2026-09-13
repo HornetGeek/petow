@@ -39,9 +39,15 @@ def main():
     try:
         logger.info("بدء تشغيل التذكرة اليومية للرسائل غير المقروءة")
         
-        users_count = send_daily_unread_messages_reminder()
-        
-        logger.info(f"تم إرسال التذكرة اليومية إلى {users_count} مستخدم")
+        result = send_daily_unread_messages_reminder()
+        logger.info(
+            "تم تنفيذ التذكرة اليومية: users_with_unread=%s attempted=%s sent=%s failed=%s failure_reasons=%s",
+            result.get('users_with_unread'),
+            result.get('attempted'),
+            result.get('sent'),
+            result.get('failed'),
+            result.get('failure_reasons'),
+        )
         
         return 0
         

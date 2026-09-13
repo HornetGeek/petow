@@ -1,16 +1,23 @@
 """Utility helpers for managing clinic invitations."""
+import json
+import logging
 import secrets
 from typing import Iterable, Optional, List
 
 from django.conf import settings
-from django.db import transaction
+from django.db import DatabaseError, ProgrammingError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
 from accounts.models import User
-from pets.notifications import create_notification, _send_push_notification
+from pets.models import NotificationOutbox
+from pets.notifications import create_notification
+from pets.notification_events import enqueue_notification_event
+from pets.push_targets import attach_push_targets
 
 from .models import ClinicInvite, ClinicPatientRecord
+
+logger = logging.getLogger(__name__)
 
 
 def _generate_token() -> str:
@@ -251,10 +258,8 @@ def _ensure_invite_notification(invite: ClinicInvite) -> None:
     if not user:
         return
 
-    existing = user.notifications.filter(
-        type='clinic_invite',
-        extra_data__invite_token=str(invite.token)
-    ).first()
+    invite_token = str(invite.token)
+    existing = _find_existing_invite_notification(user, invite_token)
     if existing:
         return
 
@@ -264,6 +269,7 @@ def _ensure_invite_notification(invite: ClinicInvite) -> None:
         "اضغط للموافقة وربط حيوانك بحسابك."
     )
     extra = {
+        'type': 'clinic_invite',
         'invite_token': str(invite.token),
         'clinic_id': str(invite.clinic_id),
         'clinic_name': invite.clinic.name,
@@ -277,11 +283,90 @@ def _ensure_invite_notification(invite: ClinicInvite) -> None:
         message=message,
         extra_data=extra,
     )
-    _send_push_notification(user, title, message, {
+    push_payload = attach_push_targets({
         'type': 'clinic_invite',
         **extra,
-    })
+    }, 'clinic_invite')
+    enqueue_notification_event(
+        event_type=NotificationOutbox.EVENT_CLINIC_INVITE_PUSH,
+        object_id=notification.id,
+        dedupe_key=f"clinic_invite_push:{notification.id}",
+        payload={
+            'title': title,
+            'message': message,
+            'push_payload': push_payload,
+        },
+    )
     return None
+
+
+def _normalized_extra_data(extra_data) -> dict:
+    if isinstance(extra_data, dict):
+        return extra_data
+
+    if isinstance(extra_data, str):
+        raw = extra_data.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {'legacy_text': extra_data}
+        return parsed if isinstance(parsed, dict) else {}
+
+    return {}
+
+
+def _notification_matches_invite_token(notification, invite_token: str) -> bool:
+    data = _normalized_extra_data(getattr(notification, 'extra_data', None))
+    token = data.get('invite_token')
+    return token is not None and str(token) == invite_token
+
+
+def _find_existing_invite_notification(user: User, invite_token: str):
+    try:
+        # Use a savepoint to avoid breaking surrounding transactions if DB schema is mismatched.
+        with transaction.atomic():
+            return user.notifications.filter(
+                type='clinic_invite',
+                extra_data__invite_token=invite_token,
+            ).first()
+    except (ProgrammingError, DatabaseError) as exc:
+        logger.warning(
+            "Falling back to Python dedupe for clinic_invite notifications (extra_data type mismatch): %s",
+            exc,
+        )
+
+    for notification in user.notifications.filter(type='clinic_invite').only('id', 'extra_data'):
+        if _notification_matches_invite_token(notification, invite_token):
+            return notification
+    return None
+
+
+def _delete_invite_notifications(user: User, invite_token: str) -> int:
+    try:
+        with transaction.atomic():
+            deleted_count, _ = user.notifications.filter(
+                type='clinic_invite',
+                extra_data__invite_token=invite_token,
+            ).delete()
+            return deleted_count
+    except (ProgrammingError, DatabaseError) as exc:
+        logger.warning(
+            "Falling back to Python delete for clinic_invite notifications (extra_data type mismatch): %s",
+            exc,
+        )
+
+    to_delete_ids = [
+        notification.id
+        for notification in user.notifications.filter(type='clinic_invite').only('id', 'extra_data')
+        if _notification_matches_invite_token(notification, invite_token)
+    ]
+    if not to_delete_ids:
+        return 0
+
+    deleted_count, _ = user.notifications.filter(id__in=to_delete_ids).delete()
+    return deleted_count
 
 
 def claim_invites_for_user(user: User) -> None:
@@ -327,10 +412,7 @@ def respond_to_invite(invite: ClinicInvite, *, user: User, accept: bool) -> Clin
 
         # Delete the notification after the invite is handled
         # This prevents the accept button from reappearing when the app is reopened
-        user.notifications.filter(
-            type='clinic_invite',
-            extra_data__invite_token=str(invite.token)
-        ).delete()
+        _delete_invite_notifications(user, str(invite.token))
 
         if fields:
             invite.save(update_fields=fields)
