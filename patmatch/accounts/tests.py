@@ -1,10 +1,13 @@
 from copy import deepcopy
 import json
+import shutil
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.conf import settings
 from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.mail import EmailMultiAlternatives
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
@@ -16,7 +19,7 @@ from .email_delivery import EMAIL_CATEGORY_REMINDER, send_email_payload
 from .email_notifications import send_password_reset_email, send_welcome_email
 from .firebase_service import FirebaseService
 from .google_maps_service import GoogleMapsServiceError
-from .models import MobileAppConfig, User
+from .models import AccountVerification, MobileAppConfig, User
 
 
 def build_rest_framework_override(scope_rates):
@@ -135,6 +138,81 @@ class BaseMapsProxyTestCase(APITestCase):
 
     def authenticate(self):
         self.client.force_authenticate(self.user)
+
+
+class AccountVerificationRequestTests(APITestCase):
+    def setUp(self):
+        self.media_root = tempfile.mkdtemp()
+        self.override = override_settings(MEDIA_ROOT=self.media_root)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.addCleanup(lambda: shutil.rmtree(self.media_root, ignore_errors=True))
+        self.user = User.objects.create_user(
+            username='verification-user',
+            email='verification-user@example.com',
+            password='testpass123',
+            first_name='Verify',
+            last_name='Me',
+            phone='1234567890',
+        )
+        self.url = reverse('accounts:submit_account_verification')
+
+    def _image(self, name='id.jpg'):
+        return SimpleUploadedFile(name, b'\xff\xd8\xff', content_type='image/jpeg')
+
+    def _video(self, name='selfie.mp4'):
+        return SimpleUploadedFile(name, b'\x00\x00\x00\x18ftypmp42', content_type='video/mp4')
+
+    def authenticate(self):
+        self.client.force_authenticate(self.user)
+
+    def test_already_verified_user_does_not_create_duplicate_request(self):
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self.authenticate()
+
+        response = self.client.post(
+            self.url,
+            {'id_photo': self._image(), 'selfie_video': self._video()},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data['success'])
+        self.assertTrue(response.data['already_verified'])
+        self.assertEqual(AccountVerification.objects.filter(user=self.user).count(), 0)
+
+    def test_unverified_user_can_submit_verification_documents(self):
+        self.authenticate()
+
+        response = self.client.post(
+            self.url,
+            {'id_photo': self._image(), 'selfie_video': self._video()},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data['success'])
+        verification = AccountVerification.objects.get(user=self.user)
+        self.assertEqual(verification.status, 'pending')
+
+    def test_pending_verification_blocks_duplicate_submission(self):
+        AccountVerification.objects.create(
+            user=self.user,
+            id_photo=self._image('existing-id.jpg'),
+            selfie_video=self._video('existing-selfie.mp4'),
+            status='pending',
+        )
+        self.authenticate()
+
+        response = self.client.post(
+            self.url,
+            {'id_photo': self._image(), 'selfie_video': self._video()},
+            format='multipart',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(AccountVerification.objects.filter(user=self.user).count(), 1)
 
 
 class MapsProxyAuthAndValidationTests(BaseMapsProxyTestCase):

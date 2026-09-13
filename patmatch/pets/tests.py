@@ -1639,6 +1639,28 @@ class RequestCenterSavedSearchDigestTests(TestCase):
             'pending',
         )
 
+    def test_adoption_chat_status_trusts_verified_requester_without_request_row(self):
+        self.adoption_request.status = 'approved'
+        self.adoption_request.save(update_fields=['status'])
+        chat_room = ChatRoom.objects.create(adoption_request=self.adoption_request)
+        self.requester.is_verified = True
+        self.requester.save(update_fields=['is_verified'])
+
+        self.client.force_authenticate(self.requester)
+        status_response = self.client.get(f'/api/pets/chat/rooms/{chat_room.id}/status/')
+        context_response = self.client.get(f'/api/pets/chat/rooms/{chat_room.id}/context/')
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data['chat_status'], 'approved')
+        self.assertEqual(status_response.data['requester_verification_status'], 'approved')
+        self.assertEqual(context_response.data['chat_context']['chat_status'], 'approved')
+        self.assertEqual(
+            context_response.data['chat_context']['adoption_request'][
+                'requester_verification_status'
+            ],
+            'approved',
+        )
+
     def test_adoption_chat_status_reports_rejected_requester_verification(self):
         self.adoption_request.status = 'approved'
         self.adoption_request.save(update_fields=['status'])

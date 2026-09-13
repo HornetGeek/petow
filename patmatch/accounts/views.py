@@ -1028,6 +1028,17 @@ def admin_send_push_to_token(request):
 def submit_account_verification(request):
     """إرسال طلب التحقق من الحساب"""
     try:
+        if request.user.is_verified:
+            return Response(
+                {
+                    "success": True,
+                    "already_verified": True,
+                    "is_verified": True,
+                    "message": "حسابك موثق بالفعل.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
         # التحقق من عدم وجود طلب قيد المراجعة
         pending_verification = AccountVerification.objects.filter(
             user=request.user, status="pending"
@@ -1052,14 +1063,16 @@ def submit_account_verification(request):
                 {"error": "فيديو السيلفي مطلوب"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # إنشاء طلب التحقق
-        verification = AccountVerification.objects.create(
-            user=request.user,
-            id_photo=request.FILES["id_photo"],
-            selfie_video=request.FILES["selfie_video"],
+        serializer = AccountVerificationSerializer(
+            data={
+                "id_photo": request.FILES["id_photo"],
+                "selfie_video": request.FILES["selfie_video"],
+            },
+            context={"request": request},
         )
-
-        serializer = AccountVerificationSerializer(verification)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        verification = serializer.save()
 
         logger.info(f"Account verification submitted by user {request.user.email}")
 
@@ -1067,7 +1080,7 @@ def submit_account_verification(request):
             {
                 "success": True,
                 "message": "تم إرسال طلب التحقق بنجاح. سيتم مراجعته في أقرب وقت.",
-                "verification": serializer.data,
+                "verification": AccountVerificationSerializer(verification).data,
             },
             status=status.HTTP_201_CREATED,
         )
