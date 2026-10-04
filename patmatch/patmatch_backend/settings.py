@@ -489,3 +489,18 @@ else:
     else:
         # Fall back to SMTP only if no Brevo credentials are configured
         EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+
+
+# Enable after clients with owner availability controls have shipped.
+PET_AVAILABILITY_ENABLED = config('PET_AVAILABILITY_ENABLED', default=False, cast=bool)
+PET_AVAILABILITY_ROLLOUT_PERCENT = config('PET_AVAILABILITY_ROLLOUT_PERCENT', default=100, cast=int)
+PET_AVAILABILITY_AUTO_PAUSE = config('PET_AVAILABILITY_AUTO_PAUSE', default=False, cast=bool)
+PET_AVAILABILITY_INTERVAL_DAYS = config('PET_AVAILABILITY_INTERVAL_DAYS', default=30, cast=int)
+PET_AVAILABILITY_REMINDER_DAYS = config('PET_AVAILABILITY_REMINDER_DAYS', default=7, cast=int)
+PET_AVAILABILITY_GRACE_DAYS = config('PET_AVAILABILITY_GRACE_DAYS', default=14, cast=int)
+PET_AVAILABILITY_APPROVAL_DAYS = config('PET_AVAILABILITY_APPROVAL_DAYS', default=3, cast=int)
+PET_AVAILABILITY_APPROVAL_REMINDER_DAYS = config('PET_AVAILABILITY_APPROVAL_REMINDER_DAYS', default=7, cast=int)
+CELERY_BEAT_SCHEDULE['pet-availability-hourly'] = {
+    'task': 'pets.tasks.run_pet_availability_checks', 'schedule': crontab(minute=20),
+}
+CELERY_TASK_ROUTES['pets.tasks.run_pet_availability_checks'] = {'queue': CELERY_NOTIFICATION_QUEUE}

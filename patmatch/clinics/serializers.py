@@ -1,3 +1,4 @@
+import math
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -6,6 +7,7 @@ from django.core.files.storage import default_storage
 from django.utils import timezone
 from django.utils.text import get_valid_filename
 import json
+from PIL import Image as PILImage
 
 from rest_framework import serializers
 
@@ -224,12 +226,15 @@ def _point_from_coordinates(latitude, longitude):
 
 
 class ClinicSerializer(serializers.ModelSerializer):
+    can_edit_profile = serializers.SerializerMethodField()
+
     class Meta:
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'emergency_phone',
             'whatsapp_phone', 'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color',
-            'latitude', 'longitude', 'is_active', 'created_at', 'updated_at'
+            'latitude', 'longitude', 'is_active', 'created_at', 'updated_at',
+            'can_edit_profile',
         ]
         read_only_fields = ['id', 'is_active', 'created_at', 'updated_at']
 
@@ -239,6 +244,68 @@ class ClinicSerializer(serializers.ModelSerializer):
             lng = validated_data.get('longitude')
             validated_data['location_point'] = _point_from_coordinates(lat, lng)
         return super().create(validated_data)
+
+    def get_can_edit_profile(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        return obj.owner_id == user.id or obj.staff_members.filter(
+            user=user,
+            role__in=['owner', 'admin'],
+        ).exists()
+
+    def validate_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('اسم العيادة مطلوب.')
+        return value.strip()
+
+    def validate_address(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('عنوان العيادة مطلوب.')
+        return value.strip()
+
+    def validate_phone(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('رقم هاتف العيادة مطلوب.')
+        return value.strip()
+
+    def validate_logo(self, value):
+        if value is None:
+            return value
+        if value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError('يجب ألا يتجاوز حجم الشعار 5 ميجابايت.')
+        try:
+            value.seek(0)
+            with PILImage.open(value) as image:
+                if image.format not in ('JPEG', 'PNG'):
+                    raise serializers.ValidationError('يجب أن يكون الشعار بصيغة JPG أو PNG.')
+                image.verify()
+            value.seek(0)
+        except serializers.ValidationError:
+            raise
+        except Exception as exc:
+            raise serializers.ValidationError('ملف الصورة غير صالح.') from exc
+        return value
+
+    def validate(self, attrs):
+        has_latitude = 'latitude' in attrs
+        has_longitude = 'longitude' in attrs
+        if has_latitude != has_longitude:
+            raise serializers.ValidationError({
+                'latitude': 'أرسل خط العرض وخط الطول معًا.',
+                'longitude': 'أرسل خط العرض وخط الطول معًا.',
+            })
+        latitude = attrs.get('latitude')
+        longitude = attrs.get('longitude')
+        if (latitude is None) != (longitude is None):
+            raise serializers.ValidationError('يجب تحديد الإحداثيين معًا أو مسحهما معًا.')
+        if latitude is not None:
+            if not math.isfinite(float(latitude)) or not -90 <= float(latitude) <= 90:
+                raise serializers.ValidationError({'latitude': 'خط العرض خارج النطاق المسموح.'})
+            if not math.isfinite(float(longitude)) or not -180 <= float(longitude) <= 180:
+                raise serializers.ValidationError({'longitude': 'خط الطول خارج النطاق المسموح.'})
+        return attrs
 
     def update(self, instance, validated_data):
         location_point = validated_data.get('location_point')

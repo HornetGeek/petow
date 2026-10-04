@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from .availability_views import AvailabilityChecksView, PetAvailabilityView
 
 app_name = 'pets'
 
@@ -24,6 +25,8 @@ urlpatterns = [
     path('saved-searches/<int:pk>/preview/', views.SavedSearchPreviewView.as_view(), name='saved-search-preview'),
     path('home/digest/', views.HomeDigestView.as_view(), name='home-digest'),
     path('<int:pk>/', views.PetDetailView.as_view(), name='pet-detail'),
+    path('availability-checks/', AvailabilityChecksView.as_view(), name='availability-checks'),
+    path('<int:pk>/availability/', PetAvailabilityView.as_view(), name='pet-availability'),
     path('my/', views.MyPetsView.as_view(), name='my-pets'),
     path('engagement-events/', views.create_engagement_event, name='engagement-events'),
     

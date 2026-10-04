@@ -82,6 +82,9 @@ def build_mobile_deep_link(notification_type: Any, context: Optional[Dict[str, A
     n_type = _normalize_type(notification_type)
     ctx: Dict[str, Any] = context or {}
 
+    if n_type == 'pet_availability_check':
+        return _with_query('petow://pet-availability', 'pet_id', _pick_value(ctx, ('pet_id', 'related_pet')))
+
     if n_type in BREEDING_REQUEST_TYPES:
         request_id = _pick_value(ctx, ('breeding_request_id', 'request_id'))
         return _with_query('petow://breeding-requests', 'breeding_request_id', request_id)

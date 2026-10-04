@@ -527,10 +527,12 @@ class HomeDigestView(APIView):
             .select_related('saved_search')
             .order_by('-matched_at')[:8]
         )
-        saved_match_items = [_serialize_saved_search_match(match, request) for match in saved_matches]
+        saved_match_items = [_serialize_saved_search_match(match, request) for match in saved_matches
+                             if match.target_type not in {'pet', 'adoption_pet', 'breeding_pet'} or
+                             Pet.objects.filter(pk=match.target_id, discovery_paused_at__isnull=True).exists()]
 
         pets_queryset = (
-            Pet.objects
+            Pet.objects.filter(discovery_paused_at__isnull=True)
             .exclude(owner=request.user)
             .exclude(status__in=['unavailable', 'adopted'])
             .select_related('breed', 'owner')
@@ -753,7 +755,9 @@ class PetMapMarkersView(APIView):
                 'max_age_months': max_age_months,
             },
         )
-        cached_payload = cache.get(cache_key)
+        # Availability is authoritative across workers; local map caches cannot
+        # be invalidated reliably by the scheduled expiry worker.
+        cached_payload = None if settings.PET_AVAILABILITY_ENABLED else cache.get(cache_key)
         if cached_payload is not None:
             return Response(cached_payload)
 
@@ -762,7 +766,7 @@ class PetMapMarkersView(APIView):
         bbox.srid = 4326
 
         queryset = (
-            Pet.objects
+            Pet.objects.filter(discovery_paused_at__isnull=True)
             .select_related('breed', 'owner')
             .annotate(
                 effective_point=Coalesce(
@@ -931,7 +935,8 @@ class PetMapMarkersView(APIView):
                 'truncated': bool(truncated),
             }
         }
-        cache.set(cache_key, payload, timeout=max(1, int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30))))
+        if not settings.PET_AVAILABILITY_ENABLED:
+            cache.set(cache_key, payload, timeout=max(1, int(getattr(settings, 'MAP_MARKERS_CACHE_TTL_SECONDS', 30))))
         return Response(payload)
 
 class BreedListView(generics.ListAPIView):
@@ -1290,7 +1295,7 @@ class PetListCreateView(generics.ListCreateAPIView):
     
     def get_queryset(self):
         # Start with all pets
-        queryset = _with_pet_likes(Pet.objects.select_related('breed', 'owner'))
+        queryset = _with_pet_likes(Pet.objects.filter(discovery_paused_at__isnull=True).select_related('breed', 'owner'))
         
         # Handle status filtering
         status_param = self.request.query_params.get('status')
@@ -2782,7 +2787,7 @@ def adoption_pets(request):
     """الحيوانات المتاحة للتبني"""
     pets = _with_pet_likes(
         Pet.objects.filter(
-            status='available_for_adoption'
+            status='available_for_adoption', discovery_paused_at__isnull=True
         ).select_related(
             'breed',
             'owner',

@@ -28,3 +28,20 @@ class IsPlatformAdmin(BasePermission):
             and user.is_staff
             and user.is_superuser
         )
+
+
+class CanEditClinicProfile(BasePermission):
+    """Only a clinic owner or clinic admin may change public clinic details."""
+
+    message = "يمكن لمالك العيادة أو المسؤول تعديل بيانات العيادة فقط"
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return True
+        user = request.user
+        if obj.owner_id == user.id:
+            return True
+        return obj.staff_members.filter(
+            user=user,
+            role__in=['owner', 'admin'],
+        ).exists()

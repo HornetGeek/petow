@@ -20,6 +20,10 @@ from .notifications import (
 logger = logging.getLogger(__name__)
 
 
+class NotificationEventDeferred(Exception):
+    """Policy postponement that does not consume the transport retry budget."""
+
+
 class NotificationEventPermanentError(Exception):
     """Raised when an outbox event cannot be processed and should not be retried."""
 
@@ -29,6 +33,9 @@ def _process_pet_created(object_id, payload):
         pet = Pet.objects.get(id=object_id)
     except Pet.DoesNotExist as exc:
         raise NotificationEventPermanentError(f"Pet {object_id} not found") from exc
+
+    if pet.discovery_paused_at:
+        return
 
     if pet.status == 'available_for_adoption':
         notify_new_adoption_pet(
@@ -225,7 +232,13 @@ def _process_account_verification_approved_push(object_id, payload):
     notification.save(update_fields=['extra_data', 'updated_at'])
 
 
+def _process_pet_availability_push(object_id, payload):
+    from .availability import deliver_check_push
+    deliver_check_push(object_id, payload)
+
+
 EVENT_HANDLERS = {
+    NotificationOutbox.EVENT_PET_AVAILABILITY_PUSH: _process_pet_availability_push,
     NotificationOutbox.EVENT_PET_CREATED: _process_pet_created,
     NotificationOutbox.EVENT_BREEDING_REQUEST_RECEIVED: _process_breeding_request_received,
     NotificationOutbox.EVENT_BREEDING_REQUEST_APPROVED: _process_breeding_request_approved,

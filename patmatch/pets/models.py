@@ -127,6 +127,21 @@ class Pet(models.Model):
     )
     
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='available')
+    availability_confirmed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    availability_check_due_at = models.DateTimeField(null=True, blank=True, db_index=True, editable=False)
+    availability_prompt_after = models.DateTimeField(null=True, blank=True, editable=False)
+    discovery_paused_at = models.DateTimeField(null=True, blank=True, db_index=True, editable=False)
+
+    @property
+    def availability_confirmation_expires_at(self):
+        from .availability import days
+        return self.availability_confirmed_at + days('INTERVAL_DAYS') if self.availability_confirmed_at else None
+
+    @property
+    def availability_management_enabled(self):
+        from .availability import enabled_for_owner
+        return enabled_for_owner(self.owner_id)
+
     location = models.CharField(max_length=200, help_text="الموقع (المدينة/الحي)")
     latitude = models.DecimalField(max_digits=10, decimal_places=8, blank=True, null=True)
     longitude = models.DecimalField(max_digits=11, decimal_places=8, blank=True, null=True)
@@ -722,6 +737,7 @@ class Notification(models.Model):
         ('breeding_request_rejected', _('Breeding request rejected')),
         ('breeding_request_completed', _('Breeding meeting completed')),
         ('favorite_added', _('Pet added to favorites')),
+        ('pet_availability_check', _('Pet availability check')),
         ('pet_status_changed', _('Pet status changed')),
         ('system_message', _('System message')),
         ('chat_message_received', _('New message received')),
@@ -1006,7 +1022,10 @@ class NotificationOutbox(models.Model):
     EVENT_CLINIC_BOOKING_PUSH = 'clinic_booking_push'
     EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH = 'account_verification_approved_push'
 
+    EVENT_PET_AVAILABILITY_PUSH = 'pet_availability_push'
+
     EVENT_TYPE_CHOICES = [
+        (EVENT_PET_AVAILABILITY_PUSH, 'Pet availability push'),
         (EVENT_PET_CREATED, 'Pet created'),
         (EVENT_BREEDING_REQUEST_RECEIVED, 'Breeding request received'),
         (EVENT_BREEDING_REQUEST_APPROVED, 'Breeding request approved'),
@@ -1550,7 +1569,7 @@ class AdoptionRequest(models.Model):
         self.status = 'approved'
         self.approved_at = timezone.now()
         self.pet.status = 'adoption_pending'
-        self.pet.save()
+        self.pet.save(update_fields=['status', 'updated_at'])
         self.save()
     
     def reject(self):
@@ -1563,7 +1582,7 @@ class AdoptionRequest(models.Model):
         self.status = 'completed'
         self.completed_at = timezone.now()
         self.pet.status = 'adopted'
-        self.pet.save()
+        self.pet.save(update_fields=['status', 'updated_at'])
         self.save()
         
         # رفض جميع الطلبات الأخرى للحيوان نفسه
@@ -1600,3 +1619,16 @@ class AdoptionRequest(models.Model):
             models.Index(fields=['adopter', 'created_at'], name='pets_adopti_adopter_e507df_idx'),
             models.Index(fields=['pet', 'status', 'created_at'], name='pets_adopti_pet_id_5cc999_idx'),
         ]
+
+
+class PetAvailabilityFollowUp(models.Model):
+    """One approval check per request and owned pet, independent of push delivery."""
+    pet = models.ForeignKey(Pet, on_delete=models.CASCADE, related_name='availability_followups')
+    request_kind = models.CharField(max_length=10, choices=[('adoption', 'Adoption'), ('breeding', 'Breeding')])
+    request_id = models.PositiveBigIntegerField()
+    approved_at = models.DateTimeField()
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['pet', 'request_kind', 'request_id'], name='pet_availability_request_unique')]
+        indexes = [models.Index(fields=['pet', 'resolved_at'], name='pet_availability_open_idx')]

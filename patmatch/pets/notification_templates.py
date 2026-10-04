@@ -1,6 +1,10 @@
 SUPPORTED_LANGUAGES = {'ar', 'en'}
 
 TEMPLATES = {
+    'pet_availability_check': {
+        'ar': ('حدّث حالة {pet_name}', 'هل ما زال حيوانك متاحاً؟ افتح التطبيق لتأكيد التوفر أو تحديث الحالة. {notice_ar}'),
+        'en': ('Update {pet_name}’s status', 'Is your pet still available? Confirm availability or update their status. {notice_en}'),
+    },
     'breeding_request_received': {
         'ar': ('طلب تزاوج جديد من {requester_name}', 'افتح الطلب لمراجعة التفاصيل والرد عليه.'),
         'en': ('New breeding request from {requester_name}', 'Open the request to review the details and respond.'),

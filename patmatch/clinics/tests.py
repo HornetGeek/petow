@@ -1498,3 +1498,73 @@ class ClinicPatientProfileTests(TestCase):
         document = ClinicPatientDocument.objects.get(patient=self.patient)
         self.assertEqual(document.title, 'تحليل دم')
         self.assertEqual(document.category, 'lab_result')
+
+
+class ClinicLoginMembershipTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username='role-user@example.com',
+            email='role-user@example.com',
+            password='pass12345',
+            user_type='clinic_staff',
+        )
+
+    def _clinic(self, name, owner=None):
+        return Clinic.objects.create(
+            name=name,
+            owner=owner,
+            address='Cairo',
+            phone='01000000000',
+            opening_hours='9:00 - 17:00',
+            services='General care',
+        )
+
+    def test_login_returns_the_primary_clinic_membership(self):
+        other_clinic = self._clinic('Other Clinic')
+        primary_clinic = self._clinic('Primary Clinic')
+        ClinicStaff.objects.create(
+            user=self.user,
+            clinic=other_clinic,
+            role='assistant',
+            is_primary=False,
+        )
+        primary_membership = ClinicStaff.objects.create(
+            user=self.user,
+            clinic=primary_clinic,
+            role='admin',
+            is_primary=True,
+        )
+
+        response = self.client.post(
+            reverse('clinic-login'),
+            {'email': self.user.email, 'password': 'pass12345'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['clinic']['id'], primary_clinic.id)
+        self.assertEqual(
+            response.data['membership'],
+            {
+                'id': primary_membership.id,
+                'role': 'admin',
+                'is_primary': True,
+            },
+        )
+
+    def test_login_labels_an_owner_without_a_membership(self):
+        clinic = self._clinic('Owner Clinic', owner=self.user)
+
+        response = self.client.post(
+            reverse('clinic-login'),
+            {'email': self.user.email, 'password': 'pass12345'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['clinic']['id'], clinic.id)
+        self.assertEqual(
+            response.data['membership'],
+            {'id': None, 'role': 'owner', 'is_primary': True},
+        )
