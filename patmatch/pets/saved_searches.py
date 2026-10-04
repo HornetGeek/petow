@@ -39,7 +39,7 @@ def _parse_int_filter(value):
 
 def build_pet_saved_search_queryset(saved_search, *, user=None, since=None):
     filters = normalize_saved_search_filters(saved_search.filters)
-    queryset = Pet.objects.select_related('breed', 'owner')
+    queryset = Pet.objects.filter(discovery_paused_at__isnull=True).select_related('breed', 'owner')
 
     if user and getattr(user, 'is_authenticated', False):
         queryset = queryset.exclude(owner=user)

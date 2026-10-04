@@ -13,6 +13,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 from django.db.models import Q
 
+from pets.availability import enabled_for_owner
 from pets.models import BreedingRequest, AdoptionRequest, Notification, Pet
 from pets.notifications import (
     notify_breeding_request_pending_reminder,
@@ -209,6 +210,11 @@ class Command(BaseCommand):
             try:
                 pet = Pet.objects.get(id=pet_id)
             except Pet.DoesNotExist:
+                continue
+
+            # Freshness checks own visibility for rollout accounts. Silence must
+            # not overwrite the pet's real adoption or breeding status.
+            if enabled_for_owner(pet.owner_id):
                 continue
 
             breeding_rejects = BreedingRequest.objects.filter(

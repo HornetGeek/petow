@@ -58,7 +58,7 @@ from pets.serializers import PublicPetSerializer
 from pets.notifications import create_notification, create_notification_once
 from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
-from .permissions import IsClinicStaff, IsPlatformAdmin
+from .permissions import CanEditClinicProfile, IsClinicStaff, IsPlatformAdmin
 from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_categories_for_group
 from .serializers import (
     ClinicSerializer,
@@ -589,21 +589,43 @@ def ensure_clinic_chat_room(clinic_patient, message=None, staff=None):
 
     return chat_room
 
-def get_clinic_for_user(user):
-    """إرجاع العيادة المرتبطة بالمستخدم."""
+def get_clinic_membership_for_user(user):
+    """Return the membership that determines the user's active clinic context."""
     if not user.is_authenticated:
         return None
 
     membership_qs = user.clinic_memberships.select_related('clinic')
     primary_membership = membership_qs.filter(is_primary=True).first()
     if primary_membership:
-        return primary_membership.clinic
+        return primary_membership
 
     membership = membership_qs.first()
+    if membership:
+        return membership
+
+    return None
+
+
+def get_clinic_for_user(user):
+    """إرجاع العيادة المرتبطة بالمستخدم."""
+    membership = get_clinic_membership_for_user(user)
     if membership:
         return membership.clinic
 
     return user.owned_clinics.first()
+
+
+def get_clinic_membership_payload(user, clinic):
+    membership = get_clinic_membership_for_user(user)
+    if membership and membership.clinic_id == clinic.id:
+        return {
+            'id': membership.id,
+            'role': membership.role,
+            'is_primary': membership.is_primary,
+        }
+    if clinic.owner_id == user.id:
+        return {'id': None, 'role': 'owner', 'is_primary': True}
+    return None
 
 
 class ClinicContextMixin:
@@ -633,6 +655,7 @@ class ClinicRegisterView(APIView):
                 'token': token.key,
                 'clinic': ClinicSerializer(clinic).data,
                 'user': UserSerializer(owner).data,
+                'membership': get_clinic_membership_payload(owner, clinic),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -666,6 +689,7 @@ class ClinicLoginView(APIView):
                     'clinic': None,
                     'user': UserSerializer(user).data,
                     'is_platform_admin': True,
+                    'membership': None,
                 }
             )
 
@@ -690,6 +714,7 @@ class ClinicLoginView(APIView):
                 'clinic': ClinicSerializer(clinic).data,
                 'user': UserSerializer(user).data,
                 'is_platform_admin': False,
+                'membership': get_clinic_membership_payload(user, clinic),
             }
         )
 
@@ -973,6 +998,11 @@ class ClinicSettingsView(ClinicContextMixin, generics.RetrieveUpdateAPIView):
     serializer_class = ClinicSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        permissions.append(CanEditClinicProfile())
+        return permissions
 
     def get_object(self):
         return self.get_clinic()

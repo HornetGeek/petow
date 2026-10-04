@@ -9,7 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import NotificationOutbox
-from .notification_events import NotificationEventPermanentError, dispatch_notification_event
+from .notification_events import NotificationEventDeferred, NotificationEventPermanentError, dispatch_notification_event
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,11 @@ def process_notification_outbox_event(self, event_id):
 
     try:
         dispatch_notification_event(outbox_event)
+    except NotificationEventDeferred as exc:
+        NotificationOutbox.objects.filter(id=event_id).update(
+            status=NotificationOutbox.STATUS_PENDING, attempts=0,
+            next_attempt_at=timezone.now() + timedelta(minutes=30), last_error=str(exc))
+        return {'status': 'deferred', 'event_id': event_id}
     except NotificationEventPermanentError as exc:
         NotificationOutbox.objects.filter(id=event_id).update(
             status=NotificationOutbox.STATUS_FAILED,
@@ -160,3 +165,9 @@ def run_auto_manage_requests():
 @shared_task(ignore_result=True, name='pets.tasks.run_daily_unread_email_reminders')
 def run_daily_unread_email_reminders():
     call_command('send_daily_reminders')
+
+
+@shared_task(ignore_result=True, name='pets.tasks.run_pet_availability_checks')
+def run_pet_availability_checks():
+    from .availability import run_checks
+    return run_checks()

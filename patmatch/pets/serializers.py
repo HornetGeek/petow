@@ -563,9 +563,10 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
             'status', 'status_display', 'location', 
             'latitude', 'longitude', 'is_free', 'owner_name', 'owner_email', 'owner_is_verified',
             'likes_count', 'is_liked',
+            'availability_confirmed_at', 'availability_check_due_at', 'discovery_paused_at', 'availability_management_enabled', 'availability_confirmation_expires_at',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['owner', 'created_at', 'updated_at']
+        read_only_fields = ['owner', 'created_at', 'updated_at', 'availability_confirmed_at', 'availability_check_due_at', 'discovery_paused_at', 'availability_management_enabled', 'availability_confirmation_expires_at']
     
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
@@ -646,7 +647,15 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
                 validated_data['location'] = reverse_geocode_address(lat_f, lng_f)
             validated_data['location_point'] = self._point_from_coordinates(lat, lng)
 
-        return super().update(instance, validated_data)
+        from django.db import transaction
+        from .availability import record_response
+        with transaction.atomic():
+            instance = Pet.objects.select_for_update().get(pk=instance.pk)
+            changed_status = 'status' in validated_data and validated_data['status'] != instance.status
+            instance = super().update(instance, validated_data)
+            if changed_status:
+                record_response(instance)
+            return instance
 
 class PetListSerializer(PetEngagementMixin, serializers.ModelSerializer):
     """سيريلايزر مبسط لقائمة الحيوانات"""
@@ -757,6 +766,7 @@ class PetListSerializer(PetEngagementMixin, serializers.ModelSerializer):
             'location', 'latitude', 'longitude', 'distance', 'distance_display',
             'price_display', 'status', 'status_display', 'owner_name', 'owner_is_verified',
             'has_health_certificates', 'hosting_preference', 'likes_count', 'is_liked',
+            'availability_confirmed_at', 'availability_check_due_at', 'discovery_paused_at', 'availability_management_enabled', 'availability_confirmation_expires_at',
             'created_at', 'updated_at'
         ]
 
@@ -865,7 +875,13 @@ class BreedingRequestSerializer(serializers.ModelSerializer):
         target_pet = validated_data['target_pet']
         validated_data['receiver'] = target_pet.owner
         
-        return super().create(validated_data)
+        from django.db import transaction
+        with transaction.atomic():
+            pets = list(Pet.objects.select_for_update().filter(
+                pk__in=[target_pet.pk, validated_data['requester_pet'].pk]).order_by('pk'))
+            if any(p.discovery_paused_at or p.status != 'available' for p in pets):
+                raise serializers.ValidationError('A pet is no longer available.')
+            return super().create(validated_data)
     
     def validate(self, data):
         target_pet = data['target_pet']
@@ -885,6 +901,8 @@ class BreedingRequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("يجب أن يكون الحيوانان من جنس مختلف للتزاوج")
         
         # التحقق من أن الحيوانين متاحين للمقابلة
+        if target_pet.discovery_paused_at or requester_pet.discovery_paused_at:
+            raise serializers.ValidationError('Listing paused; the owner must confirm availability.')
         if target_pet.status != 'available':
             raise serializers.ValidationError("الحيوان المطلوب غير متاح للمقابلات")
         if requester_pet.status != 'available':
@@ -1633,6 +1651,8 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("يجب تسجيل الدخول أولاً")
         
         # التحقق من أن الحيوان متاح للتبني
+        if value.discovery_paused_at:
+            raise serializers.ValidationError('Listing paused; the owner must confirm availability.')
         if value.status != 'available_for_adoption':
             raise serializers.ValidationError("هذا الحيوان غير متاح للتبني")
         
@@ -1672,7 +1692,12 @@ class AdoptionRequestCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """إنشاء طلب تبني جديد"""
         validated_data['adopter'] = self.context['request'].user
-        return super().create(validated_data)
+        from django.db import transaction
+        with transaction.atomic():
+            pet = Pet.objects.select_for_update().get(pk=validated_data['pet'].pk)
+            if pet.discovery_paused_at or pet.status != 'available_for_adoption':
+                raise serializers.ValidationError('The pet is no longer available.')
+            return super().create(validated_data)
 
 
 class AdoptionRequestListSerializer(AdoptionRequestSerializer):

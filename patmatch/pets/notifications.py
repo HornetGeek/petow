@@ -51,6 +51,7 @@ DISCOVERY_NOTIFICATION_TYPES = {
 }
 
 REMINDER_NOTIFICATION_TYPES = {
+    'pet_availability_check',
     'breeding_request_pending_reminder',
     'adoption_request_pending_reminder',
 }
@@ -936,7 +937,7 @@ def notify_new_pet_added(pet, radius_km=30, event_key_prefix=None):
     recipients = set()
 
     normalised_location = _normalise_location(pet.location)
-    candidate_pets = Pet.objects.filter(status='available').exclude(owner=pet.owner)
+    candidate_pets = Pet.objects.filter(status='available', discovery_paused_at__isnull=True).exclude(owner=pet.owner)
 
     if normalised_location:
         for row in candidate_pets.exclude(location__isnull=True).values('owner_id', 'location'):
