@@ -732,6 +732,9 @@ class ClinicClientRecord(models.Model):
 
 
 class ClinicPatientRecord(models.Model):
+    microchip_number = models.CharField(max_length=100, blank=True)
+    weight_recorded_at = models.DateField(blank=True, null=True)
+
     STATUS_CHOICES = [
         ('active', 'نشط'),
         ('inactive', 'غير نشط'),
@@ -816,10 +819,15 @@ class ClinicPatientNote(models.Model):
 
 
 class ClinicPatientDocument(models.Model):
+    session = models.ForeignKey('VeterinarySession', on_delete=models.SET_NULL, null=True, blank=True, related_name='documents')
+
     CATEGORY_CHOICES = [
         ('medical_record', 'سجل طبي'),
         ('vaccination', 'تطعيم'),
         ('lab_result', 'نتيجة مختبر'),
+        ('imaging', 'تصوير طبي'),
+        ('report', 'تقرير طبي'),
+        ('prescription', 'وصفة طبية'),
         ('certificate', 'شهادة'),
         ('other', 'أخرى'),
     ]
@@ -1174,6 +1182,8 @@ class VeterinaryAppointment(models.Model):
 
 
 class VeterinarySession(models.Model):
+    creation_key = models.CharField(max_length=100, null=True, blank=True, unique=True, editable=False)
+
     """Simple medically useful clinic visit/session record."""
 
     CHECK_STATUS_CHOICES = [
@@ -1308,3 +1318,36 @@ class VeterinaryCertificate(models.Model):
         verbose_name = "شهادة بيطرية"
         verbose_name_plural = "الشهادات البيطرية"
         ordering = ['-issued_date']
+
+
+class ClinicMedicalEntry(models.Model):
+    KIND_CHOICES = [('alert', 'تنبيه'), ('vaccine', 'تطعيم'), ('prescription', 'وصفة')]
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(ClinicPatientRecord, on_delete=models.CASCADE, related_name='medical_entries')
+    session = models.ForeignKey(VeterinarySession, on_delete=models.SET_NULL, null=True, blank=True, related_name='medical_entries')
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    title = models.CharField(max_length=200)
+    date = models.DateField()
+    data = models.JSONField(default=dict)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date', '-id']
+        constraints = [models.UniqueConstraint(fields=['session'], condition=models.Q(kind='prescription', session__isnull=False), name='unique_session_prescription')]
+        indexes = [models.Index(fields=['patient', 'kind', '-date'], name='medical_entry_history_idx')]
+
+
+class ClinicalAmendment(models.Model):
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(ClinicPatientRecord, on_delete=models.CASCADE, related_name='amendments', null=True)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    record_kind = models.CharField(max_length=30)
+    record_id = models.CharField(max_length=100)
+    before = models.JSONField(default=dict)
+    after = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']

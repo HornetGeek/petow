@@ -58,6 +58,7 @@ from pets.serializers import PublicPetSerializer
 from pets.notifications import create_notification, create_notification_once
 from pets.notification_events import enqueue_notification_event
 from pets.push_targets import attach_push_targets
+from .medical import MedicalPatientMixin, require_clinical, audit, sync_session
 from .permissions import CanEditClinicProfile, IsClinicStaff, IsPlatformAdmin
 from .marketplace import MARKETPLACE_SERVICE_GROUPS, get_marketplace_categories_for_group
 from .serializers import (
@@ -1554,7 +1555,7 @@ class PublicStorefrontBookingView(APIView):
 
         return Response(StorefrontBookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
-class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
+class ClinicPatientViewSet(MedicalPatientMixin, ClinicContextMixin, viewsets.ModelViewSet):
     serializer_class = ClinicPatientRecordSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -1568,7 +1569,7 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             .select_related('owner', 'linked_user', 'linked_pet', 'linked_pet__breed')
         )
         search = self.request.query_params.get('search')
-        if search:
+        if search and self.action == 'list':
             queryset = queryset.filter(
                 Q(name__icontains=search)
                 | Q(species__icontains=search)
@@ -1600,6 +1601,7 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def notes(self, request, pk=None):
+        require_clinical(request.user, self.get_clinic())
         patient = self.get_object()
         text = (request.data.get('text') or request.data.get('note') or '').strip()
         if not text:
@@ -1615,6 +1617,7 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='medical-records')
     def medical_records(self, request, pk=None):
+        require_clinical(request.user, self.get_clinic())
         patient = self.get_object()
         serializer = ClinicPatientMedicalRecordCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1652,6 +1655,7 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='sessions/complete')
     def complete_session(self, request, pk=None):
+        require_clinical(request.user, self.get_clinic())
         patient = self.get_object()
         completion_serializer = ClinicPatientCompletedSessionSerializer(
             data=request.data,
@@ -1668,6 +1672,16 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         )
 
         with transaction.atomic():
+            ClinicPatientRecord.objects.select_for_update().get(pk=patient.pk)
+            creation_key = request.data.get('creation_key')
+            if creation_key:
+                if not isinstance(creation_key, str) or len(creation_key) > 100:
+                    raise ValidationError({'creation_key': 'مفتاح الطلب غير صالح.'})
+                previous = VeterinarySession.objects.filter(creation_key=creation_key).first()
+                if previous:
+                    if previous.clinic_id != patient.clinic_id or previous.clinic_patient_id != patient.id:
+                        raise ValidationError({'creation_key': 'مفتاح الطلب مستخدم بالفعل.'})
+                    return Response(VeterinarySessionSerializer(previous, context=self.get_serializer_context()).data)
             appointment = VeterinaryAppointment.objects.create(
                 clinic=patient.clinic,
                 clinic_patient=patient,
@@ -1694,6 +1708,7 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
                 or provider_name
             )
             session = VeterinarySession.objects.create(
+                creation_key=creation_key,
                 appointment=appointment,
                 clinic=patient.clinic,
                 clinic_patient=patient,
@@ -1730,14 +1745,26 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             if update_fields:
                 patient.save(update_fields=update_fields)
 
+            sync_session(session)
         output = VeterinarySessionSerializer(session, context=self.get_serializer_context())
         return Response(output.data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['get', 'post'])
     def documents(self, request, pk=None):
         patient = self.get_object()
+        if request.method == 'GET':
+            files = list(ClinicPatientDocumentSerializer(patient.documents.select_related('uploaded_by').all(),
+                many=True, context=self.get_serializer_context()).data)
+            files += ClinicPatientProfileSerializer(context=self.get_serializer_context())._linked_pet_certificate_files(patient)
+            paginator = PageNumberPagination()
+            paginator.page_size = 25
+            return paginator.get_paginated_response(paginator.paginate_queryset(files, request))
+        require_clinical(request.user, self.get_clinic())
         serializer = ClinicPatientDocumentSerializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
+        linked_session = serializer.validated_data.get('session')
+        if linked_session and (linked_session.clinic_id != patient.clinic_id or linked_session.clinic_patient_id != patient.id):
+            raise ValidationError({'session': 'الجلسة لا تنتمي لهذا المريض.'})
         document = ClinicPatientDocument.objects.create(
             clinic=patient.clinic,
             patient=patient,
@@ -1751,6 +1778,37 @@ class ClinicPatientViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     serializer_class = ClinicAppointmentSerializer
     permission_classes = [IsAuthenticated, IsClinicStaff]
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        if data.get('diagnosis') or data.get('treatment') or data.get('status') in ('COMPLETED', 'IN_SESSION'):
+            require_clinical(self.request.user, self.get_clinic())
+        serializer.save()
+
+    def update(self, request, *args, **kwargs):
+        clinical_fields = {'diagnosis', 'treatment'}
+        session_fields = clinical_fields | {'notes', 'reason', 'next_appointment', 'scheduled_date', 'scheduled_time', 'appointment_type'}
+        with transaction.atomic():
+            appointment = get_object_or_404(self.get_queryset().select_for_update(of=('self',)), pk=kwargs['pk'])
+            has_session = hasattr(appointment, 'session')
+            if clinical_fields.intersection(request.data) or appointment.status in ('COMPLETED', 'completed') or request.data.get('status') in ('COMPLETED', 'IN_SESSION'):
+                require_clinical(request.user, self.get_clinic())
+            if has_session and session_fields.intersection(request.data):
+                raise ValidationError({'detail': 'عدّل البيانات الطبية من الجلسة المرتبطة.'})
+            if {'clinic_patient', 'pet', 'owner'}.intersection(request.data):
+                raise ValidationError({'detail': 'لا يمكن نقل الموعد إلى مريض آخر.'})
+            before = self.get_serializer(appointment).data
+            serializer = self.get_serializer(appointment, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            appointment = serializer.save()
+            if appointment.clinic_patient_id:
+                from .medical import appointments_for
+                latest = appointments_for(appointment.clinic_patient).filter(status__in=['COMPLETED', 'completed']).first()
+                appointment.clinic_patient.last_visit = latest.scheduled_date if latest else None
+                appointment.clinic_patient.next_appointment = latest.next_appointment if latest else None
+                appointment.clinic_patient.save(update_fields=['last_visit', 'next_appointment', 'updated_at'])
+            audit(request.user, appointment.clinic, appointment.clinic_patient, 'appointment', appointment.id, before, serializer.data)
+        return Response(serializer.data)
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -1816,8 +1874,9 @@ class ClinicAppointmentViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='start-session')
     def start_session(self, request, pk=None):
+        require_clinical(request.user, self.get_clinic())
         with transaction.atomic():
-            appointment = self.get_queryset().select_for_update().get(pk=pk)
+            appointment = get_object_or_404(self.get_queryset().select_for_update(of=('self',)), pk=pk)
             if appointment.status in {
                 VeterinaryAppointment.STATUS_CANCELLED,
                 VeterinaryAppointment.STATUS_REFUSED,
@@ -1858,6 +1917,17 @@ class VeterinarySessionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             {'detail': 'ابدأ الجلسة من الموعد أولاً.'},
             status=status.HTTP_405_METHOD_NOT_ALLOWED,
         )
+
+    def update(self, request, *args, **kwargs):
+        require_clinical(request.user, self.get_clinic())
+        with transaction.atomic():
+            session = get_object_or_404(self.get_queryset().select_for_update(of=('self',)), pk=kwargs['pk'])
+            before = VeterinarySessionSerializer(session).data
+            serializer = self.get_serializer(session, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            session = serializer.save()
+            audit(request.user, session.clinic, session.clinic_patient, 'session', session.id, before, serializer.data)
+        return Response(serializer.data)
 
     def get_queryset(self):
         return (
@@ -1924,8 +1994,11 @@ class VeterinarySessionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='end')
     def end(self, request, pk=None):
+        require_clinical(request.user, self.get_clinic())
         with transaction.atomic():
-            session = self.get_queryset().select_for_update().get(pk=pk)
+            session = get_object_or_404(self.get_queryset().select_for_update(of=('self',)), pk=pk)
+            if session.session_ended_at:
+                return Response(VeterinarySessionSerializer(session).data)
             serializer = VeterinarySessionEndSerializer(
                 session,
                 data=request.data,
@@ -1964,6 +2037,7 @@ class VeterinarySessionViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             self._notify_owner_summary(session)
             session.owner_summary_sent_at = timezone.now()
             session.save(update_fields=['owner_summary_sent_at', 'updated_at'])
+            sync_session(session)
         return Response(VeterinarySessionSerializer(session, context=self.get_serializer_context()).data)
 
 
@@ -2232,6 +2306,11 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsClinicStaff]
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     lookup_field = 'public_id'
+
+    def perform_update(self, serializer):
+        if any(key in serializer.validated_data for key in ('diagnosis', 'treatment', 'doctor_notes')):
+            require_clinical(self.request.user, self.get_clinic())
+        serializer.save()
 
     def get_queryset(self):
         clinic = self.get_clinic()
@@ -2800,6 +2879,8 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='complete')
     def complete(self, request, public_id=None):
+        if any(request.data.get(key) for key in ('diagnosis', 'treatment', 'doctor_notes')) or request.data.get('completed_result') == 'visit_completed':
+            require_clinical(request.user, self.get_clinic())
         serializer = StorefrontBookingCompleteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
