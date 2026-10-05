@@ -1213,7 +1213,7 @@ class ClinicPatientProfileTests(TestCase):
         appointment = VeterinaryAppointment.objects.get(reason='فحص عام جديد')
         self.assertEqual(appointment.clinic, self.clinic)
         self.assertEqual(appointment.clinic_patient, self.patient)
-        self.assertEqual(appointment.status, 'completed')
+        self.assertEqual(appointment.status, VeterinaryAppointment.STATUS_COMPLETED)
         self.assertEqual(appointment.diagnosis, 'صحة جيدة')
         self.patient.refresh_from_db()
         self.assertEqual(self.patient.last_visit, date(2026, 7, 8))
@@ -1265,7 +1265,7 @@ class ClinicPatientProfileTests(TestCase):
         appointment = session.appointment
         self.assertEqual(session.clinic_patient, self.patient)
         self.assertEqual(appointment.clinic_patient, self.patient)
-        self.assertEqual(appointment.status, 'completed')
+        self.assertEqual(appointment.status, VeterinaryAppointment.STATUS_COMPLETED)
         self.assertEqual(appointment.scheduled_date, date(2026, 7, 8))
         self.assertEqual(appointment.scheduled_time, time(14, 30))
         self.assertEqual(appointment.next_appointment, date(2026, 8, 8))
@@ -1481,7 +1481,7 @@ class ClinicPatientProfileTests(TestCase):
         self.assertIn('applied: checked=2', applied.getvalue())
 
     def test_upload_patient_document(self):
-        upload = SimpleUploadedFile('record.txt', b'profile record', content_type='text/plain')
+        upload = SimpleUploadedFile('record.pdf', b'%PDF-1.4 profile record', content_type='application/pdf')
 
         response = self.client.post(
             reverse('clinic-patients-documents', kwargs={'pk': self.patient.id}),
