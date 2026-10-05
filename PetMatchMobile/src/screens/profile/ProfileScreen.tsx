@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Linking,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../contexts/AuthContext';
 import { apiService, User, Pet } from '../../services/api';
@@ -22,10 +23,20 @@ import SettingsScreen from './SettingsScreen';
 import EditAccountScreen from './EditAccountScreen';
 import PrivacyPolicyScreen from '../legal/PrivacyPolicyScreen';
 import TermsScreen from '../legal/TermsScreen';
+import VerificationScreen from './VerificationScreen';
+import AdoptionRequestsScreen from '../adoption-request/AdoptionRequestsScreen';
+import ShareCardGeneratorScreen from '../share/ShareCardGeneratorScreen';
+import { resolveMediaUrl } from '../../utils/mediaUrl';
+import { getFloatingTabBarContentPadding } from '../../utils/tabBarLayout';
+import AppIcon from '../../components/icons/AppIcon';
 
+interface ProfileScreenProps {
+  onSetTabBarVisible?: (visible: boolean) => void;
+}
 
-const ProfileScreen: React.FC = () => {
+const ProfileScreen: React.FC<ProfileScreenProps> = ({ onSetTabBarVisible }) => {
   const { logout } = useAuth();
+  const insets = useSafeAreaInsets();
   const [userProfile, setUserProfile] = useState<User | null>(null);
   const [userPets, setUserPets] = useState<Pet[]>([]);
   const [userPetsCount, setUserPetsCount] = useState<number>(0);
@@ -43,6 +54,26 @@ const ProfileScreen: React.FC = () => {
   const [showTerms, setShowTerms] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
+  // Phone verification flow removed
+  const [showVerification, setShowVerification] = useState(false);
+  const [showAdoptionRequests, setShowAdoptionRequests] = useState(false);
+  const [showShareCardGenerator, setShowShareCardGenerator] = useState(false);
+  const [notifyBreedingRequests, setNotifyBreedingRequests] = useState(true);
+  const [notifyAdoptionPets, setNotifyAdoptionPets] = useState(true);
+  const [savingNotifPrefs, setSavingNotifPrefs] = useState(false);
+  const hasNestedFullscreenFlow =
+    showAddPet ||
+    showMyPets ||
+    showFavorites ||
+    showChatList ||
+    (showChat && !!selectedChatId) ||
+    showSettings ||
+    showPrivacyPolicy ||
+    showTerms ||
+    showEdit ||
+    showVerification ||
+    showAdoptionRequests ||
+    showShareCardGenerator;
 
   useEffect(() => {
     loadUserProfile();
@@ -50,11 +81,20 @@ const ProfileScreen: React.FC = () => {
     loadCounts();
   }, []);
 
+  useEffect(() => {
+    if (!onSetTabBarVisible) return;
+    onSetTabBarVisible(!hasNestedFullscreenFlow);
+    return () => onSetTabBarVisible(true);
+  }, [hasNestedFullscreenFlow, onSetTabBarVisible]);
+
   const loadUserProfile = async () => {
     try {
       const response = await apiService.getUserProfile();
       if (response.success && response.data) {
         setUserProfile(response.data);
+        // Initialize notification preferences from user profile
+        setNotifyBreedingRequests(response.data.notify_breeding_requests ?? true);
+        setNotifyAdoptionPets(response.data.notify_adoption_pets ?? true);
       }
     } catch (error) {
       console.error('Error loading user profile:', error);
@@ -112,6 +152,32 @@ const ProfileScreen: React.FC = () => {
     );
   };
 
+  const handleNotificationToggle = async (type: 'breeding' | 'adoption', value: boolean) => {
+    try {
+      setSavingNotifPrefs(true);
+
+      const newBreeding = type === 'breeding' ? value : notifyBreedingRequests;
+      const newAdoption = type === 'adoption' ? value : notifyAdoptionPets;
+
+      const response = await apiService.updateNotificationPreferences(newBreeding, newAdoption);
+
+      if (response.success) {
+        if (type === 'breeding') {
+          setNotifyBreedingRequests(value);
+        } else {
+          setNotifyAdoptionPets(value);
+        }
+      } else {
+        Alert.alert('خطأ', 'فشل في تحديث إعدادات الإشعارات');
+      }
+    } catch (error) {
+      console.error('Error updating notification preferences:', error);
+      Alert.alert('خطأ', 'فشل في تحديث إعدادات الإشعارات');
+    } finally {
+      setSavingNotifPrefs(false);
+    }
+  };
+
   const showAddPetScreen = () => setShowAddPet(true);
   const hideAddPetScreen = () => {
     setShowAddPet(false);
@@ -148,6 +214,16 @@ const ProfileScreen: React.FC = () => {
   const closeTermsScreen = () => setShowTerms(false);
   const openEdit = () => setShowEdit(true);
   const closeEdit = () => setShowEdit(false);
+  // Phone verification flow removed
+  const openVerification = () => setShowVerification(true);
+  const closeVerification = () => {
+    setShowVerification(false);
+    loadUserProfile(); // Refresh profile to get updated verification status
+  };
+  const openAdoptionRequests = () => setShowAdoptionRequests(true);
+  const closeAdoptionRequests = () => setShowAdoptionRequests(false);
+  const openShareCardGenerator = () => setShowShareCardGenerator(true);
+  const closeShareCardGenerator = () => setShowShareCardGenerator(false);
 
   const performDeleteAccount = async () => {
     if (deletePending) return;
@@ -192,7 +268,7 @@ const ProfileScreen: React.FC = () => {
     return <ChatListScreen onClose={hideChatListScreen} />;
   }
   if (showChat && selectedChatId) {
-    return <ChatScreen firebaseChatId={selectedChatId} onClose={closeChat} />;
+    return <ChatScreen firebaseChatId={selectedChatId} onClose={closeChat} reserveTabBarSpace={false} />;
   }
   if (showEdit && userProfile) {
     return (
@@ -208,6 +284,17 @@ const ProfileScreen: React.FC = () => {
   }
   if (showTerms) {
     return <TermsScreen onClose={closeTermsScreen} />;
+  }
+  // Phone verification screen removed
+
+  if (showVerification) {
+    return <VerificationScreen onClose={closeVerification} onVerificationSubmitted={closeVerification} />;
+  }
+  if (showAdoptionRequests) {
+    return <AdoptionRequestsScreen onClose={closeAdoptionRequests} />;
+  }
+  if (showShareCardGenerator) {
+    return <ShareCardGeneratorScreen onClose={closeShareCardGenerator} />;
   }
   if (showSettings) {
     return (
@@ -239,29 +326,48 @@ const ProfileScreen: React.FC = () => {
   const avatarUri = (() => {
     const raw = userProfile?.profile_picture;
     if (!raw || typeof raw !== 'string' || !raw.trim().length) return fallbackAvatar;
-    let u = raw.trim().replace('http://', 'https://');
-    if (u.startsWith('https:/') && !u.startsWith('https://')) u = u.replace('https:/', 'https://');
-    if (u.includes('https:/.petow.app')) u = u.replace(/https:\/\/.?petow\.app/g, 'https://api.petow.app');
-    if (!/^https?:\/\//i.test(u)) u = `https://api.petow.app${u.startsWith('/') ? '' : '/'}${u}`;
-    if (u.includes('/api/media/')) u = u.replace('/api/media/', '/media/');
-    return u || fallbackAvatar;
+    return resolveMediaUrl(raw, fallbackAvatar);
   })();
   const joinDateLabel = userProfile?.date_joined
     ? new Date(userProfile.date_joined).toLocaleDateString('ar-EG', { month: 'long', year: 'numeric' })
     : null;
 
   const stats = [
-    { key: 'pets', icon: '🐾', label: 'حيواناتي', value: String(userPetsCount) },
-    { key: 'requests', icon: '💞', label: 'طلبات التزاوج', value: String(breedingRequestsCount) },
-    { key: 'favorites', icon: '❤️', label: 'المفضلة', value: String(favoritesCount) },
+    { key: 'pets', iconName: 'paw' as const, iconColor: '#FF6B35', label: 'حيواناتي', value: String(userPetsCount) },
+    { key: 'requests', iconName: 'heart' as const, iconColor: '#FF4D6D', iconFilled: true, label: 'طلبات التزاوج', value: String(breedingRequestsCount) },
+    { key: 'favorites', iconName: 'heart' as const, iconColor: '#FF4D6D', iconFilled: true, label: 'المفضلة', value: String(favoritesCount) },
   ];
 
-  const quickActions = [
-    { key: 'add', label: 'إضافة حيوان', icon: '➕', onPress: showAddPetScreen },
-    { key: 'mypets', label: 'حيواناتي', icon: '🐶', onPress: showMyPetsScreen },
-    { key: 'favorites', label: 'المفضلة', icon: '❤️', onPress: showFavoritesScreen },
-    { key: 'chat', label: 'المحادثات', icon: '💬', onPress: showChatListScreen },
-    { key: 'support', label: 'الدعم', icon: '🟢', onPress: async () => {
+  const phoneVerified = false; // Phone verification removed from UI
+  const identityVerified = !!userProfile?.is_verified;
+
+  // Phone verification UI removed
+
+  const getIdentityVerificationIcon = (): React.ReactElement => {
+    return <AppIcon name="shield-check" size={22} color={identityVerified ? '#4CAF50' : '#14B8A6'} />;
+  };
+
+  const getIdentityVerificationLabel = () => {
+    return identityVerified ? 'توثيق الهوية مكتمل' : 'توثيق الهوية (اختياري)';
+  };
+
+  const quickActions: { key: string; label: string; icon: string | React.ReactElement; onPress: () => void; danger?: boolean; verified?: boolean }[] = [
+    { key: 'add', label: 'إضافة حيوان', icon: <AppIcon name="plus" size={22} color="#02B7B4" />, onPress: showAddPetScreen },
+    { key: 'mypets', label: 'حيواناتي', icon: <AppIcon name="paw" size={22} color="#FF6B35" />, onPress: showMyPetsScreen },
+    // { key: 'shareCard', label: 'كروت المشاركة', icon: '🎨', onPress: openShareCardGenerator },
+    { key: 'favorites', label: 'المفضلة', icon: <AppIcon name="heart" size={22} color="#FF4D6D" filled />, onPress: showFavoritesScreen },
+    { key: 'chat', label: 'المحادثات', icon: <AppIcon name="chat" size={22} color="#3B82F6" />, onPress: showChatListScreen },
+    { key: 'adoption', label: 'طلبات التبني', icon: <AppIcon name="home" size={22} color="#FF6B35" />, onPress: openAdoptionRequests },
+    // phone verification quick action removed
+    {
+      key: 'identityVerification',
+      label: getIdentityVerificationLabel(),
+      icon: getIdentityVerificationIcon(),
+      onPress: openVerification,
+      verified: identityVerified
+    },
+    {
+      key: 'support', label: 'الدعم', icon: <AppIcon name="chat" size={22} color="#25D366" />, onPress: async () => {
         const raw = '+201272011482';
         const phone = raw.replace(/[^\d]/g, '');
         const text = encodeURIComponent('مرحباً، أحتاج إلى دعم من داخل تطبيق PetMatch');
@@ -274,21 +380,26 @@ const ProfileScreen: React.FC = () => {
             await Linking.openURL(appUrl);
             return;
           }
-        } catch {}
+        } catch { }
         try {
           // Fallback to web (browser)
           await Linking.openURL(webUrl);
         } catch (e) {
           Alert.alert('تعذر الفتح', 'لا يمكن فتح واتساب على هذا الجهاز.');
         }
-      } },
-    { key: 'edit', label: 'تعديل البيانات', icon: '📝', onPress: openEdit },
-    { key: 'settings', label: 'الإعدادات', icon: '⚙️', onPress: showSettingsScreen },
-    { key: 'delete', label: 'حذف الحساب', icon: '🗑️', onPress: confirmDeleteAccount, danger: true },
+      }
+    },
+    { key: 'edit', label: 'تعديل البيانات', icon: <AppIcon name="document" size={22} color="#3B82F6" />, onPress: openEdit },
+    { key: 'settings', label: 'الإعدادات', icon: <AppIcon name="settings" size={22} color="#7f8c8d" />, onPress: showSettingsScreen },
+    { key: 'delete', label: 'حذف الحساب', icon: <AppIcon name="trash" size={22} color="#E74C3C" />, onPress: confirmDeleteAccount, danger: true },
   ];
+  const profileBottomSafePadding = getFloatingTabBarContentPadding(insets.bottom, 8);
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={[styles.contentContainer, { paddingBottom: profileBottomSafePadding }]}
+    >
       <View style={styles.heroCard}>
         <View style={styles.heroTopRow}>
           <View style={styles.avatarWrapper}>
@@ -301,9 +412,10 @@ const ProfileScreen: React.FC = () => {
             {joinDateLabel ? (
               <Text style={styles.heroSubtitle}>عضو منذ {joinDateLabel}</Text>
             ) : null}
-            {userProfile?.is_verified ? (
-              <View style={styles.heroBadge}>
-                <Text style={styles.heroBadgeText}>حساب موثَّق</Text>
+            {/* Phone verification badge removed */}
+            {identityVerified ? (
+              <View style={[styles.heroBadge, styles.heroBadgeSecondary]}>
+                <Text style={styles.heroBadgeText}>توثيق الهوية</Text>
               </View>
             ) : null}
           </View>
@@ -313,14 +425,67 @@ const ProfileScreen: React.FC = () => {
         </View>
       </View>
 
+      {/* Phone verification alert removed */}
+
       <View style={styles.statsRow}>
         {stats.map((stat) => (
           <View key={stat.key} style={styles.statCard}>
-            <Text style={styles.statIcon}>{stat.icon}</Text>
+            <AppIcon name={stat.iconName} size={22} color={stat.iconColor} filled={stat.iconFilled ?? false} />
             <Text style={styles.statNumber}>{stat.value}</Text>
             <Text style={styles.statLabel}>{stat.label}</Text>
           </View>
         ))}
+      </View>
+
+      {/* Notification Preferences Section */}
+      <View style={styles.sectionCard}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <AppIcon name="bell" size={18} color="#F59E0B" />
+          <Text style={styles.sectionTitle}>إعدادات الإشعارات</Text>
+        </View>
+        <Text style={styles.sectionSubtitle}>تحكم في الإشعارات التي تصلك</Text>
+
+        <View style={styles.notificationPrefsContainer}>
+          {/* Breeding Notifications */}
+          <TouchableOpacity
+            style={styles.notificationPrefRow}
+            onPress={() => handleNotificationToggle('breeding', !notifyBreedingRequests)}
+            disabled={savingNotifPrefs}
+          >
+            <View style={styles.notificationPrefInfo}>
+              <View style={styles.notificationPrefIcon}>
+                <AppIcon name="heart" size={28} color="#FF4D6D" filled />
+              </View>
+              <View style={styles.notificationPrefText}>
+                <Text style={styles.notificationPrefTitle}>إشعارات طلبات التزاوج</Text>
+                <Text style={styles.notificationPrefDesc}>تلقي إشعارات عند وجود طلبات تزاوج جديدة</Text>
+              </View>
+            </View>
+            <View style={[styles.toggle, notifyBreedingRequests && styles.toggleActive]}>
+              <View style={[styles.toggleThumb, notifyBreedingRequests && styles.toggleThumbActive]} />
+            </View>
+          </TouchableOpacity>
+
+          {/* Adoption Notifications */}
+          <TouchableOpacity
+            style={styles.notificationPrefRow}
+            onPress={() => handleNotificationToggle('adoption', !notifyAdoptionPets)}
+            disabled={savingNotifPrefs}
+          >
+            <View style={styles.notificationPrefInfo}>
+              <View style={styles.notificationPrefIcon}>
+                <AppIcon name="home" size={28} color="#FF6B35" />
+              </View>
+              <View style={styles.notificationPrefText}>
+                <Text style={styles.notificationPrefTitle}>إشعارات التبني الجديدة</Text>
+                <Text style={styles.notificationPrefDesc}>تلقي إشعارات عند إضافة حيوانات متاحة للتبني</Text>
+              </View>
+            </View>
+            <View style={[styles.toggle, notifyAdoptionPets && styles.toggleActive]}>
+              <View style={[styles.toggleThumb, notifyAdoptionPets && styles.toggleThumbActive]} />
+            </View>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.sectionCard}>
@@ -333,12 +498,29 @@ const ProfileScreen: React.FC = () => {
                 styles.actionCard,
                 (index % 2 === 1) ? styles.actionCardRight : null,
                 action.danger ? styles.actionCardDanger : null,
+                action.verified ? styles.actionCardVerified : null,
               ]}
               onPress={action.onPress}
               disabled={action.key === 'delete' && deletePending}
             >
-              <Text style={[styles.actionIcon, action.danger ? styles.actionIconDanger : null]}>{action.icon}</Text>
-              <Text style={[styles.actionLabel, action.danger ? styles.actionLabelDanger : null]}>
+              {typeof action.icon === 'string' ? (
+                <Text style={[
+                  styles.actionIcon,
+                  action.danger ? styles.actionIconDanger : null,
+                  action.verified ? styles.actionIconVerified : null
+                ]}>
+                  {action.icon}
+                </Text>
+              ) : (
+                <View style={styles.actionIconContainer}>
+                  {action.icon}
+                </View>
+              )}
+              <Text style={[
+                styles.actionLabel,
+                action.danger ? styles.actionLabelDanger : null,
+                action.verified ? styles.actionLabelVerified : null
+              ]}>
                 {action.key === 'delete' && deletePending ? 'جارٍ الحذف…' : action.label}
               </Text>
             </TouchableOpacity>
@@ -416,14 +598,22 @@ const styles = StyleSheet.create({
   heroBadge: {
     marginTop: 8,
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    backgroundColor: '#0ba360',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 14,
+  },
+  heroBadgeSecondary: {
+    marginTop: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: '#1c344d',
     paddingHorizontal: 12,
     paddingVertical: 4,
     borderRadius: 14,
   },
   heroBadgeText: {
     color: '#fff',
-    fontWeight: '600',
+    fontWeight: '700',
     fontSize: 12,
   },
   heroEditButton: {
@@ -486,6 +676,73 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1c344d',
   },
+  sectionSubtitle: {
+    fontSize: 13,
+    color: '#64748b',
+    marginTop: 4,
+  },
+  notificationPrefsContainer: {
+    marginTop: 16,
+  },
+  notificationPrefRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  notificationPrefInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  notificationPrefIcon: {
+    marginRight: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notificationPrefText: {
+    flex: 1,
+  },
+  notificationPrefTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 4,
+  },
+  notificationPrefDesc: {
+    fontSize: 12,
+    color: '#64748b',
+    lineHeight: 16,
+  },
+  toggle: {
+    width: 50,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#cbd5e1',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleActive: {
+    backgroundColor: '#02B7B4',
+  },
+  toggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  toggleThumbActive: {
+    alignSelf: 'flex-end',
+  },
   actionsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -509,12 +766,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff4f4',
     borderColor: '#ffd6d6',
   },
+  actionCardVerified: {
+    backgroundColor: '#E8F5E9',
+    borderColor: '#C8E6C9',
+  },
   actionIcon: {
     fontSize: 22,
     marginBottom: 8,
   },
+  actionIconContainer: {
+    marginBottom: 8,
+  },
   actionIconDanger: {
     color: '#e74c3c',
+  },
+  actionIconVerified: {
+    color: '#4CAF50',
   },
   actionLabel: {
     fontSize: 14,
@@ -524,6 +791,11 @@ const styles = StyleSheet.create({
   },
   actionLabelDanger: {
     color: '#e74c3c',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  actionLabelVerified: {
+    color: '#2E7D32',
     fontWeight: '700',
     textAlign: 'center',
   },
@@ -546,6 +818,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 15,
   },
+  // Removed phone alert styles
 });
 
 export default ProfileScreen;

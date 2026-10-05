@@ -1,20 +1,29 @@
-# Ignore Backend files
+# Folders to ignore
+petow-frontend/
+PetMatchMobile/
 patmatch/
-docker-compose*.yml
-scripts/
 nginx/
-*.py
-*.pyc
-__pycache__/
-requirements.txt
-manage.py
+ssl/
+scripts/
+branding/
 
-# Keep only Frontend
-!petmatch-nextjs/
-!petmatch-nextjs/src/
-!petmatch-nextjs/public/
-!petmatch-nextjs/package.json
-!petmatch-nextjs/next.config.ts
-!petmatch-nextjs/tsconfig.json
-!petmatch-nextjs/tailwind.config.js
-!petmatch-nextjs/postcss.config.mjs 
+# Documentation files
+*.md
+!README.md
+
+# Docker files
+docker-compose*.yml
+Dockerfile
+
+# Certificates and keys
+*.txt
+*.pem
+*.key
+*.crt
+
+# Python files
+*.py
+__pycache__/
+
+# Logs
+*.log

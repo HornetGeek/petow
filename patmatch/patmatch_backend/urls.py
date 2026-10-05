@@ -19,6 +19,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.static import serve
+from accounts import views as account_views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -27,6 +28,8 @@ urlpatterns = [
     path('api/auth/', include('accounts.urls', namespace='auth')),
     path('api/pets/', include('pets.urls')),
     path('api/accounts/', include('accounts.urls', namespace='accounts')),
+    # Legacy compatibility alias used by older mobile builds.
+    path('api/notifications/register-device/', account_views.update_notification_token),
     path('api/clinics/', include('clinics.urls')),
 ]
 

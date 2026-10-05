@@ -2,13 +2,38 @@ import 'react-native-gesture-handler/jestSetup';
 
 // Mock react-native-reanimated
 jest.mock('react-native-reanimated', () => {
-  const Reanimated = require('react-native-reanimated/mock');
-  Reanimated.default.call = () => {};
-  return Reanimated;
-});
+  try {
+    const Reanimated = require('react-native-reanimated/mock');
+    Reanimated.default.call = () => {};
+    return Reanimated;
+  } catch {
+    return {
+      __esModule: true,
+      default: { call: () => {} },
+      call: () => {},
+      createAnimatedComponent: (Component) => Component,
+      Extrapolate: { CLAMP: 'clamp' },
+      useSharedValue: (value) => ({ value }),
+      useDerivedValue: (factory) => ({ value: factory() }),
+      useAnimatedStyle: () => ({}),
+      useAnimatedProps: () => ({}),
+      withTiming: (value) => value,
+      withSpring: (value) => value,
+      withDelay: (_delay, value) => value,
+      withRepeat: (value) => value,
+      cancelAnimation: () => {},
+      runOnJS: (fn) => fn,
+      runOnUI: (fn) => fn,
+    };
+  }
+}, { virtual: true });
 
 // Mock react-native-vector-icons
-jest.mock('react-native-vector-icons/MaterialIcons', () => 'Icon');
+jest.mock('react-native-vector-icons/MaterialIcons', () => 'Icon', { virtual: true });
+
+jest.mock('react-native-device-info', () => ({
+  getVersion: jest.fn(() => '1.0.16'),
+}));
 
 // Mock AsyncStorage
 jest.mock('@react-native-async-storage/async-storage', () =>

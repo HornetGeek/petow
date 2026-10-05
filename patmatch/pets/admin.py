@@ -1,5 +1,27 @@
 from django.contrib import admin
-from .models import Breed, Pet, PetImage, BreedingRequest, Favorite, VeterinaryClinic, Notification, ChatRoom, AdoptionRequest
+from django.utils import timezone
+from django.utils.html import mark_safe
+from .models import (
+    Breed,
+    Pet,
+    PetImage,
+    BreedingRequest,
+    Favorite,
+    PetLike,
+    VeterinaryClinic,
+    Notification,
+    NotificationOutbox,
+    EmailReminderDispatch,
+    ChatRoom,
+    AdoptionRequest,
+    Story,
+    StoryView,
+    StoryReport,
+    StoryReaction,
+    EngagementEvent,
+    SavedSearch,
+    SavedSearchMatch,
+)
 
 @admin.register(Breed)
 class BreedAdmin(admin.ModelAdmin):
@@ -42,6 +64,167 @@ class PetAdmin(admin.ModelAdmin):
             'fields': ('description', 'hosting_preference')
         }),
     )
+
+
+@admin.register(Story)
+class StoryAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'thumbnail', 'author_email', 'pet', 'caption_preview',
+        'expires_at', 'is_hidden', 'reports_count', 'created_at',
+    ]
+    list_filter = ['is_hidden', 'deleted_at', 'created_at', 'expires_at']
+    search_fields = ['caption', 'author__email', 'author__first_name', 'author__last_name', 'pet__name']
+    raw_id_fields = ['author', 'pet', 'hidden_by']
+    readonly_fields = [
+        'thumbnail', 'views_count', 'reports_count', 'created_at',
+        'updated_at', 'hidden_at', 'deleted_at',
+    ]
+    actions = ['hide_selected_stories', 'unhide_selected_stories']
+
+    fieldsets = (
+        ('القصة', {
+            'fields': ('author', 'pet', 'image', 'thumbnail', 'caption', 'expires_at')
+        }),
+        ('المراجعة', {
+            'fields': ('is_hidden', 'hidden_by', 'hidden_reason', 'hidden_at', 'deleted_at')
+        }),
+        ('الإحصائيات', {
+            'fields': ('views_count', 'reports_count')
+        }),
+        ('التواريخ', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('author', 'pet').prefetch_related('reports')
+
+    def thumbnail(self, obj):
+        if not obj or not obj.image:
+            return '-'
+        return mark_safe(
+            f'<img src="{obj.image.url}" style="width:72px;height:72px;object-fit:cover;border-radius:10px;" />'
+        )
+    thumbnail.short_description = 'الصورة'
+
+    def author_email(self, obj):
+        return obj.author.email
+    author_email.short_description = 'المستخدم'
+    author_email.admin_order_field = 'author__email'
+
+    def caption_preview(self, obj):
+        if not obj.caption:
+            return '-'
+        return obj.caption[:60] + ('…' if len(obj.caption) > 60 else '')
+    caption_preview.short_description = 'النص'
+
+    def views_count(self, obj):
+        return obj.views.count()
+    views_count.short_description = 'المشاهدات'
+
+    def reports_count(self, obj):
+        return obj.reports.count()
+    reports_count.short_description = 'البلاغات'
+
+    @admin.action(description='إخفاء القصص المحددة')
+    def hide_selected_stories(self, request, queryset):
+        now = timezone.now()
+        updated = queryset.update(
+            is_hidden=True,
+            hidden_by_id=request.user.id,
+            hidden_reason='Hidden from Django admin',
+            hidden_at=now,
+            updated_at=now,
+        )
+        self.message_user(request, f'تم إخفاء {updated} قصة.')
+
+    @admin.action(description='إظهار القصص المحددة')
+    def unhide_selected_stories(self, request, queryset):
+        now = timezone.now()
+        updated = queryset.update(
+            is_hidden=False,
+            hidden_by=None,
+            hidden_reason='',
+            hidden_at=None,
+            updated_at=now,
+        )
+        self.message_user(request, f'تم إظهار {updated} قصة.')
+
+
+@admin.register(StoryView)
+class StoryViewAdmin(admin.ModelAdmin):
+    list_display = ['id', 'story', 'user', 'viewed_at']
+    list_filter = ['viewed_at']
+    search_fields = ['story__caption', 'user__email']
+    raw_id_fields = ['story', 'user']
+    readonly_fields = ['viewed_at']
+
+
+@admin.register(StoryReaction)
+class StoryReactionAdmin(admin.ModelAdmin):
+    list_display = ['id', 'story', 'user', 'reaction', 'updated_at', 'created_at']
+    list_filter = ['reaction', 'created_at', 'updated_at']
+    search_fields = ['story__caption', 'user__email', 'user__first_name', 'user__last_name']
+    raw_id_fields = ['story', 'user']
+    readonly_fields = ['created_at', 'updated_at']
+
+
+@admin.register(StoryReport)
+class StoryReportAdmin(admin.ModelAdmin):
+    list_display = ['id', 'story', 'reporter', 'reason', 'status', 'created_at']
+    list_filter = ['status', 'reason', 'created_at']
+    search_fields = ['story__caption', 'reporter__email', 'details']
+    raw_id_fields = ['story', 'reporter', 'reviewed_by']
+    readonly_fields = ['created_at', 'updated_at', 'reviewed_at']
+    actions = ['mark_reports_reviewed', 'dismiss_reports', 'hide_reported_stories']
+
+    fieldsets = (
+        ('البلاغ', {
+            'fields': ('story', 'reporter', 'reason', 'details', 'status')
+        }),
+        ('المراجعة', {
+            'fields': ('reviewed_by', 'reviewed_at')
+        }),
+        ('التواريخ', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+    @admin.action(description='تحديد البلاغات كمراجعة')
+    def mark_reports_reviewed(self, request, queryset):
+        updated = queryset.update(
+            status=StoryReport.STATUS_REVIEWED,
+            reviewed_by_id=request.user.id,
+            reviewed_at=timezone.now(),
+        )
+        self.message_user(request, f'تمت مراجعة {updated} بلاغ.')
+
+    @admin.action(description='تجاهل البلاغات المحددة')
+    def dismiss_reports(self, request, queryset):
+        updated = queryset.update(
+            status=StoryReport.STATUS_DISMISSED,
+            reviewed_by_id=request.user.id,
+            reviewed_at=timezone.now(),
+        )
+        self.message_user(request, f'تم تجاهل {updated} بلاغ.')
+
+    @admin.action(description='إخفاء القصص المرتبطة بالبلاغات')
+    def hide_reported_stories(self, request, queryset):
+        story_ids = queryset.values_list('story_id', flat=True).distinct()
+        now = timezone.now()
+        updated = Story.objects.filter(id__in=story_ids).update(
+            is_hidden=True,
+            hidden_by_id=request.user.id,
+            hidden_reason='Hidden after story report review',
+            hidden_at=now,
+            updated_at=now,
+        )
+        queryset.update(
+            status=StoryReport.STATUS_REVIEWED,
+            reviewed_by_id=request.user.id,
+            reviewed_at=now,
+        )
+        self.message_user(request, f'تم إخفاء {updated} قصة مرتبطة بالبلاغات.')
 
 @admin.register(BreedingRequest)
 class BreedingRequestAdmin(admin.ModelAdmin):
@@ -98,11 +281,67 @@ class NotificationAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user', 'related_pet', 'related_breeding_request')
 
+
+@admin.register(NotificationOutbox)
+class NotificationOutboxAdmin(admin.ModelAdmin):
+    list_display = ['id', 'event_type', 'object_id', 'status', 'attempts', 'next_attempt_at', 'created_at']
+    list_filter = ['status', 'event_type', 'created_at']
+    search_fields = ['dedupe_key', 'last_error']
+    readonly_fields = ['created_at', 'updated_at', 'processed_at']
+
+
+@admin.register(EmailReminderDispatch)
+class EmailReminderDispatchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'reminder_key', 'target_date', 'status', 'attempts', 'sent_at', 'updated_at']
+    list_filter = ['reminder_key', 'status', 'target_date']
+    search_fields = ['user__email', 'recipient_email', 'last_error']
+    readonly_fields = ['created_at', 'updated_at', 'sent_at']
+
+
 @admin.register(Favorite)
 class FavoriteAdmin(admin.ModelAdmin):
     list_display = ['user', 'pet', 'created_at']
     list_filter = ['created_at']
     search_fields = ['user__email', 'pet__name']
+
+
+@admin.register(PetLike)
+class PetLikeAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'pet', 'created_at']
+    list_filter = ['created_at']
+    search_fields = ['user__email', 'user__first_name', 'user__last_name', 'pet__name']
+    raw_id_fields = ['user', 'pet']
+
+
+@admin.register(EngagementEvent)
+class EngagementEventAdmin(admin.ModelAdmin):
+    list_display = ['id', 'event_type', 'source', 'target_type', 'user', 'pet', 'story', 'created_at']
+    list_filter = ['event_type', 'source', 'target_type', 'created_at']
+    search_fields = [
+        'user__email', 'user__first_name', 'user__last_name',
+        'pet__name', 'story__caption',
+    ]
+    raw_id_fields = ['user', 'pet', 'story']
+    readonly_fields = ['created_at']
+
+
+@admin.register(SavedSearch)
+class SavedSearchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'name', 'user', 'target_type', 'city', 'alerts_enabled', 'is_active', 'last_notified_at', 'updated_at']
+    list_filter = ['target_type', 'alerts_enabled', 'is_active', 'created_at', 'last_notified_at']
+    search_fields = ['name', 'user__email', 'user__first_name', 'user__last_name', 'city']
+    raw_id_fields = ['user']
+    readonly_fields = ['last_checked_at', 'last_notified_at', 'created_at', 'updated_at']
+
+
+@admin.register(SavedSearchMatch)
+class SavedSearchMatchAdmin(admin.ModelAdmin):
+    list_display = ['id', 'saved_search', 'target_type', 'target_id', 'matched_at', 'notified_at']
+    list_filter = ['target_type', 'matched_at', 'notified_at']
+    search_fields = ['saved_search__name', 'saved_search__user__email', 'target_id']
+    raw_id_fields = ['saved_search']
+    readonly_fields = ['matched_at', 'notified_at']
+
 
 @admin.register(ChatRoom)
 class ChatRoomAdmin(admin.ModelAdmin):

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -16,7 +16,8 @@ import {
 } from 'react-native';
 import { apiService, Pet } from '../../services/api';
 import BreedingRequestScreen from '../breeding-request/BreedingRequestScreen';
-import { useCallback } from 'react';
+import AdoptionRequestScreen from '../adoption-request/AdoptionRequestScreen';
+import AppIcon from '../../components/icons/AppIcon';
 
 // Reuse a lightweight address display that resolves coords to human-readable when needed
 const reverseGeocodeCache = new Map<string, string>();
@@ -29,22 +30,11 @@ const PetLocationDisplay: React.FC<{ pet: Pet; style?: any }> = ({ pet, style })
     const cached = reverseGeocodeCache.get(key);
     if (cached) return cached;
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&addressdetails=1&accept-language=ar,en`,
-        {
-          signal: controller.signal,
-          headers: {
-            'User-Agent': 'PetMatchMobile/1.0 (contact@petmatch.com)',
-            'Accept': 'application/json',
-          },
-        }
-      );
-      clearTimeout(timeoutId);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const full: string | undefined = data?.display_name;
+      const res = await apiService.mapsReverseGeocode({ lat, lng, language: 'ar' });
+      if (!res.success || !res.data?.address) {
+        throw new Error(res.error || 'Reverse geocode failed');
+      }
+      const full: string | undefined = res.data.address;
       if (full && full.length) {
         const parts = full.split(', ').slice(0, 3).join(', ');
         const value = parts || full;
@@ -89,31 +79,60 @@ const PetLocationDisplay: React.FC<{ pet: Pet; style?: any }> = ({ pet, style })
   }, [pet.location, pet.latitude, pet.longitude, getAddressFromCoordinates]);
 
   return (
-    <Text style={style}>📍 {loading ? 'جاري التحميل...' : address}</Text>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+      <AppIcon name="location" size={14} color="#64748B" />
+      <Text style={style}>{loading ? 'جاري التحميل...' : address}</Text>
+    </View>
   );
 };
 
 interface PetDetailsScreenProps {
   petId: number;
   onClose: () => void;
+  onAddPet?: () => void;
+  onOpenChat?: (firebaseChatId: string) => void;
 }
 
-const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) => {
+const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose, onAddPet, onOpenChat }) => {
   const [pet, setPet] = useState<Pet | null>(null);
   const [loading, setLoading] = useState(true);
   const [isFavorite, setIsFavorite] = useState(false);
   const [showBreedingRequest, setShowBreedingRequest] = useState(false);
+  const [showAdoptionRequest, setShowAdoptionRequest] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [showImageModal, setShowImageModal] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
 
   useEffect(() => {
     loadPetDetails();
   }, [petId]);
 
+  // Load user location from profile for distance calculation
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiService.getProfile();
+        if (res.success && res.data) {
+          const lat = Number((res.data as any).latitude);
+          const lng = Number((res.data as any).longitude);
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            setUserLocation({ lat, lng });
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     const onBackPress = () => {
       if (showBreedingRequest) {
         setShowBreedingRequest(false);
+        return true;
+      }
+      if (showAdoptionRequest) {
+        setShowAdoptionRequest(false);
         return true;
       }
       if (showImageModal) {
@@ -126,7 +145,7 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
 
     BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => BackHandler.removeEventListener('hardwareBackPress', onBackPress);
-  }, [showBreedingRequest, showImageModal, onClose]);
+  }, [showBreedingRequest, showAdoptionRequest, showImageModal, onClose]);
 
   const loadPetDetails = async () => {
     try {
@@ -169,6 +188,16 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
     setShowBreedingRequest(false);
   };
 
+  const requestAdoption = async () => {
+    // Adoption requests are open without phone verification
+    setShowAdoptionRequest(true);
+  };
+
+  const hideAdoptionRequest = () => {
+    setShowAdoptionRequest(false);
+    loadPetDetails(); // Refresh pet details
+  };
+
   const openImageModal = (imageUrl: string) => {
     setSelectedImage(imageUrl);
     setShowImageModal(true);
@@ -179,9 +208,52 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
     setSelectedImage(null);
   };
 
+  // Phone verification flow removed
+
   const getImageUrl = (url?: string) => {
     return url?.replace('http://', 'https://') || 
            'https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&q=80';
+  };
+
+  const timeAgo = (iso?: string) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const now = new Date();
+    const diff = Math.max(0, now.getTime() - d.getTime());
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    if (minutes < 1) return 'الآن';
+    if (minutes < 60) return `منذ ${minutes} دقيقة`;
+    if (hours < 24) return `منذ ${hours} ساعة`;
+    if (days < 30) return `منذ ${days} يوم`;
+    const months = Math.floor(days / 30);
+    if (months < 12) return `منذ ${months} شهر`;
+    const years = Math.floor(months / 12);
+    return `منذ ${years} سنة`;
+  };
+
+  const computeDistanceText = (): string | null => {
+    if (!pet) return null;
+    const anyPet: any = pet as any;
+    const server = anyPet.distance_display && String(anyPet.distance_display).trim();
+    if (server) return String(server);
+    if (userLocation) {
+      const plat = Number(anyPet.latitude);
+      const plon = Number(anyPet.longitude);
+      if (!Number.isFinite(plat) || !Number.isFinite(plon)) return null;
+      const toRad = (v: number) => (v * Math.PI) / 180;
+      const R = 6371; // km
+      const dLat = toRad(plat - userLocation.lat);
+      const dLon = toRad(plon - userLocation.lng);
+      const lat1 = toRad(userLocation.lat);
+      const lat2 = toRad(plat);
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const km = R * c;
+      if (Number.isFinite(km)) return `${km.toFixed(km < 10 ? 1 : 0)} كم`;
+    }
+    return null;
   };
 
   // Get additional images if available
@@ -219,12 +291,37 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
 
   if (showBreedingRequest) {
     return (
-      <BreedingRequestScreen 
-        petId={petId} 
-        onClose={hideBreedingRequest} 
+      <BreedingRequestScreen
+        petId={petId}
+        onClose={hideBreedingRequest}
+        onAddPet={onAddPet}
+        onSuccess={(firebaseChatId) => {
+          hideBreedingRequest();
+          if (firebaseChatId && onOpenChat) {
+            onClose();
+            onOpenChat(firebaseChatId);
+          }
+        }}
       />
     );
   }
+
+  if (showAdoptionRequest) {
+    return (
+      <AdoptionRequestScreen
+        petId={petId}
+        onClose={hideAdoptionRequest}
+        onSuccess={(firebaseChatId) => {
+          hideAdoptionRequest();
+          if (firebaseChatId && onOpenChat) {
+            onClose();
+            onOpenChat(firebaseChatId);
+          }
+        }}
+      />
+    );
+  }
+
 
   const additionalImages = getAdditionalImages();
 
@@ -239,7 +336,7 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
         </TouchableOpacity>
         <Text style={styles.headerTitle}>تفاصيل الحيوان</Text>
         <TouchableOpacity style={styles.headerButton} onPress={toggleFavorite}>
-          <Text style={styles.favoriteIcon}>{isFavorite ? '❤️' : '🤍'}</Text>
+          <AppIcon name="heart" size={24} color={isFavorite ? '#e74c3c' : '#9aa5b1'} filled={isFavorite} />
         </TouchableOpacity>
       </View>
 
@@ -257,14 +354,20 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
             }}
           />
           <View style={styles.imageOverlay}>
-            <Text style={styles.imageOverlayText}>اضغط للتكبير 🔍</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <AppIcon name="search" size={13} color="#fff" />
+              <Text style={styles.imageOverlayText}> اضغط للتكبير</Text>
+            </View>
           </View>
         </TouchableOpacity>
 
         {/* Additional Images */}
         {additionalImages.length > 0 && (
           <View style={styles.additionalImagesContainer}>
-            <Text style={styles.sectionTitle}>📸 صور إضافية</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+              <AppIcon name="image" size={18} color="#1e293b" />
+              <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 6 }]}>صور إضافية</Text>
+            </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.additionalImagesScroll}>
               {additionalImages.map((imageUrl, index) => (
                 <TouchableOpacity
@@ -290,8 +393,26 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
               <Text style={styles.petName}>{pet.name}</Text>
               <Text style={styles.petBreed}>{pet.breed_name}</Text>
               <View style={styles.locationContainer}>
-                <Text style={styles.locationIcon}>📍</Text>
+                <AppIcon name="location" size={16} color="#64748B" />
                 <PetLocationDisplay pet={pet} style={styles.petLocation} />
+              </View>
+              <View style={styles.metaRow}>
+                {computeDistanceText() ? (
+                  <View style={[styles.metaPill, styles.metaDistance]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <AppIcon name="location" size={11} color="#1e293b" />
+                      <Text style={styles.metaPillText}>{computeDistanceText()}</Text>
+                    </View>
+                  </View>
+                ) : null}
+                {pet.created_at ? (
+                  <View style={[styles.metaPill, styles.metaTime]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <AppIcon name="calendar" size={11} color="#1e293b" />
+                      <Text style={styles.metaPillText}>{timeAgo(pet.created_at)}</Text>
+                    </View>
+                  </View>
+                ) : null}
               </View>
             </View>
             <View style={styles.petBadges}>
@@ -309,20 +430,23 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
 
           {/* Quick Info */}
           <View style={styles.quickInfoCard}>
-            <Text style={styles.sectionTitle}>ℹ️ معلومات سريعة</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+              <AppIcon name="shield-check" size={18} color="#1e293b" />
+              <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 6 }]}>معلومات سريعة</Text>
+            </View>
             <View style={styles.quickInfoGrid}>
               <View style={styles.quickInfoItem}>
-                <Text style={styles.quickInfoIcon}>🎂</Text>
+                <View style={{ marginBottom: 8 }}><AppIcon name="calendar" size={24} color="#F59E0B" /></View>
                 <Text style={styles.quickInfoLabel}>العمر</Text>
                 <Text style={styles.quickInfoValue}>{pet.age_display}</Text>
               </View>
               <View style={styles.quickInfoItem}>
-                <Text style={styles.quickInfoIcon}>🏷️</Text>
+                <View style={{ marginBottom: 8 }}><AppIcon name="paperclip" size={24} color="#3B82F6" /></View>
                 <Text style={styles.quickInfoLabel}>السلالة</Text>
                 <Text style={styles.quickInfoValue}>{pet.breed_name}</Text>
               </View>
               <View style={styles.quickInfoItem}>
-                <Text style={styles.quickInfoIcon}>🏠</Text>
+                <View style={{ marginBottom: 8 }}><AppIcon name="home" size={24} color="#02B7B4" /></View>
                 <Text style={styles.quickInfoLabel}>الحالة</Text>
                 <Text style={styles.quickInfoValue}>{pet.status_display}</Text>
               </View>
@@ -332,7 +456,10 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
           {/* Description */}
           {pet.description && (
             <View style={styles.descriptionCard}>
-              <Text style={styles.sectionTitle}>📝 الوصف</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                <AppIcon name="document" size={18} color="#1e293b" />
+                <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 6 }]}>الوصف</Text>
+              </View>
               <Text style={styles.description}>{pet.description}</Text>
             </View>
           )}
@@ -341,7 +468,10 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
 
           {/* Verification Status */}
           <View style={styles.verificationCard}>
-            <Text style={styles.sectionTitle}>🩺 حالة التوثيق</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+              <AppIcon name="shield-check" size={18} color="#1e293b" />
+              <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 6 }]}>حالة التوثيق</Text>
+            </View>
             <View style={styles.verificationItem}>
               <View style={[
                 styles.verificationIconContainer,
@@ -362,15 +492,18 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
 
           {/* Owner Info (without email) */}
           <View style={styles.ownerCard}>
-            <Text style={styles.sectionTitle}>👤 معلومات المالك</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+              <AppIcon name="user" size={18} color="#1e293b" />
+              <Text style={[styles.sectionTitle, { marginBottom: 0, marginLeft: 6 }]}>معلومات المالك</Text>
+            </View>
             <View style={styles.ownerInfo}>
               <View style={styles.ownerIconContainer}>
-                <Text style={styles.ownerIcon}>👨‍💼</Text>
+                <AppIcon name="user" size={24} color="#fff" />
               </View>
               <View style={styles.ownerDetails}>
                 <Text style={styles.ownerName}>{pet.owner_name}</Text>
                 <View style={styles.ownerRating}>
-                  <Text style={styles.ratingStars}>⭐⭐⭐⭐⭐</Text>
+                  <Text style={styles.ratingStars}>★★★★★</Text>
                   <Text style={styles.ratingText}>مالك موثق</Text>
                 </View>
               </View>
@@ -379,11 +512,38 @@ const PetDetailsScreen: React.FC<PetDetailsScreenProps> = ({ petId, onClose }) =
         </View>
       </ScrollView>
 
-      {/* Action Buttons - Only Breeding Request */}
+      {/* Action Buttons */}
       <View style={styles.actionButtons}>
-        <TouchableOpacity style={styles.breedingButton} onPress={requestBreeding}>
-          <Text style={styles.breedingButtonText}>💖 طلب تزاوج</Text>
-        </TouchableOpacity>
+        {/* Show breeding button for available pets */}
+        {pet?.status === 'available' && (
+          <TouchableOpacity style={styles.breedingButton} onPress={requestBreeding}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <AppIcon name="heart" size={18} color="#fff" filled />
+              <Text style={styles.breedingButtonText}>طلب تزاوج</Text>
+            </View>
+          </TouchableOpacity>
+        )}
+        
+        {/* Show adoption button for pets available for adoption */}
+        {(pet?.status === 'available_for_adoption' || pet?.status === 'adoption_pending') && (
+          <TouchableOpacity style={styles.adoptionButton} onPress={requestAdoption}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <AppIcon name="home" size={18} color="#fff" />
+              <Text style={styles.adoptionButtonText}>طلب تبني</Text>
+            </View>
+          </TouchableOpacity>
+        )}
+        
+        {/* If pet not available for either, show info */}
+        {pet?.status !== 'available' && 
+         pet?.status !== 'available_for_adoption' && 
+         pet?.status !== 'adoption_pending' && (
+          <View style={styles.unavailableBox}>
+            <Text style={styles.unavailableText}>
+              هذا الحيوان غير متاح حالياً
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* Image Modal */}
@@ -612,6 +772,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#64748b',
   },
+  metaRow: {
+    flexDirection: 'row',
+    marginTop: 8,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  metaPill: {
+    backgroundColor: '#f1f5f9',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  metaDistance: {
+    backgroundColor: '#e2f7f6',
+  },
+  metaTime: {
+    backgroundColor: '#f4f1fe',
+  },
+  metaPillText: {
+    fontSize: 12,
+    color: '#1e293b',
+    fontWeight: '600',
+  },
   petBadges: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -822,6 +1005,35 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#fff',
     fontWeight: 'bold',
+  },
+  adoptionButton: {
+    backgroundColor: '#4CAF50',
+    paddingVertical: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#4CAF50',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  adoptionButtonText: {
+    fontSize: 18,
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  unavailableBox: {
+    backgroundColor: '#f5f5f5',
+    paddingVertical: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  unavailableText: {
+    fontSize: 16,
+    color: '#999',
+    fontWeight: '600',
   },
   primaryButton: {
     backgroundColor: '#667eea',
