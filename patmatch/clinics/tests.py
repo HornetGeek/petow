@@ -656,7 +656,7 @@ class StorefrontBookingWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         booking = StorefrontBooking.objects.get(public_id=response.data['public_id'])
-        self.assertEqual(booking.status, 'accepted')
+        self.assertEqual(booking.status, StorefrontBooking.STATUS_ACCEPTED)
         self.assertIsNotNone(booking.confirmed_appointment_id)
         self.assertEqual(booking.confirmed_appointment.pet, pet)
         self.assertEqual(booking.confirmed_appointment.owner, customer)
@@ -729,7 +729,7 @@ class StorefrontBookingWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.status, 'accepted')
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_ACCEPTED)
         self.assertIsNone(self.booking.confirmed_appointment_id)
         self.assertEqual(VeterinaryAppointment.objects.count(), 0)
         self.assertTrue(
@@ -750,7 +750,7 @@ class StorefrontBookingWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.status, 'accepted')
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_ACCEPTED)
         self.assertIsNotNone(self.booking.confirmed_appointment_id)
         self.assertEqual(VeterinaryAppointment.objects.count(), 1)
         appointment = VeterinaryAppointment.objects.get()
@@ -910,9 +910,85 @@ class StorefrontBookingWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.status, 'rejected')
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_REFUSED)
         self.assertEqual(self.booking.cancelled_reason, 'الوقت غير متاح')
         self.assertEqual(VeterinaryAppointment.objects.count(), 0)
+
+
+    def test_reception_can_complete_booking_without_medical_session(self):
+        accept = self.client.post(
+            reverse('clinic-storefront-bookings-accept', kwargs={'public_id': self.booking.public_id}),
+            {'scheduled_date': '2026-07-03', 'scheduled_time': '10:00'}, format='json',
+        )
+        self.assertEqual(accept.status_code, 200)
+        reception = User.objects.create_user(
+            username='reception@example.com', email='reception@example.com',
+            password='pass12345', user_type='clinic_staff',
+        )
+        ClinicStaff.objects.create(user=reception, clinic=self.clinic, role='reception')
+        self.client.force_authenticate(reception)
+        url = reverse('clinic-storefront-bookings-complete', kwargs={'public_id': self.booking.public_id})
+        response = self.client.post(url, {'internal_notes': 'Owner arrived'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.booking.refresh_from_db()
+        self.booking.confirmed_appointment.refresh_from_db()
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_COMPLETED)
+        self.assertEqual(self.booking.confirmed_appointment.status, VeterinaryAppointment.STATUS_COMPLETED)
+        self.assertEqual(self.booking.internal_notes, 'Owner arrived')
+        self.assertFalse(VeterinarySession.objects.filter(appointment=self.booking.confirmed_appointment).exists())
+        retry = self.client.post(url, {'internal_notes': 'Owner arrived'}, format='json')
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(StorefrontBookingTimeline.objects.filter(booking=self.booking, event_type='completed').count(), 1)
+
+    def test_cancel_updates_linked_appointment_and_is_idempotent(self):
+        customer = User.objects.create_user(
+            username='cancel-customer@example.com', email='cancel-customer@example.com',
+            password='pass12345', user_type='pet_owner',
+        )
+        self.booking.customer_user = customer
+        self.booking.save(update_fields=['customer_user'])
+        self.client.post(
+            reverse('clinic-storefront-bookings-accept', kwargs={'public_id': self.booking.public_id}),
+            {'scheduled_date': '2026-07-03', 'scheduled_time': '10:00'}, format='json',
+        )
+        url = reverse('clinic-storefront-bookings-cancel', kwargs={'public_id': self.booking.public_id})
+        response = self.client.post(url, {'reason': 'Unavailable'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.booking.refresh_from_db()
+        self.booking.confirmed_appointment.refresh_from_db()
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_CANCELLED)
+        self.assertEqual(self.booking.confirmed_appointment.status, VeterinaryAppointment.STATUS_CANCELLED)
+        self.assertTrue(Notification.objects.filter(user=customer, type='clinic_booking_rejected').exists())
+        retry = self.client.post(url, {'reason': 'Unavailable'}, format='json')
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(StorefrontBookingTimeline.objects.filter(booking=self.booking, event_type='cancelled').count(), 1)
+
+    def test_terminal_booking_cannot_reopen_or_patch_status(self):
+        self.client.post(reverse('clinic-storefront-bookings-reject', kwargs={'public_id': self.booking.public_id}), {}, format='json')
+        accept = self.client.post(reverse('clinic-storefront-bookings-accept', kwargs={'public_id': self.booking.public_id}), {}, format='json')
+        self.assertEqual(accept.status_code, 400)
+        patch = self.client.patch(
+            reverse('clinic-storefront-bookings-detail', kwargs={'public_id': self.booking.public_id}),
+            {'status': 'ACCEPTED'}, format='json',
+        )
+        self.assertEqual(patch.status_code, 400)
+
+
+    def test_reject_cancels_existing_linked_appointment(self):
+        self.client.post(
+            reverse('clinic-storefront-bookings-accept', kwargs={'public_id': self.booking.public_id}),
+            {'scheduled_date': '2026-07-03', 'scheduled_time': '10:00'}, format='json',
+        )
+        self.booking.refresh_from_db()
+        self.booking.status = StorefrontBooking.STATUS_PENDING
+        self.booking.save(update_fields=['status'])
+        response = self.client.post(
+            reverse('clinic-storefront-bookings-reject', kwargs={'public_id': self.booking.public_id}),
+            {}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.booking.confirmed_appointment.refresh_from_db()
+        self.assertEqual(self.booking.confirmed_appointment.status, VeterinaryAppointment.STATUS_CANCELLED)
 
     def test_propose_time_creates_pending_counter_proposal(self):
         response = self.client.post(
@@ -928,7 +1004,7 @@ class StorefrontBookingWorkflowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.status, 'waiting_owner')
+        self.assertEqual(self.booking.status, StorefrontBooking.STATUS_PENDING)
         proposal = StorefrontBookingProposal.objects.get(booking=self.booking)
         self.assertEqual(proposal.status, StorefrontBookingProposal.STATUS_PENDING)
         self.assertEqual(proposal.proposed_by, self.staff)

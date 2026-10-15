@@ -5,6 +5,12 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from accounts.models import User
 from datetime import timedelta
+import secrets
+import uuid
+
+
+def new_referral_code():
+    return secrets.token_urlsafe(9).replace('-', '').replace('_', '')[:12].upper()
 
 
 def story_image_upload_path(instance, filename):
@@ -127,6 +133,7 @@ class Pet(models.Model):
     )
     
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='available')
+    is_public = models.BooleanField(default=False, db_index=True)
     availability_confirmed_at = models.DateTimeField(null=True, blank=True, editable=False)
     availability_check_due_at = models.DateTimeField(null=True, blank=True, db_index=True, editable=False)
     availability_prompt_after = models.DateTimeField(null=True, blank=True, editable=False)
@@ -284,6 +291,87 @@ class Pet(models.Model):
         indexes = [
             models.Index(fields=['status', 'created_at'], name='pets_pet_status_5ce6d5_idx'),
         ]
+
+class ReferralCode(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='referral_code')
+    code = models.CharField(max_length=16, unique=True, default=new_referral_code)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class PetShare(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pet = models.ForeignKey(Pet, on_delete=models.CASCADE, related_name='shares')
+    sharer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='pet_shares')
+    referral_code = models.ForeignKey(ReferralCode, on_delete=models.PROTECT)
+    pet_owner_id_at_share = models.PositiveBigIntegerField()
+    entry_point = models.CharField(max_length=32, default='pet_details')
+    idempotency_key = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['sharer', 'idempotency_key'], name='unique_pet_share_request'),
+            models.UniqueConstraint(fields=['sharer', 'pet'], name='unique_sharer_pet_share'),
+        ]
+
+
+class PetShareAsset(models.Model):
+    STATE_CHOICES = [('pending', 'Pending'), ('ready', 'Ready'), ('failed', 'Failed')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    share = models.ForeignKey(PetShare, on_delete=models.CASCADE, related_name='assets')
+    template = models.CharField(max_length=16)
+    format = models.CharField(max_length=16)
+    revision = models.CharField(max_length=64)
+    file_key = models.CharField(max_length=255, blank=True)
+    state = models.CharField(max_length=8, choices=STATE_CHOICES, default='pending')
+    error = models.CharField(max_length=80, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['share', 'template', 'format', 'revision'], name='unique_pet_share_asset')]
+
+
+class PetShareVisit(models.Model):
+    """Deduplicated anonymous landing-page visits; raw visitor tokens are never stored."""
+    share = models.ForeignKey(PetShare, on_delete=models.CASCADE, related_name='visits')
+    visitor_digest = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['share', 'visitor_digest'], name='unique_pet_share_visitor')]
+
+
+class ReferralAttribution(models.Model):
+    SOURCE_CHOICES = [('app_link', 'App link'), ('play_referrer', 'Play referrer'), ('manual', 'Manual'), ('web', 'Web')]
+    referred_user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='referral_attribution')
+    referrer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='successful_referrals')
+    share = models.ForeignKey(PetShare, on_delete=models.SET_NULL, null=True, blank=True)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
+    email_digest = models.CharField(max_length=64, unique=True)
+    qualified_at = models.DateTimeField(default=timezone.now)
+
+
+class PointsWallet(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='points_wallet')
+    balance = models.PositiveIntegerField(default=0)
+
+
+class PointsTransaction(models.Model):
+    wallet = models.ForeignKey(PointsWallet, on_delete=models.PROTECT, related_name='transactions')
+    amount = models.IntegerField()
+    reason = models.CharField(max_length=40)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class RewardRedemption(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='redemptions')
+    reward_key = models.CharField(max_length=40)
+    points_cost = models.PositiveIntegerField()
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
 
 class PetImage(models.Model):
     """صور إضافية للحيوانات"""

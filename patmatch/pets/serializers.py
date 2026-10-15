@@ -537,6 +537,11 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated or request.user.id != instance.owner_id:
+            for key in ('owner_email', 'latitude', 'longitude', 'vaccination_certificate',
+                        'health_certificate', 'disease_free_certificate', 'additional_certificate'):
+                data.pop(key, None)
         # Fix image URLs - if it's an external URL, use the raw value instead of Django's processed URL
         if instance.main_image:
             main_image_name = instance.main_image.name
@@ -560,7 +565,7 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
             'is_trained', 'good_with_kids', 'good_with_pets',
             'hosting_preference', 'main_image', 'image_2', 'image_3', 'image_4', 'additional_images',
             'vaccination_certificate', 'health_certificate', 'disease_free_certificate', 'additional_certificate',
-            'status', 'status_display', 'location', 
+            'status', 'status_display', 'location', 'is_public',
             'latitude', 'longitude', 'is_free', 'owner_name', 'owner_email', 'owner_is_verified',
             'likes_count', 'is_liked',
             'availability_confirmed_at', 'availability_check_due_at', 'discovery_paused_at', 'availability_management_enabled', 'availability_confirmation_expires_at',
@@ -570,6 +575,10 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
     
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
+        validated_data['is_public'] = bool(
+            validated_data.get('status') in {'available', 'available_for_adoption'}
+            and validated_data.get('main_image')
+        )
 
         # If no user-friendly address given, compute from lat/lng
         lat = validated_data.get('latitude', None)

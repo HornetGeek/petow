@@ -21,6 +21,7 @@ RUN apt-get update \
         binutils \
         libgeos-dev \
         gettext \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

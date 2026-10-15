@@ -532,7 +532,9 @@ class HomeDigestView(APIView):
                              Pet.objects.filter(pk=match.target_id, discovery_paused_at__isnull=True).exists()]
 
         pets_queryset = (
-            Pet.objects.filter(discovery_paused_at__isnull=True)
+            Pet.objects.filter(
+                is_public=True, owner__is_active=True, discovery_paused_at__isnull=True
+            )
             .exclude(owner=request.user)
             .exclude(status__in=['unavailable', 'adopted'])
             .select_related('breed', 'owner')
@@ -766,7 +768,9 @@ class PetMapMarkersView(APIView):
         bbox.srid = 4326
 
         queryset = (
-            Pet.objects.filter(discovery_paused_at__isnull=True)
+            Pet.objects.filter(
+                is_public=True, owner__is_active=True, discovery_paused_at__isnull=True
+            )
             .select_related('breed', 'owner')
             .annotate(
                 effective_point=Coalesce(
@@ -1295,7 +1299,9 @@ class PetListCreateView(generics.ListCreateAPIView):
     
     def get_queryset(self):
         # Start with all pets
-        queryset = _with_pet_likes(Pet.objects.filter(discovery_paused_at__isnull=True).select_related('breed', 'owner'))
+        queryset = _with_pet_likes(Pet.objects.filter(
+            is_public=True, owner__is_active=True, discovery_paused_at__isnull=True
+        ).select_related('breed', 'owner'))
         
         # Handle status filtering
         status_param = self.request.query_params.get('status')
@@ -1464,7 +1470,16 @@ class PetDetailView(generics.RetrieveUpdateDestroyAPIView):
                     .select_related('breed', 'owner')
                 )
             )
-        return _with_pet_likes(Pet.objects.select_related('breed', 'owner'))
+        user = self.request.user
+        if user.is_authenticated:
+            visible = Pet.objects.filter(
+                Q(owner=user) | Q(is_public=True, owner__is_active=True,
+                                  discovery_paused_at__isnull=True)
+            )
+        else:
+            visible = Pet.objects.filter(is_public=True, owner__is_active=True,
+                                         discovery_paused_at__isnull=True)
+        return _with_pet_likes(visible.select_related('breed', 'owner'))
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -2787,7 +2802,8 @@ def adoption_pets(request):
     """الحيوانات المتاحة للتبني"""
     pets = _with_pet_likes(
         Pet.objects.filter(
-            status='available_for_adoption', discovery_paused_at__isnull=True
+            status='available_for_adoption', is_public=True,
+            owner__is_active=True, discovery_paused_at__isnull=True
         ).select_related(
             'breed',
             'owner',

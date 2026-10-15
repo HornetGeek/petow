@@ -2308,6 +2308,8 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
     lookup_field = 'public_id'
 
     def perform_update(self, serializer):
+        if 'status' in serializer.validated_data:
+            raise ValidationError({'status': 'استخدم إجراء قبول أو رفض أو إكمال أو إلغاء الحجز.'})
         if any(key in serializer.validated_data for key in ('diagnosis', 'treatment', 'doctor_notes')):
             require_clinical(self.request.user, self.get_clinic())
         serializer.save()
@@ -2567,8 +2569,16 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
             with transaction.atomic():
                 booking = self._get_booking_for_update(public_id)
-                if booking.status in {StorefrontBooking.STATUS_CANCELLED, StorefrontBooking.STATUS_REFUSED}:
-                    raise ValidationError({'status': 'لا يمكن تأكيد طلب ملغي.'})
+                if booking.status == StorefrontBooking.STATUS_ACCEPTED:
+                    appointment = booking.confirmed_appointment
+                    if appointment and (
+                        (data.get('scheduled_date') and data['scheduled_date'] != appointment.scheduled_date)
+                        or (data.get('scheduled_time') and data['scheduled_time'] != appointment.scheduled_time)
+                    ):
+                        raise ValidationError({'status': 'هذا الموعد مقبول بالفعل بوقت مختلف.'})
+                    return self._serialize_booking(booking)
+                if booking.status != StorefrontBooking.STATUS_PENDING:
+                    raise ValidationError({'status': 'يمكن قبول الطلبات المعلقة فقط.'})
                 scheduled_date = data.get('scheduled_date')
                 scheduled_time = data.get('scheduled_time')
                 if scheduled_date and scheduled_time:
@@ -2806,10 +2816,17 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
         reason = serializer.validated_data.get('reason') or ''
         with transaction.atomic():
             booking = self._get_booking_for_update(public_id)
+            if booking.status == StorefrontBooking.STATUS_REFUSED and (booking.cancelled_reason or '') == reason:
+                return self._serialize_booking(booking)
+            if booking.status != StorefrontBooking.STATUS_PENDING:
+                raise ValidationError({'status': 'يمكن رفض الطلبات المعلقة فقط.'})
             booking.status = StorefrontBooking.STATUS_REFUSED
             booking.cancelled_reason = reason
             booking.cancelled_at = timezone.now()
             booking.save(update_fields=['status', 'cancelled_reason', 'cancelled_at'])
+            if booking.confirmed_appointment_id:
+                booking.confirmed_appointment.status = VeterinaryAppointment.STATUS_CANCELLED
+                booking.confirmed_appointment.save(update_fields=['status', 'updated_at'])
             self._add_timeline(
                 booking,
                 'rejected',
@@ -2827,6 +2844,34 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
             'rejected',
             'clinic_booking_rejected',
             extra={'reason': reason},
+        )
+        return self._serialize_booking(booking)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, public_id=None):
+        serializer = StorefrontBookingRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get('reason') or ''
+        with transaction.atomic():
+            booking = self._get_booking_for_update(public_id)
+            if booking.status == StorefrontBooking.STATUS_CANCELLED and (booking.cancelled_reason or '') == reason:
+                return self._serialize_booking(booking)
+            if booking.status not in {StorefrontBooking.STATUS_ACCEPTED, StorefrontBooking.STATUS_IN_SESSION}:
+                raise ValidationError({'status': 'يمكن إلغاء المواعيد المقبولة فقط.'})
+            booking.status = StorefrontBooking.STATUS_CANCELLED
+            booking.cancelled_reason = reason
+            booking.cancelled_at = timezone.now()
+            booking.save(update_fields=['status', 'cancelled_reason', 'cancelled_at'])
+            if booking.confirmed_appointment_id:
+                booking.confirmed_appointment.status = VeterinaryAppointment.STATUS_CANCELLED
+                booking.confirmed_appointment.save(update_fields=['status', 'updated_at'])
+            booking.proposals.filter(status=StorefrontBookingProposal.STATUS_PENDING).update(
+                status=StorefrontBookingProposal.STATUS_CANCELLED, responded_at=timezone.now(),
+            )
+            self._add_timeline(booking, 'cancelled', reason or 'تم إلغاء الموعد من العيادة.', actor=request.user)
+        self._notify_customer(
+            booking, 'تم إلغاء موعدك', reason or 'ألغت العيادة موعدك.', 'cancelled',
+            'clinic_booking_rejected', extra={'reason': reason, 'confirmed_appointment_id': booking.confirmed_appointment_id},
         )
         return self._serialize_booking(booking)
 
@@ -2879,20 +2924,27 @@ class ClinicStorefrontBookingViewSet(ClinicContextMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='complete')
     def complete(self, request, public_id=None):
-        if any(request.data.get(key) for key in ('diagnosis', 'treatment', 'doctor_notes')) or request.data.get('completed_result') == 'visit_completed':
+        if any(key in request.data for key in ('diagnosis', 'treatment', 'doctor_notes')):
             require_clinical(request.user, self.get_clinic())
         serializer = StorefrontBookingCompleteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         with transaction.atomic():
             booking = self._get_booking_for_update(public_id)
-            if booking.status not in {
-                StorefrontBooking.STATUS_ACCEPTED,
-                StorefrontBooking.STATUS_IN_SESSION,
-                StorefrontBooking.STATUS_PENDING,
-            }:
-                raise ValidationError({'status': 'يجب قبول الطلب أو بدء معالجته قبل إكماله.'})
-            for field in ['internal_notes', 'doctor_notes', 'diagnosis', 'treatment', 'price_estimate', 'completed_result']:
+            if booking.status == StorefrontBooking.STATUS_COMPLETED:
+                note = data.get('internal_notes')
+                existing = booking.internal_notes or ''
+                if (
+                    (note and note != existing and not existing.endswith('\n' + note))
+                    or any(key in request.data for key in ('diagnosis', 'treatment', 'doctor_notes', 'price_estimate'))
+                ):
+                    raise ValidationError({'status': 'هذا الموعد مكتمل بالفعل.'})
+                return self._serialize_booking(booking)
+            if booking.status not in {StorefrontBooking.STATUS_ACCEPTED, StorefrontBooking.STATUS_IN_SESSION}:
+                raise ValidationError({'status': 'يجب قبول الطلب قبل إكماله.'})
+            if data.get('internal_notes'):
+                booking.internal_notes = '\n'.join(filter(None, [booking.internal_notes, data['internal_notes']]))
+            for field in ['doctor_notes', 'diagnosis', 'treatment', 'price_estimate', 'completed_result']:
                 if field in data:
                     setattr(booking, field, data.get(field))
             booking.status = StorefrontBooking.STATUS_COMPLETED
