@@ -232,7 +232,7 @@ class ClinicSerializer(serializers.ModelSerializer):
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'emergency_phone',
-            'whatsapp_phone', 'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color',
+            'whatsapp_phone', 'email', 'website', 'logo', 'cover_image', 'opening_hours', 'services', 'storefront_primary_color',
             'latitude', 'longitude', 'is_active', 'created_at', 'updated_at',
             'can_edit_profile',
         ]
@@ -288,6 +288,9 @@ class ClinicSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('ملف الصورة غير صالح.') from exc
         return value
 
+    def validate_cover_image(self, value):
+        return self.validate_logo(value)
+
     def validate(self, attrs):
         has_latitude = 'latitude' in attrs
         has_longitude = 'longitude' in attrs
@@ -324,7 +327,7 @@ class ClinicPublicSerializer(serializers.ModelSerializer):
         model = Clinic
         fields = [
             'id', 'name', 'description', 'address', 'phone', 'whatsapp_phone',
-            'email', 'website', 'logo', 'opening_hours', 'services', 'storefront_primary_color'
+            'email', 'website', 'logo', 'cover_image', 'opening_hours', 'services', 'storefront_primary_color'
         ]
         read_only_fields = fields
 

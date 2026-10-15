@@ -338,6 +338,11 @@ def register(request):
     if serializer.is_valid():
         try:
             user = serializer.save()
+            from pets.sharing import claim_referral
+            referral_attribution = claim_referral(
+                user, request.data.get('ref'), request.data.get('share_id'),
+                request.data.get('referral_source', 'app_link'),
+            )
 
             try:
                 send_welcome_email(user)
@@ -353,6 +358,8 @@ def register(request):
                     "user": UserSerializer(user).data,
                     "code": "account_created",
                     "message": _("Account created successfully."),
+                    "referral_qualified": bool(referral_attribution),
+                    "referral_source": referral_attribution.source if referral_attribution else None,
                 },
                 status=status.HTTP_201_CREATED,
             )
@@ -436,6 +443,11 @@ def google_login(request):
                 preferred_language=preferred_language,
             )
             is_new_user = True
+            from pets.sharing import claim_referral
+            referral_attribution = claim_referral(
+                user, request.data.get('ref'), request.data.get('share_id'),
+                request.data.get('referral_source', 'app_link'),
+            )
 
             try:
                 send_welcome_email(user)
@@ -449,6 +461,8 @@ def google_login(request):
             "key": token.key,
             "user": UserSerializer(user).data,
             "is_new_user": is_new_user,
+            "referral_qualified": bool(is_new_user and referral_attribution),
+            "referral_source": referral_attribution.source if is_new_user and referral_attribution else None,
             "google_picture": picture,
         }
     )

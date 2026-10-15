@@ -258,6 +258,7 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ROUTES = {
+    'pets.share_tasks.render_share_asset': {'queue': 'share_cards'},
     'pets.tasks.process_notification_outbox_event': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.sweep_notification_outbox': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.run_lifecycle_engagement_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
@@ -317,6 +318,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'google_maps_autocomplete': '60/minute',
         'google_maps_geocode': '30/minute',
+        'pet_share_open': '60/minute',
     },
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20
@@ -504,3 +506,6 @@ CELERY_BEAT_SCHEDULE['pet-availability-hourly'] = {
     'task': 'pets.tasks.run_pet_availability_checks', 'schedule': crontab(minute=20),
 }
 CELERY_TASK_ROUTES['pets.tasks.run_pet_availability_checks'] = {'queue': CELERY_NOTIFICATION_QUEUE}
+
+# Rewards stay disabled until the first cosmetic benefit is available.
+PETOW_POINTS_ENABLED = config('PETOW_POINTS_ENABLED', default=False, cast=bool)

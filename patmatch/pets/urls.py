@@ -1,10 +1,20 @@
 from django.urls import path
 from . import views
 from .availability_views import AvailabilityChecksView, PetAvailabilityView
+from . import sharing
 
 app_name = 'pets'
 
 urlpatterns = [
+    path('public/<int:pet_id>/', sharing.public_pet, name='public-pet-share'),
+    path('public/<int:pet_id>/shares/<uuid:share_id>/', sharing.public_share, name='public-pet-share-session'),
+    path('public/<int:pet_id>/shares/<uuid:share_id>/open/', sharing.record_public_share_open, name='public-pet-share-open'),
+    path('referrals/claim/', sharing.claim_referral_view, name='claim-referral'),
+    path('referrals/summary/', sharing.referral_summary, name='referral-summary'),
+    path('share-assets/<uuid:asset_id>/', sharing.share_asset, name='pet-share-asset'),
+    path('<int:pet_id>/shares/', sharing.create_share, name='pet-create-share'),
+    path('<int:pet_id>/shares/<uuid:share_id>/', sharing.share_status, name='pet-share-status'),
+    path('<int:pet_id>/shares/<uuid:share_id>/assets/', sharing.request_asset, name='pet-share-request-asset'),
     # السلالات
     path('breeds/', views.BreedListView.as_view(), name='breed-list'),
     

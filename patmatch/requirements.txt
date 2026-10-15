@@ -17,6 +17,7 @@ psycopg2-binary==2.9.7
 
 # Image Processing
 Pillow==9.5.0
+qrcode==7.4.2
 
 # HTTP & API
 requests==2.32.4
