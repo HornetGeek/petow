@@ -17,6 +17,7 @@ from .models import (
     ClinicInvite,
     VeterinaryAppointment,
     VeterinaryCertificate,
+    ProviderServiceRequest,
 )
 
 
@@ -42,7 +43,7 @@ class ServicePricingTierInline(admin.TabularInline):
 
 @admin.register(ClinicService)
 class ClinicServiceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clinic', 'category', 'base_price', 'has_tiered_pricing', 'is_active', 'is_featured')
+    list_display = ('name', 'clinic', 'category', 'base_price', 'currency', 'has_tiered_pricing', 'is_active', 'is_featured')
     list_filter = ('clinic', 'category', 'is_active', 'is_featured', 'has_tiered_pricing')
     search_fields = ('name', 'clinic__name')
     inlines = [ServicePricingTierInline]
@@ -54,7 +55,7 @@ class ClinicServiceAdmin(admin.ModelAdmin):
             'fields': ('applicable_pet_types',)
         }),
         ('Pricing', {
-            'fields': ('base_price', 'has_tiered_pricing', 'pricing_unit', 'min_duration_units')
+            'fields': ('base_price', 'currency', 'has_tiered_pricing', 'pricing_unit', 'min_duration_units')
         }),
         ('Details', {
             'fields': ('duration_minutes', 'requires_appointment')
@@ -65,9 +66,27 @@ class ClinicServiceAdmin(admin.ModelAdmin):
     )
 
 
+@admin.register(ProviderServiceRequest)
+class ProviderServiceRequestAdmin(admin.ModelAdmin):
+    list_display = (
+        'reference', 'business_name', 'requester', 'request_kind', 'status',
+        'possible_duplicate', 'created_at',
+    )
+    list_filter = ('status', 'request_kind', 'possible_duplicate', 'created_at')
+    search_fields = (
+        'business_name', 'whatsapp_phone', 'normalized_whatsapp',
+        'requester__email', 'requester__first_name', 'requester__last_name',
+    )
+    readonly_fields = (
+        'public_id', 'requester', 'normalized_whatsapp', 'service_groups',
+        'consented_at', 'possible_duplicate', 'contacted_at', 'converted_at',
+        'created_at', 'updated_at',
+    )
+
+
 @admin.register(ClinicProduct)
 class ClinicProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clinic', 'category', 'price', 'stock_quantity', 'is_active', 'updated_at')
+    list_display = ('name', 'clinic', 'category', 'price', 'currency', 'stock_quantity', 'is_active', 'updated_at')
     list_filter = ('clinic', 'category', 'is_active')
     search_fields = ('name', 'sku', 'clinic__name')
 
@@ -89,9 +108,10 @@ class StorefrontOrderAdmin(admin.ModelAdmin):
 
 @admin.register(StorefrontBooking)
 class StorefrontBookingAdmin(admin.ModelAdmin):
-    list_display = ('public_id', 'clinic', 'service', 'customer_name', 'customer_phone', 'status', 'created_at')
+    list_display = ('public_id', 'clinic', 'service', 'customer_name', 'customer_user', 'customer_phone', 'status', 'created_at')
     list_filter = ('clinic', 'status', 'created_at')
-    search_fields = ('public_id', 'customer_name', 'customer_phone')
+    search_fields = ('public_id', 'customer_name', 'customer_phone', 'customer_user__email')
+    raw_id_fields = ('customer_user',)
     readonly_fields = ('public_id', 'quoted_price', 'created_at')
 
 

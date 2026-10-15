@@ -7,6 +7,8 @@ buildscript {
         ndkVersion = "25.1.8937393"
         // Align Kotlin with RN 0.74+ and modern AndroidX libs
         kotlinVersion = "1.9.24"
+        // Explicit location version; other Play Services pulled transitively
+        googlePlayServicesLocationVersion = "21.0.1"
     }
     repositories {
         google()
@@ -20,6 +22,15 @@ buildscript {
         // Add Google Services plugin
         classpath 'com.google.gms:google-services:4.4.3'
     }
+
+    configurations.all {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'org.bouncycastle' && details.requested.name == 'bcprov-jdk18on') {
+                details.useVersion '1.78'
+                details.because 'Gradle instrumentation on Java 17 fails with bcprov 1.79 (class file major 65)'
+            }
+        }
+    }
 }
 
 allprojects {
@@ -27,5 +38,74 @@ allprojects {
         google()
         mavenCentral()
         maven { url "https://www.jitpack.io" }
+    }
+
+    configurations.all {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'org.bouncycastle' && details.requested.name == 'bcprov-jdk18on') {
+                details.useVersion '1.78'
+            }
+            // Avoid pulling Core 1.16 which requires AGP 8.6+
+            if (details.requested.group == 'androidx.core' && details.requested.name in ['core', 'core-ktx']) {
+                details.useVersion '1.15.0'
+                details.because 'Project currently on AGP 8.2.1; androidx.core 1.16.0 requires 8.6.0'
+            }
+            // Keep Google Play Services artifacts on cached versions to avoid missing BOM downloads offline
+            if (details.requested.group == 'com.google.android.gms') {
+                switch (details.requested.name) {
+                    case 'play-services-location':
+                        details.useVersion rootProject.ext.googlePlayServicesLocationVersion
+                        break
+                    case 'play-services-places-placereport':
+                        details.useVersion '17.0.0'
+                        break
+                    case 'play-services-auth-api-phone':
+                        details.useVersion '18.0.2'
+                        break
+                    case 'play-services-tasks':
+                        details.useVersion '18.2.0'
+                        break
+                    case 'play-services-base':
+                        details.useVersion '18.5.0'
+                        break
+                    case 'play-services-basement':
+                        details.useVersion '18.5.0'
+                        break
+                    case 'play-services-maps':
+                        details.useVersion '18.2.0'
+                        break
+                    case 'play-services-cloud-messaging':
+                        details.useVersion '17.2.0'
+                        break
+                    case 'play-services-stats':
+                        details.useVersion '17.0.2'
+                        break
+                    case 'play-services-auth':
+                        details.useVersion '21.2.0'
+                        break
+                    case 'play-services-auth-base':
+                        details.useVersion '18.0.10'
+                        break
+                    case 'play-services-fido':
+                        details.useVersion '20.1.0'
+                        break
+                    case 'play-services-ads-identifier':
+                        details.useVersion '18.0.0'
+                        break
+                    case 'play-services-measurement':
+                    case 'play-services-measurement-api':
+                    case 'play-services-measurement-impl':
+                    case 'play-services-measurement-base':
+                    case 'play-services-measurement-sdk':
+                    case 'play-services-measurement-sdk-api':
+                        details.useVersion '23.0.0'
+                        break
+                    default:
+                        // fallback to a stable cached baseline
+                        details.useVersion '18.5.0'
+                        break
+                }
+            }
+        }
     }
 }
