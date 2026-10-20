@@ -22,6 +22,21 @@ from .google_maps_service import GoogleMapsServiceError
 from .models import AccountVerification, MobileAppConfig, User
 
 
+class RequiredRegistrationPhoneTests(APITestCase):
+    def test_email_registration_requires_phone_on_server(self):
+        register_url = reverse('accounts:register')
+        response = self.client.post(register_url, {
+            'email': 'email-phone@example.com',
+            'first_name': 'Email',
+            'last_name': 'User',
+            'password1': 'test-password',
+            'password2': 'test-password',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('phone', response.data)
+        self.assertFalse(User.objects.filter(email='email-phone@example.com').exists())
+
+
 def build_rest_framework_override(scope_rates):
     rest_framework_settings = deepcopy(settings.REST_FRAMEWORK)
     merged_rates = dict(rest_framework_settings.get('DEFAULT_THROTTLE_RATES', {}))
