@@ -117,7 +117,7 @@ services:
       - petmatch_network
     restart: unless-stopped
     command: >
-      sh -c "celery -A patmatch_backend worker --loglevel=INFO --queues=${CELERY_NOTIFICATION_QUEUE:-notifications}"
+      sh -c "celery -A patmatch_backend worker --loglevel=INFO --queues=${CELERY_NOTIFICATION_QUEUE:-notifications},share_cards"
 
   beat:
     build:

@@ -124,7 +124,8 @@ def render_card(asset):
     width, height = FORMATS[asset.format]
     with pet.main_image.open('rb') as source:
         photo = Image.open(source)
-        ImageOps.exif_transpose(photo, in_place=True)
+        # Pillow 9.5 (pinned in requirements.txt) has no in_place argument; it returns a new image.
+        photo = ImageOps.exif_transpose(photo)
         photo = photo.convert('RGB')
         if photo.width * photo.height > 40_000_000:
             raise RuntimeError('Image exceeds decode limit')
@@ -165,10 +166,12 @@ def render_card(asset):
     _rtl(draw, (right-25, top+9), purpose, _font(30), '#ffffff')
     name_y = top + (100 if asset.format == 'og' else 90)
     _rtl(draw, (right, name_y), pet.name[:35], _font(54 if asset.format != 'og' else 42), ink)
-    _rtl(draw, (right, name_y+75), headline[:45], _font(32 if asset.format != 'og' else 26), teal)
+    # The QR code sits in the bottom-right corner of post/story, so keep text clear of it.
+    text_right = right - 210 if asset.format != 'og' else right
+    _rtl(draw, (text_right, name_y+75), headline[:45], _font(32 if asset.format != 'og' else 26), teal)
     facts = ' • '.join(x for x in (pet.breed.name if pet.breed else None, pet.age_display,
                                    'أنثى' if pet.gender == 'F' else 'ذكر') if x)
-    _rtl(draw, (right, name_y+140), facts[:68], _font(26 if asset.format != 'og' else 20), '#475467')
+    _rtl(draw, (text_right, name_y+140), facts[:68], _font(26 if asset.format != 'og' else 20), '#475467')
     brand_y = panel[3] - 125
     draw.text((left, brand_y), 'Petow', font=_font(48 if asset.format != 'og' else 35), fill=teal)
     if asset.format != 'og':
@@ -178,7 +181,7 @@ def render_card(asset):
         qr = code.make_image(fill_color='#101828', back_color='white').convert('RGB')
         qr.thumbnail((190, 190))
         canvas.paste(qr, (right-190, panel[3]-200))
-        _rtl(draw, (right-220, brand_y+8), 'شوف التفاصيل على Petow', _font(24), ink)
+        _rtl(draw, (right-220, name_y+190), 'شوف التفاصيل على Petow', _font(24), ink)
     out = io.BytesIO()
     canvas.save(out, format='JPEG', quality=84, optimize=True, progressive=True)
     out.seek(0)
