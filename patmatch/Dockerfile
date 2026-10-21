@@ -22,6 +22,7 @@ RUN apt-get update \
         libgeos-dev \
         gettext \
         fonts-dejavu-core \
+        libraqm0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

@@ -265,6 +265,9 @@ CELERY_TASK_ROUTES = {
     'pets.tasks.run_auto_manage_requests': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.run_daily_unread_email_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
 }
+# autodiscover_tasks() only loads pets/tasks.py; share_tasks must be imported explicitly
+# or the worker rejects render_share_asset as unregistered.
+CELERY_IMPORTS = ('pets.share_tasks',)
 CELERY_BEAT_SCHEDULE = {
     'notification-outbox-sweep': {
         'task': 'pets.tasks.sweep_notification_outbox',

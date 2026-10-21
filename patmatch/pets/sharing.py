@@ -25,7 +25,8 @@ from .share_rules import SHAREABLE_STATUSES
 
 logger = logging.getLogger(__name__)
 FORMATS = {'post': (1080, 1350), 'story': (1080, 1920), 'og': (1200, 630)}
-TEMPLATES = {'simple', 'hearts'}
+TEMPLATES = {'simple', 'hearts', 'pastel'}
+RENDER_VERSION = 2
 SITE = 'https://petow.app'
 
 
@@ -46,7 +47,7 @@ def valid_share(share):
 
 def revision_for(pet):
     value = '|'.join(str(x) for x in (
-        pet.pk, pet.owner_id, pet.updated_at, pet.status, pet.is_public,
+        RENDER_VERSION, pet.pk, pet.owner_id, pet.updated_at, pet.status, pet.is_public,
         pet.discovery_paused_at, pet.main_image.name))
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -121,10 +122,25 @@ def render_card(asset):
     if str(pet.main_image.name).startswith(('http://', 'https://')):
         raise RuntimeError('External legacy image must be migrated before rendering')
 
+    if asset.template == 'pastel' and asset.format != 'og':
+        from .share_pastel import render_pastel
+        out = render_pastel(pet, share_url(asset.share), asset.format)
+        current = Pet.objects.select_related('owner').get(pk=pet.pk)
+        if not shareable(current) or asset.revision != revision_for(current):
+            raise RuntimeError('Pet changed while rendering')
+        path = get_storage().save(
+            f'{asset.share_id}/{asset.id}.jpg', ContentFile(out.read()))
+        asset.file_key = path
+        asset.state = 'ready'
+        asset.error = ''
+        asset.save(update_fields=['file_key', 'state', 'error'])
+        return
+
     width, height = FORMATS[asset.format]
     with pet.main_image.open('rb') as source:
         photo = Image.open(source)
-        ImageOps.exif_transpose(photo, in_place=True)
+        # Pillow 9.5 (pinned in requirements.txt) has no in_place argument; it returns a new image.
+        photo = ImageOps.exif_transpose(photo)
         photo = photo.convert('RGB')
         if photo.width * photo.height > 40_000_000:
             raise RuntimeError('Image exceeds decode limit')
@@ -165,10 +181,12 @@ def render_card(asset):
     _rtl(draw, (right-25, top+9), purpose, _font(30), '#ffffff')
     name_y = top + (100 if asset.format == 'og' else 90)
     _rtl(draw, (right, name_y), pet.name[:35], _font(54 if asset.format != 'og' else 42), ink)
-    _rtl(draw, (right, name_y+75), headline[:45], _font(32 if asset.format != 'og' else 26), teal)
+    # The QR code sits in the bottom-right corner of post/story, so keep text clear of it.
+    text_right = right - 210 if asset.format != 'og' else right
+    _rtl(draw, (text_right, name_y+75), headline[:45], _font(32 if asset.format != 'og' else 26), teal)
     facts = ' • '.join(x for x in (pet.breed.name if pet.breed else None, pet.age_display,
                                    'أنثى' if pet.gender == 'F' else 'ذكر') if x)
-    _rtl(draw, (right, name_y+140), facts[:68], _font(26 if asset.format != 'og' else 20), '#475467')
+    _rtl(draw, (text_right, name_y+140), facts[:68], _font(26 if asset.format != 'og' else 20), '#475467')
     brand_y = panel[3] - 125
     draw.text((left, brand_y), 'Petow', font=_font(48 if asset.format != 'og' else 35), fill=teal)
     if asset.format != 'og':
@@ -178,7 +196,7 @@ def render_card(asset):
         qr = code.make_image(fill_color='#101828', back_color='white').convert('RGB')
         qr.thumbnail((190, 190))
         canvas.paste(qr, (right-190, panel[3]-200))
-        _rtl(draw, (right-220, brand_y+8), 'شوف التفاصيل على Petow', _font(24), ink)
+        _rtl(draw, (right-220, name_y+190), 'شوف التفاصيل على Petow', _font(24), ink)
     out = io.BytesIO()
     canvas.save(out, format='JPEG', quality=84, optimize=True, progressive=True)
     out.seek(0)
@@ -280,8 +298,13 @@ def claim_referral_view(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def referral_summary(request):
+    enabled = bool(getattr(settings, 'PETOW_POINTS_ENABLED', False))
+    wallet = PointsWallet.objects.filter(user=request.user).first()
     return Response({
         'qualified_count': ReferralAttribution.objects.filter(referrer=request.user).count(),
+        'points_enabled': enabled,
+        'points_per_signup': 1 if enabled else 0,
+        'balance': wallet.balance if wallet else 0,
     })
 
 
@@ -294,6 +317,9 @@ def create_share(request, pet_id):
     mode = request.data.get('mode', 'card')
     if mode not in {'card', 'link'}:
         return Response({'error': 'Invalid share mode'}, status=400)
+    template = request.data.get('template', 'simple')
+    if mode == 'card' and template not in TEMPLATES:
+        return Response({'error': 'Unsupported card design'}, status=400)
     if mode == 'card' and pet.owner_id != request.user.id:
         return Response({'error': 'Only the owner can generate a card'}, status=403)
     key = str(request.data.get('idempotency_key', ''))[:64]
@@ -313,7 +339,7 @@ def create_share(request, pet_id):
         share.revoked_at = None
         share.save(update_fields=['pet_owner_id_at_share', 'revoked_at'])
     if mode == 'card':
-        ensure_asset(share, 'simple', 'post')
+        ensure_asset(share, template, 'post')
         ensure_asset(share, 'simple', 'og')
     return Response(share_data(request, share), status=201 if created else 200)
 
