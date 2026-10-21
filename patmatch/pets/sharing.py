@@ -25,7 +25,8 @@ from .share_rules import SHAREABLE_STATUSES
 
 logger = logging.getLogger(__name__)
 FORMATS = {'post': (1080, 1350), 'story': (1080, 1920), 'og': (1200, 630)}
-TEMPLATES = {'simple', 'hearts'}
+TEMPLATES = {'simple', 'hearts', 'pastel'}
+RENDER_VERSION = 2
 SITE = 'https://petow.app'
 
 
@@ -46,7 +47,7 @@ def valid_share(share):
 
 def revision_for(pet):
     value = '|'.join(str(x) for x in (
-        pet.pk, pet.owner_id, pet.updated_at, pet.status, pet.is_public,
+        RENDER_VERSION, pet.pk, pet.owner_id, pet.updated_at, pet.status, pet.is_public,
         pet.discovery_paused_at, pet.main_image.name))
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -120,6 +121,20 @@ def render_card(asset):
         raise RuntimeError('Pet is no longer public or the card is stale')
     if str(pet.main_image.name).startswith(('http://', 'https://')):
         raise RuntimeError('External legacy image must be migrated before rendering')
+
+    if asset.template == 'pastel' and asset.format != 'og':
+        from .share_pastel import render_pastel
+        out = render_pastel(pet, share_url(asset.share), asset.format)
+        current = Pet.objects.select_related('owner').get(pk=pet.pk)
+        if not shareable(current) or asset.revision != revision_for(current):
+            raise RuntimeError('Pet changed while rendering')
+        path = get_storage().save(
+            f'{asset.share_id}/{asset.id}.jpg', ContentFile(out.read()))
+        asset.file_key = path
+        asset.state = 'ready'
+        asset.error = ''
+        asset.save(update_fields=['file_key', 'state', 'error'])
+        return
 
     width, height = FORMATS[asset.format]
     with pet.main_image.open('rb') as source:
@@ -283,8 +298,13 @@ def claim_referral_view(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def referral_summary(request):
+    enabled = bool(getattr(settings, 'PETOW_POINTS_ENABLED', False))
+    wallet = PointsWallet.objects.filter(user=request.user).first()
     return Response({
         'qualified_count': ReferralAttribution.objects.filter(referrer=request.user).count(),
+        'points_enabled': enabled,
+        'points_per_signup': 1 if enabled else 0,
+        'balance': wallet.balance if wallet else 0,
     })
 
 
@@ -297,6 +317,9 @@ def create_share(request, pet_id):
     mode = request.data.get('mode', 'card')
     if mode not in {'card', 'link'}:
         return Response({'error': 'Invalid share mode'}, status=400)
+    template = request.data.get('template', 'simple')
+    if mode == 'card' and template not in TEMPLATES:
+        return Response({'error': 'Unsupported card design'}, status=400)
     if mode == 'card' and pet.owner_id != request.user.id:
         return Response({'error': 'Only the owner can generate a card'}, status=403)
     key = str(request.data.get('idempotency_key', ''))[:64]
@@ -316,7 +339,7 @@ def create_share(request, pet_id):
         share.revoked_at = None
         share.save(update_fields=['pet_owner_id_at_share', 'revoked_at'])
     if mode == 'card':
-        ensure_asset(share, 'simple', 'post')
+        ensure_asset(share, template, 'post')
         ensure_asset(share, 'simple', 'og')
     return Response(share_data(request, share), status=201 if created else 200)
 
