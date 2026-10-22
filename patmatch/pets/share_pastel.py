@@ -112,7 +112,7 @@ def render_pastel(pet, url, fmt):
     draw = ImageDraw.Draw(canvas)
     status = ('متاحة للتبني' if female else 'متاح للتبني') if adoption else (
         'متاحة للتزاوج' if female else 'متاح للتزاوج')
-    draw.rounded_rectangle((714, shift+409, 990, shift+486), radius=38, fill='white')
+    draw.rounded_rectangle((714, shift+409, 990, shift+486), radius=36, fill='white')
     draw.ellipse((956, shift+441, 968, shift+453), fill='#13AAA5')
     text(draw, (834, shift+445), status, 30, PALETTE['teal'], 215, 24)
 

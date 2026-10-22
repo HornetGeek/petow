@@ -323,13 +323,15 @@ class PetShareAsset(models.Model):
     template = models.CharField(max_length=16)
     format = models.CharField(max_length=16)
     revision = models.CharField(max_length=64)
+    content_hash = models.CharField(max_length=64, default='', blank=True)
+    caption = models.CharField(max_length=140, default='', blank=True)
     file_key = models.CharField(max_length=255, blank=True)
     state = models.CharField(max_length=8, choices=STATE_CHOICES, default='pending')
     error = models.CharField(max_length=80, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['share', 'template', 'format', 'revision'], name='unique_pet_share_asset')]
+        constraints = [models.UniqueConstraint(fields=['share', 'template', 'format', 'revision', 'content_hash'], name='unique_pet_share_asset')]
 
 
 class PetShareVisit(models.Model):
