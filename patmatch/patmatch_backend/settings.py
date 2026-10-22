@@ -512,3 +512,9 @@ CELERY_TASK_ROUTES['pets.tasks.run_pet_availability_checks'] = {'queue': CELERY_
 
 # Rewards stay disabled until the first cosmetic benefit is available.
 PETOW_POINTS_ENABLED = config('PETOW_POINTS_ENABLED', default=False, cast=bool)
+PETOW_PUBLIC_SITE_URL = config('PETOW_PUBLIC_SITE_URL', default='https://www.petow.app')
+POSTHOG_PROJECT_TOKEN = config('POSTHOG_PROJECT_TOKEN', default='')
+POSTHOG_CAPTURE_HOST = config('POSTHOG_CAPTURE_HOST', default='https://us.i.posthog.com')
+CELERY_BEAT_SCHEDULE['share-card-assets-daily'] = {
+    'task': 'pets.share_tasks.prune_share_assets', 'schedule': crontab(hour=4, minute=10),
+}

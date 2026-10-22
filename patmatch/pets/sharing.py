@@ -4,6 +4,7 @@ import hmac
 import io
 import logging
 import os
+import re
 import textwrap
 from datetime import timedelta
 from urllib.parse import urlencode
@@ -25,9 +26,10 @@ from .share_rules import SHAREABLE_STATUSES
 
 logger = logging.getLogger(__name__)
 FORMATS = {'post': (1080, 1350), 'story': (1080, 1920), 'og': (1200, 630)}
-TEMPLATES = {'simple', 'hearts', 'pastel'}
+TEMPLATES = {'simple', 'hearts', 'pastel', 'funny', 'cute', 'royal'}
+PERSONALITIES = {'funny', 'cute', 'royal'}
 RENDER_VERSION = 2
-SITE = 'https://petow.app'
+SITE = settings.PETOW_PUBLIC_SITE_URL.rstrip('/')
 
 
 class PetShareOpenThrottle(AnonRateThrottle):
@@ -121,6 +123,21 @@ def render_card(asset):
         raise RuntimeError('Pet is no longer public or the card is stale')
     if str(pet.main_image.name).startswith(('http://', 'https://')):
         raise RuntimeError('External legacy image must be migrated before rendering')
+
+    if asset.template in PERSONALITIES and asset.format != 'og':
+        from .share_personalities import render_personality
+        out = render_personality(pet, share_url(asset.share), asset.format,
+                                 asset.template, asset.caption)
+        current = Pet.objects.select_related('owner').get(pk=pet.pk)
+        if not shareable(current) or asset.revision != revision_for(current):
+            raise RuntimeError('Pet changed while rendering')
+        path = get_storage().save(
+            f'{asset.share_id}/{asset.id}.jpg', ContentFile(out.read()))
+        asset.file_key = path
+        asset.state = 'ready'
+        asset.error = ''
+        asset.save(update_fields=['file_key', 'state', 'error'])
+        return
 
     if asset.template == 'pastel' and asset.format != 'og':
         from .share_pastel import render_pastel
@@ -219,10 +236,12 @@ def schedule_asset(asset):
                                                                     queue='share_cards'))
 
 
-def ensure_asset(share, template, fmt):
+def ensure_asset(share, template, fmt, caption=''):
     revision = revision_for(share.pet)
+    content_hash = hashlib.sha256(caption.encode('utf-8')).hexdigest() if caption else ''
     asset, created = PetShareAsset.objects.get_or_create(
-        share=share, template=template, format=fmt, revision=revision)
+        share=share, template=template, format=fmt, revision=revision,
+        content_hash=content_hash, defaults={'caption': caption})
     if created or asset.state == 'failed':
         if not created:
             asset.state = 'pending'
@@ -272,6 +291,13 @@ def record_public_share_open(request, pet_id, share_id):
         raise Http404
     digest = hmac.new(settings.SECRET_KEY.encode(), token.encode(), hashlib.sha256).hexdigest()
     _visit, created = PetShareVisit.objects.get_or_create(share=share, visitor_digest=digest)
+    if created:
+        try:
+            from .share_tasks import capture_share_visit
+            capture_share_visit.delay(str(share.id), share.pet_id, share.sharer_id,
+                                      'app_link' if request.data.get('source') == 'app_link' else 'web')
+        except Exception:
+            logger.warning('Unable to queue share visit analytics', exc_info=True)
     return Response({'recorded': created}, status=201 if created else 200)
 
 
@@ -340,7 +366,7 @@ def create_share(request, pet_id):
         share.save(update_fields=['pet_owner_id_at_share', 'revoked_at'])
     if mode == 'card':
         ensure_asset(share, template, 'post')
-        ensure_asset(share, 'simple', 'og')
+    ensure_asset(share, 'simple', 'og')
     return Response(share_data(request, share), status=201 if created else 200)
 
 
@@ -364,8 +390,18 @@ def request_asset(request, pet_id, share_id):
     template, fmt = request.data.get('template'), request.data.get('format')
     if template not in TEMPLATES or fmt not in {'post', 'story'}:
         return Response({'error': 'Unsupported card design'}, status=400)
-    ensure_asset(share, template, fmt)
-    return Response(share_data(request, share))
+    caption = str(request.data.get('caption', '')).strip()
+    if template in PERSONALITIES:
+        if (len(caption) < 3 or len(caption) > 140 or
+                re.search(r'[\x00-\x1f\x7f]|https?://|www\.|@\w+|\+?\d[\d\s().-]{8,}\d', caption, re.I) or
+                re.search(r'عنواني|رقمي|تليفوني|واتسابي|اقتل|تعذيب', caption, re.I)):
+            return Response({'error': 'Invalid caption'}, status=400)
+    else:
+        caption = ''
+    asset = ensure_asset(share, template, fmt, caption)
+    data = share_data(request, share)
+    data['selected_asset_id'] = str(asset.id)
+    return Response(data)
 
 
 @api_view(['GET'])
