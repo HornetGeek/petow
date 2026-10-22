@@ -11,6 +11,7 @@ urlpatterns = [
     path('public/<int:pet_id>/shares/<uuid:share_id>/open/', sharing.record_public_share_open, name='public-pet-share-open'),
     path('referrals/claim/', sharing.claim_referral_view, name='claim-referral'),
     path('referrals/summary/', sharing.referral_summary, name='referral-summary'),
+    path('referrals/wallet/', sharing.referral_wallet, name='referral-wallet'),
     path('share-assets/<uuid:asset_id>/', sharing.share_asset, name='pet-share-asset'),
     path('<int:pet_id>/shares/', sharing.create_share, name='pet-create-share'),
     path('<int:pet_id>/shares/<uuid:share_id>/', sharing.share_status, name='pet-share-status'),

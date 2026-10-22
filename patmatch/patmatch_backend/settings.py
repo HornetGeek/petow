@@ -322,6 +322,7 @@ REST_FRAMEWORK = {
         'google_maps_autocomplete': '60/minute',
         'google_maps_geocode': '30/minute',
         'pet_share_open': '60/minute',
+        'referral_wallet': '30/minute',
     },
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20
@@ -510,11 +511,19 @@ CELERY_BEAT_SCHEDULE['pet-availability-hourly'] = {
 }
 CELERY_TASK_ROUTES['pets.tasks.run_pet_availability_checks'] = {'queue': CELERY_NOTIFICATION_QUEUE}
 
-# Rewards stay disabled until the first cosmetic benefit is available.
+# Point earning is separately gated from referral qualification. Keep both
+# settings disabled/empty until the ledger audit and pilot review pass.
 PETOW_POINTS_ENABLED = config('PETOW_POINTS_ENABLED', default=False, cast=bool)
+PETOW_POINTS_COHORT_IDS = config('PETOW_POINTS_COHORT_IDS', default='')
 PETOW_PUBLIC_SITE_URL = config('PETOW_PUBLIC_SITE_URL', default='https://www.petow.app')
 POSTHOG_PROJECT_TOKEN = config('POSTHOG_PROJECT_TOKEN', default='')
 POSTHOG_CAPTURE_HOST = config('POSTHOG_CAPTURE_HOST', default='https://us.i.posthog.com')
 CELERY_BEAT_SCHEDULE['share-card-assets-daily'] = {
     'task': 'pets.share_tasks.prune_share_assets', 'schedule': crontab(hour=4, minute=10),
+}
+CELERY_BEAT_SCHEDULE['referral-expiry-daily'] = {
+    'task': 'pets.share_tasks.expire_referrals', 'schedule': crontab(hour=4, minute=20),
+}
+CELERY_BEAT_SCHEDULE['referral-points-daily'] = {
+    'task': 'pets.share_tasks.reconcile_referral_points', 'schedule': crontab(hour=4, minute=30),
 }

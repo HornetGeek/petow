@@ -21,7 +21,82 @@ from .models import (
     EngagementEvent,
     SavedSearch,
     SavedSearchMatch,
+    ReferralAttribution,
+    PetShareVisit,
+    PointsWallet,
+    PointsTransaction,
 )
+
+
+@admin.register(ReferralAttribution)
+class ReferralAttributionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'referrer', 'referred_user_id_at_capture', 'source', 'original_pet_id', 'status', 'rejection_reason', 'captured_at', 'qualified_at')
+    list_filter = ('status', 'source', 'rejection_reason', 'captured_at')
+    search_fields = ('referrer__email', 'referred_user__email', '=referred_user_id_at_capture')
+    readonly_fields = ('referred_user', 'referred_user_id_at_capture', 'referrer', 'share',
+                       'original_pet_id', 'source', 'email_digest', 'device_digest', 'status', 'captured_at',
+                       'qualified_at', 'rejected_at', 'rejection_reason')
+    actions = ['reject_for_fraud']
+
+    @admin.action(permissions=['view'], description='Reject selected referrals for confirmed fraud')
+    def reject_for_fraud(self, request, queryset):
+        from .points import PointsLedgerError, reject_referral
+        changed = 0
+        for attribution_id in queryset.values_list('pk', flat=True):
+            try:
+                changed += int(reject_referral(attribution_id, 'fraud_review'))
+            except PointsLedgerError:
+                self.message_user(request, f'Could not reverse referral {attribution_id}; inspect its wallet.', level='error')
+        self.message_user(request, f'Processed {changed} referrals.')
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PetShareVisit)
+class PetShareVisitAdmin(admin.ModelAdmin):
+    list_display = ('id', 'share', 'created_at')
+    readonly_fields = ('share', 'visitor_digest', 'created_at')
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PointsWallet)
+class PointsWalletAdmin(admin.ModelAdmin):
+    list_display = ('user', 'balance')
+    search_fields = ('user__email',)
+    readonly_fields = ('user', 'balance')
+    def has_add_permission(self, request):
+        return False
+    def has_change_permission(self, request, obj=None):
+        return False
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PointsTransaction)
+class PointsTransactionAdmin(admin.ModelAdmin):
+    list_display = ('id', 'wallet', 'amount', 'reason', 'referral_attribution', 'created_at')
+    list_filter = ('reason', 'created_at')
+    search_fields = ('wallet__user__email', 'idempotency_key')
+    readonly_fields = ('wallet', 'referral_attribution', 'amount', 'reason', 'idempotency_key', 'created_at')
+    def has_add_permission(self, request):
+        return False
+    def has_change_permission(self, request, obj=None):
+        return False
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 @admin.register(Breed)
 class BreedAdmin(admin.ModelAdmin):
