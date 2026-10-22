@@ -297,16 +297,28 @@ class UserProfileView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
 
-        # Delete auth token if exists to invalidate sessions
-        Token.objects.filter(user=user).delete()
+        from pets.models import ReferralAttribution
+        from pets.points import PointsLedgerError, forfeit_user_points, reject_referral
+        from django.db import transaction
+        try:
+            with transaction.atomic():
+                for attribution_id in ReferralAttribution.objects.filter(
+                        referred_user=user).values_list('pk', flat=True):
+                    reject_referral(attribution_id, 'deleted_account')
+                forfeit_user_points(user.pk)
 
-        # Soft delete: deactivate user and rename email to allow re-registration
-        import time
+                # Delete auth token if it exists to invalidate sessions.
+                Token.objects.filter(user=user).delete()
 
-        timestamp = int(time.time())
-        user.is_active = False
-        user.email = f"deleted_{timestamp}_{user.email}"
-        user.save()
+                # Soft delete: deactivate user and rename email to allow re-registration.
+                import time
+                timestamp = int(time.time())
+                user.is_active = False
+                user.email = f"deleted_{timestamp}_{user.email}"
+                user.save()
+        except PointsLedgerError:
+            logger.exception('Unable to reconcile points during account deletion: %s', user.pk)
+            return Response({'error': 'Account deletion could not complete. Contact support.'}, status=409)
 
         return _message("account_deleted", _("Your account was deleted successfully."))
 
@@ -342,6 +354,8 @@ def register(request):
             referral_attribution = claim_referral(
                 user, request.data.get('ref'), request.data.get('share_id'),
                 request.data.get('referral_source', 'app_link'),
+                request.data.get('referral_pet_id'),
+                request.data.get('referral_device_id'),
             )
 
             try:
@@ -358,7 +372,7 @@ def register(request):
                     "user": UserSerializer(user).data,
                     "code": "account_created",
                     "message": _("Account created successfully."),
-                    "referral_qualified": bool(referral_attribution),
+                    "referral_attributed": bool(referral_attribution),
                     "referral_source": referral_attribution.source if referral_attribution else None,
                 },
                 status=status.HTTP_201_CREATED,
@@ -447,6 +461,8 @@ def google_login(request):
             referral_attribution = claim_referral(
                 user, request.data.get('ref'), request.data.get('share_id'),
                 request.data.get('referral_source', 'app_link'),
+                request.data.get('referral_pet_id'),
+                request.data.get('referral_device_id'),
             )
 
             try:
@@ -461,7 +477,7 @@ def google_login(request):
             "key": token.key,
             "user": UserSerializer(user).data,
             "is_new_user": is_new_user,
-            "referral_qualified": bool(is_new_user and referral_attribution),
+            "referral_attributed": bool(is_new_user and referral_attribution),
             "referral_source": referral_attribution.source if is_new_user and referral_attribution else None,
             "google_picture": picture,
         }

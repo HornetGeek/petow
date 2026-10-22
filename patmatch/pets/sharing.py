@@ -12,16 +12,18 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.http import FileResponse, Http404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
+from django.core.paginator import Paginator
 
-from .models import Pet, PetShare, PetShareAsset, PetShareVisit, ReferralCode, ReferralAttribution, PointsWallet, PointsTransaction
+from .models import Pet, PetShare, PetShareAsset, PetShareVisit, ReferralCode, ReferralAttribution, PointsWallet, PointsTransaction, EngagementEvent
+from .points import points_enabled_for
 from .share_rules import SHAREABLE_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,10 @@ SITE = settings.PETOW_PUBLIC_SITE_URL.rstrip('/')
 
 class PetShareOpenThrottle(AnonRateThrottle):
     scope = 'pet_share_open'
+
+
+class ReferralWalletThrottle(UserRateThrottle):
+    scope = 'referral_wallet'
 
 
 def shareable(pet):
@@ -318,19 +324,58 @@ def claim_referral_view(request):
     )
     if not attribution:
         return Response({'error': 'Referral is not eligible'}, status=400)
-    return Response({'qualified': True, 'qualified_at': attribution.qualified_at})
+    return Response({'attributed': True, 'status': attribution.status})
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def referral_summary(request):
-    enabled = bool(getattr(settings, 'PETOW_POINTS_ENABLED', False))
     wallet = PointsWallet.objects.filter(user=request.user).first()
+    referrals = ReferralAttribution.objects.filter(referrer=request.user)
+    shares = PetShare.objects.filter(sharer=request.user)
+    mature = referrals.filter(captured_at__lte=timezone.now() - timedelta(days=30))
+    returned = EngagementEvent.objects.filter(
+        user_id=models.OuterRef('referred_user_id'),
+        created_at__gte=models.OuterRef('captured_at') + timedelta(days=30),
+        created_at__lt=models.OuterRef('captured_at') + timedelta(days=60),
+    )
     return Response({
-        'qualified_count': ReferralAttribution.objects.filter(referrer=request.user).count(),
-        'points_enabled': enabled,
-        'points_per_signup': 1 if enabled else 0,
+        'link_visits': PetShareVisit.objects.filter(share__in=shares).count(),
+        'attributed_signups': referrals.count(),
+        'pending_count': referrals.filter(status='pending').count(),
+        'qualified_count': referrals.filter(status='qualified').count(),
+        'rejected_count': referrals.filter(status='rejected').count(),
+        'retention_30d_eligible': mature.count(),
+        'retained_30d': mature.annotate(returned=models.Exists(returned)).filter(returned=True).count(),
+        'points_enabled': points_enabled_for(request.user.pk),
+        'points_per_signup': 0,
+        'points_per_qualified_referral': 1 if points_enabled_for(request.user.pk) else 0,
         'balance': wallet.balance if wallet else 0,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+@throttle_classes([ReferralWalletThrottle])
+def referral_wallet(request):
+    wallet = PointsWallet.objects.filter(user=request.user).first()
+    entries = (PointsTransaction.objects.filter(wallet=wallet).order_by('-created_at', '-pk')
+               if wallet else PointsTransaction.objects.none())
+    page = Paginator(entries, 20).get_page(request.query_params.get('page', 1))
+    return Response({
+        'balance': wallet.balance if wallet else 0,
+        'points_enabled': points_enabled_for(request.user.pk),
+        'points_per_qualified_referral': 1 if points_enabled_for(request.user.pk) else 0,
+        'activity': {
+            'count': page.paginator.count,
+            'next_page': page.next_page_number() if page.has_next() else None,
+            'previous_page': page.previous_page_number() if page.has_previous() else None,
+            'results': [
+                {'id': item.pk, 'amount': item.amount, 'reason': item.reason,
+                 'created_at': item.created_at.isoformat()}
+                for item in page.object_list
+            ],
+        },
     })
 
 
@@ -421,10 +466,16 @@ def share_asset(request, asset_id):
     return response
 
 
-def claim_referral(user, code_value, share_id=None, source='app_link'):
-    """Atomic signup-only attribution. No click or install may award points."""
+def claim_referral(user, code_value, share_id=None, source='app_link', original_pet_id=None, device_id=None):
+    """Capture a new account's referral. Qualification happens on first pet creation."""
     if not code_value or user.date_joined < timezone.now() - timedelta(hours=24):
         return None
+    if share_id:
+        try:
+            import uuid
+            share_id = uuid.UUID(str(share_id))
+        except (ValueError, TypeError):
+            return None
     code = ReferralCode.objects.select_related('user').filter(code=code_value).first()
     if not code or code.user_id == user.id or not code.user.is_active:
         return None
@@ -433,26 +484,101 @@ def claim_referral(user, code_value, share_id=None, source='app_link'):
         return None
     if share and (share.revoked_at or not valid_share(share)):
         return None
+    if original_pet_id is not None:
+        try:
+            original_pet_id = int(original_pet_id)
+        except (TypeError, ValueError):
+            return None
+        if original_pet_id <= 0 or (share and share.pet_id != original_pet_id):
+            return None
+    device_digest = None
+    if device_id is not None:
+        if not isinstance(device_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', device_id):
+            return None
+        device_digest = hmac.new(settings.SECRET_KEY.encode(),
+                                 ('referral-device:' + device_id).encode(), hashlib.sha256).hexdigest()
     valid_sources = {value for value, _label in ReferralAttribution.SOURCE_CHOICES}
     source = source if source in valid_sources else 'app_link'
     digest = hmac.new(settings.SECRET_KEY.encode(), user.email.strip().casefold().encode(),
                       hashlib.sha256).hexdigest()
     try:
         with transaction.atomic():
-            attribution, created = ReferralAttribution.objects.get_or_create(
+            attribution, _created = ReferralAttribution.objects.get_or_create(
                 referred_user=user,
                 defaults={'referrer': code.user, 'share': share, 'source': source,
-                          'email_digest': digest})
-            if created and getattr(settings, 'PETOW_POINTS_ENABLED', False):
-                wallet, _ = PointsWallet.objects.get_or_create(user=code.user)
-                wallet = PointsWallet.objects.select_for_update().get(pk=wallet.pk)
-                _, awarded = PointsTransaction.objects.get_or_create(
-                    idempotency_key=f'referral:{user.pk}',
-                    defaults={'wallet': wallet, 'amount': 1, 'reason': 'referral_signup'})
-                if awarded:
-                    wallet.balance += 1
-                    wallet.save(update_fields=['balance'])
+                          'email_digest': digest,
+                          'device_digest': device_digest,
+                          'referred_user_id_at_capture': user.pk,
+                          'original_pet_id': share.pet_id if share else None})
+            if attribution.referrer_id != code.user_id or attribution.share_id != (share.id if share else None):
+                return None
             return attribution
     except IntegrityError:
         logger.info('Duplicate referral identity rejected for user %s', user.pk)
         return None
+
+
+def qualify_referral_for_pet(user, pet):
+    """Qualify exactly once after a first, real pet is saved. Never award points here."""
+    from accounts.models import PushDevice, User
+
+    with transaction.atomic():
+        attribution = (ReferralAttribution.objects.select_for_update()
+                       .filter(referred_user=user, status='pending').first())
+        if not attribution:
+            return None
+        now = timezone.now()
+        reason = None
+        if not user.is_active or not attribution.referrer.is_active:
+            reason = 'deleted_account'
+        elif user.pk == attribution.referrer_id:
+            reason = 'self_referral'
+        elif pet.owner_id != user.pk or pet.created_at < attribution.captured_at:
+            reason = 'invalid_pet_action'
+        elif pet.created_at > attribution.captured_at + timedelta(days=30):
+            reason = 'window_expired'
+        elif Pet.objects.filter(owner=user, created_at__lt=pet.created_at).exclude(pk=pet.pk).exists():
+            reason = 'not_first_pet'
+        elif (user.is_phone_verified and user.phone and
+              User.objects.filter(is_phone_verified=True, phone=user.phone)
+              .exclude(pk=user.pk).exists()):
+            reason = 'duplicate_identity'
+        elif (attribution.device_digest and ReferralAttribution.objects.filter(
+              device_digest=attribution.device_digest).exclude(pk=attribution.pk).exists()):
+            reason = 'repeat_device'
+        else:
+            device_ids = PushDevice.objects.filter(user=user).values('device_id')
+            existing_devices = PushDevice.objects.filter(device_id__in=device_ids).exclude(user=user)
+            referrer_device_match = (attribution.device_digest and any(
+                hmac.compare_digest(
+                    hmac.new(settings.SECRET_KEY.encode(),
+                             ('referral-device:' + item).encode(), hashlib.sha256).hexdigest(),
+                    attribution.device_digest,
+                ) for item in PushDevice.objects.filter(user=attribution.referrer)
+                .values_list('device_id', flat=True)))
+            if existing_devices.exists() or referrer_device_match:
+                reason = 'repeat_device'
+        if reason:
+            attribution.status = 'rejected'
+            attribution.rejected_at = now
+            attribution.rejection_reason = reason
+            attribution.save(update_fields=['status', 'rejected_at', 'rejection_reason'])
+            return attribution
+        attribution.status = 'qualified'
+        attribution.qualified_at = now
+        attribution.save(update_fields=['status', 'qualified_at'])
+        def queue_analytics():
+            try:
+                from .share_tasks import capture_referral_qualified
+                capture_referral_qualified.delay(attribution.pk)
+            except Exception:
+                logger.warning('Unable to schedule referral analytics', exc_info=True)
+        transaction.on_commit(queue_analytics)
+        def queue_points():
+            try:
+                from .share_tasks import award_qualified_referral_points
+                award_qualified_referral_points.delay(attribution.pk)
+            except Exception:
+                logger.warning('Unable to schedule referral point award', exc_info=True)
+        transaction.on_commit(queue_points)
+        return attribution

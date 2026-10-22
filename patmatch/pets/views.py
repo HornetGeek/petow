@@ -1271,6 +1271,8 @@ class PetListCreateView(generics.ListCreateAPIView):
 
                 if response.status_code == status.HTTP_201_CREATED and response.data.get('id'):
                     pet_id = response.data.get('id')
+                    from .sharing import qualify_referral_for_pet
+                    qualify_referral_for_pet(request.user, Pet.objects.get(pk=pet_id, owner=request.user))
                     enqueue_notification_event(
                         event_type=NotificationOutbox.EVENT_PET_CREATED,
                         object_id=pet_id,

@@ -346,12 +346,20 @@ class PetShareVisit(models.Model):
 
 class ReferralAttribution(models.Model):
     SOURCE_CHOICES = [('app_link', 'App link'), ('play_referrer', 'Play referrer'), ('manual', 'Manual'), ('web', 'Web')]
-    referred_user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='referral_attribution')
+    STATUS_CHOICES = [('pending', 'Pending'), ('qualified', 'Qualified'), ('rejected', 'Rejected')]
+    referred_user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='referral_attribution')
+    referred_user_id_at_capture = models.PositiveBigIntegerField()
     referrer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='successful_referrals')
     share = models.ForeignKey(PetShare, on_delete=models.SET_NULL, null=True, blank=True)
+    original_pet_id = models.PositiveBigIntegerField(null=True, blank=True)
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES)
     email_digest = models.CharField(max_length=64, unique=True)
-    qualified_at = models.DateTimeField(default=timezone.now)
+    device_digest = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='pending', db_index=True)
+    captured_at = models.DateTimeField(default=timezone.now, db_index=True)
+    qualified_at = models.DateTimeField(null=True, blank=True)
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.CharField(max_length=32, blank=True)
 
 
 class PointsWallet(models.Model):
@@ -361,10 +369,26 @@ class PointsWallet(models.Model):
 
 class PointsTransaction(models.Model):
     wallet = models.ForeignKey(PointsWallet, on_delete=models.PROTECT, related_name='transactions')
+    referral_attribution = models.ForeignKey(ReferralAttribution, on_delete=models.PROTECT, null=True, blank=True, related_name='point_transactions')
     amount = models.IntegerField()
     reason = models.CharField(max_length=40)
     idempotency_key = models.CharField(max_length=128, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(check=~models.Q(amount=0), name='nonzero_points_transaction'),
+            models.UniqueConstraint(fields=['referral_attribution'], condition=models.Q(reason='qualified_referral'),
+                                    name='unique_referral_credit'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError('Point transactions are immutable; add a compensating entry')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Point transactions cannot be deleted')
 
 
 class RewardRedemption(models.Model):

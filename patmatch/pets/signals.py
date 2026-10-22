@@ -1,9 +1,18 @@
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_delete
 from django.dispatch import receiver
+from django.utils import timezone
 
 from accounts.models import User
 
-from .models import Pet
+from .models import Pet, ReferralAttribution
+
+
+@receiver(pre_delete, sender=User)
+def reject_deleted_user_referral(sender, instance: User, **kwargs):
+    from .points import reject_referral
+    for attribution_id in ReferralAttribution.objects.filter(
+            referred_user=instance).values_list('pk', flat=True):
+        reject_referral(attribution_id, 'deleted_account')
 
 
 @receiver(post_save, sender=Pet)
