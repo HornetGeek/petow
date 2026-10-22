@@ -16,13 +16,40 @@ import {
   InteractionManager,
 } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
-import { apiService, Pet, UserChatStatus } from '../../services/api';
+import { apiService, PaginatedResponse, Pet, UserChatStatus } from '../../services/api';
 import PetDetailsScreen from '../pets/PetDetailsScreen';
 import AddPetScreen from '../pets/AddPetScreen';
 import ChatListScreen from '../chat/ChatListScreen';
 import NotificationListScreen from '../notifications/NotificationListScreen';
+import AdoptionRequestsScreen from '../adoption-request/AdoptionRequestsScreen';
+import ClinicsScreen from '../clinics/ClinicsScreen';
+import ServicesScreen from '../services/ServicesScreen';
+import {
+  ServiceCategoryKey,
+  SERVICE_CATEGORY_LABELS,
+  SERVICE_CATEGORY_EMOJI,
+  HOME_FEATURED_CATEGORIES,
+} from '../../utils/serviceCategories';
 import NotificationPermissionModal from '../../components/NotificationPermissionModal';
+import FastImage from 'react-native-fast-image';
 import { getAndRegisterFcmToken } from '../../services/notifications';
+import { useFeatureFlags } from '../../services/featureFlags';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { buildMediaCandidates as buildResolvedMediaCandidates } from '../../utils/mediaUrl';
+import { getFloatingTabBarContentPadding } from '../../utils/tabBarLayout';
+import AppIcon, { AppIconName, IconSize } from '../../components/icons/AppIcon';
+import HomeContextModule from './components/HomeContextModule';
+import {
+  HeroAvatarFace,
+  SlidersIcon,
+  AdoptionIllustration,
+  MatchesIllustration,
+  AddPetIllustration,
+  VaccinationIcon,
+  GroomingIcon,
+  DentalIcon,
+  FavHeartIcon,
+} from './components/HomeIcons';
 
 type PetFilterType = 'all' | 'cats' | 'dogs';
 type RequestOwner = 'sent' | 'received';
@@ -77,10 +104,14 @@ interface BreedingRequestsOverviewProps {
 interface QuickAction {
   key: string;
   label: string;
-  icon: string;
+  icon: AppIconName;
+  iconColor: string;
+  filled?: boolean;
   onPress: () => void;
   isFilter?: boolean;
   filterType?: PetFilterType;
+  primary?: boolean;  // Visually emphasised tile (wider flex, stronger label).
+  bgColor?: string;   // Override the tile background — for the Stitch v1 design (rose adoption / mint matches+add).
 }
 
 type HomeScreenProps = {
@@ -88,9 +119,19 @@ type HomeScreenProps = {
   onAddPetHandled?: () => void;
   triggerBreedingOverview?: number | null;
   onBreedingOverviewHandled?: () => void;
-  onNavigateToPets?: (searchQuery?: string) => void;
+  triggerNotifications?: number | null;
+  onNotificationsHandled?: () => void;
+  triggerAdoptionRequests?: number | null;
+  onAdoptionRequestsHandled?: () => void;
+  triggerPetDetails?: number | null;
+  triggerPetDetailsId?: number | null;
+  onPetDetailsHandled?: () => void;
+  onOpenAdoption?: (searchQuery?: string) => void;
+  onOpenMatches?: (searchQuery?: string) => void;
   clinicChatFirebaseId?: string | null;
   onClinicChatHandled?: () => void;
+  onOpenProfileTab?: () => void;
+  onSetTabBarVisible?: (visible: boolean) => void;
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -104,6 +145,118 @@ const STATUS_LABELS: Record<string, string> = {
 
 const MAX_PREVIEW_ITEMS = 3;
 const REQUEST_PLACEHOLDER_IMAGE = 'https://images.unsplash.com/photo-1517849845537-4d257902454a?auto=format&fit=crop&w=200&q=80';
+const PET_PLACEHOLDER_IMAGE = 'https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80';
+const AVAILABLE_PET_STATUS_KEYS = new Set([
+  'available',
+  'available_for_adoption',
+  'available_for_breeding',
+  'active',
+]);
+
+type PetStatusAppearance = {
+  label: string;
+  textColor: string;
+  backgroundColor: string;
+  borderColor: string;
+  icon?: string;
+  isUnavailable: boolean;
+};
+
+const DEFAULT_STATUS_APPEARANCE: PetStatusAppearance = {
+  label: 'غير متاح',
+  textColor: '#fff',
+  backgroundColor: 'rgba(108, 117, 125, 0.85)',
+  borderColor: 'rgba(108, 117, 125, 0.35)',
+  icon: 'ℹ️',
+  isUnavailable: true,
+};
+
+const buildImageCandidates = (raw?: string | null, fallback: string = PET_PLACEHOLDER_IMAGE): string[] => {
+  return buildResolvedMediaCandidates(raw, fallback);
+};
+
+const getPetStatusAppearance = (status?: string | null, statusDisplay?: string | null): PetStatusAppearance => {
+  const normalized = (status || '').toLowerCase().trim();
+  const label = statusDisplay || status || DEFAULT_STATUS_APPEARANCE.label;
+
+  const unavailableAppearance: PetStatusAppearance = {
+    label,
+    textColor: '#fff',
+    backgroundColor: 'rgba(192, 57, 43, 0.85)',
+    borderColor: 'rgba(192, 57, 43, 0.25)',
+    icon: '⛔',
+    isUnavailable: true,
+  };
+
+  if (!normalized) {
+    return { ...DEFAULT_STATUS_APPEARANCE, label };
+  }
+
+  const isExplicitlyAvailable =
+    (normalized.includes('available') && !normalized.includes('unavailable')) ||
+    AVAILABLE_PET_STATUS_KEYS.has(normalized) ||
+    normalized === 'ready_for_adoption' ||
+    normalized === 'adoption_pending';
+
+  if (
+    normalized.includes('unavailable') ||
+    normalized.includes('inactive') ||
+    normalized.includes('closed') ||
+    normalized.includes('hidden') ||
+    normalized.includes('paused') ||
+    normalized.includes('disabled')
+  ) {
+    return unavailableAppearance;
+  }
+
+  if (isExplicitlyAvailable) {
+    return {
+      label,
+      textColor: '#0f5132',
+      backgroundColor: 'rgba(46, 204, 113, 0.18)',
+      borderColor: 'rgba(46, 204, 113, 0.35)',
+      icon: '✅',
+      isUnavailable: false,
+    };
+  }
+
+  if (
+    normalized.includes('pending') ||
+    normalized.includes('review') ||
+    normalized.includes('processing') ||
+    normalized.includes('verifying') ||
+    normalized.includes('waiting')
+  ) {
+    return {
+      label,
+      textColor: '#3d2f0f',
+      backgroundColor: 'rgba(243, 156, 18, 0.2)',
+      borderColor: 'rgba(243, 156, 18, 0.35)',
+      icon: '⏳',
+      isUnavailable: true,
+    };
+  }
+
+  if (
+    normalized === 'adopted' ||
+    normalized.includes('adopted') ||
+    normalized.includes('sold') ||
+    normalized.includes('matched') ||
+    normalized.includes('reserved') ||
+    normalized.includes('completed')
+  ) {
+    return {
+      label,
+      textColor: '#fff',
+      backgroundColor: 'rgba(155, 89, 182, 0.85)',
+      borderColor: 'rgba(155, 89, 182, 0.25)',
+      icon: '🎉',
+      isUnavailable: true,
+    };
+  }
+
+  return { ...DEFAULT_STATUS_APPEARANCE, label };
+};
 
 const formatDate = (value?: string) => {
   if (!value) {
@@ -171,6 +324,7 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
   onOpenChat,
   onOpenPetDetails,
 }) => {
+  const { requestChatV2Enabled } = useFeatureFlags();
   const renderRequestCard = (
     request: BreedingRequestPreview,
     owner: RequestOwner,
@@ -183,15 +337,7 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
     const myPet = owner === 'sent' ? request.requester_pet_details : request.target_pet_details;
     const partnerName = extractPartnerName(request, owner);
     const partnerImageRaw = partnerPet?.main_image || '';
-    const partnerImage = (() => {
-      if (!partnerImageRaw) return REQUEST_PLACEHOLDER_IMAGE;
-      let u = partnerImageRaw.trim().replace('http://', 'https://');
-      if (u.startsWith('https:/') && !u.startsWith('https://')) u = u.replace('https:/', 'https://');
-      if (u.includes('https:/.petow.app')) u = u.replace(/https:\/\/.?petow\.app/g, 'https://api.petow.app');
-      if (!/^https?:\/\//i.test(u)) u = `https://api.petow.app${u.startsWith('/') ? '' : '/'}${u}`;
-      if (u.includes('/api/media/')) u = u.replace('/api/media/', '/media/');
-      return u || REQUEST_PLACEHOLDER_IMAGE;
-    })();
+    const partnerImage = buildImageCandidates(partnerImageRaw, REQUEST_PLACEHOLDER_IMAGE)[0];
     const createdAt = formatDate(request.created_at);
     const meetingDate = formatDate(request.meeting_date);
     const clinicName = request.veterinary_clinic_details?.name;
@@ -248,7 +394,7 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
           </View>
         ) : null}
 
-        {owner === 'received' && status === 'pending' ? (
+        {owner === 'received' && status === 'pending' && !requestChatV2Enabled ? (
           <View style={styles.requestActionsRow}>
             <TouchableOpacity
               style={[styles.requestActionButton, styles.rejectButton]}
@@ -261,6 +407,18 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
               onPress={() => onRespond(request, 'approve')}
             >
               <Text style={[styles.requestActionText, styles.acceptButtonText]}>قبول</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {/* In v2: pending received requests get a chat pointer instead of approve/reject */}
+        {owner === 'received' && status === 'pending' && requestChatV2Enabled ? (
+          <View style={styles.requestActionsRow}>
+            <TouchableOpacity
+              style={[styles.requestActionButton, styles.chatButton]}
+              onPress={() => onOpenChat(request)}
+            >
+              <Text style={[styles.requestActionText, styles.chatButtonText]}>افتح المحادثة للرد</Text>
             </TouchableOpacity>
           </View>
         ) : null}
@@ -288,8 +446,8 @@ const BreedingRequestsOverview: React.FC<BreedingRequestsOverviewProps> = ({
       }
     >
       <View style={styles.overlayHeader}>
-        <TouchableOpacity style={styles.closeIconButton} onPress={onClose}>
-          <Text style={styles.closeIconText}>✕</Text>
+        <TouchableOpacity style={styles.closeIconButton} onPress={onClose} accessibilityLabel="إغلاق">
+          <AppIcon name="close" size={IconSize.md} color="#64748B" accessibilityLabel="إغلاق" />
         </TouchableOpacity>
         <Text style={styles.overlayTitle}>طلبات التزاوج</Text>
         <View style={styles.overlaySpacer} />
@@ -327,11 +485,23 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   onAddPetHandled,
   triggerBreedingOverview,
   onBreedingOverviewHandled,
-  onNavigateToPets,
+  triggerNotifications,
+  onNotificationsHandled,
+  triggerAdoptionRequests,
+  onAdoptionRequestsHandled,
+  triggerPetDetails,
+  triggerPetDetailsId,
+  onPetDetailsHandled,
+  onOpenAdoption,
+  onOpenMatches,
   clinicChatFirebaseId,
   onClinicChatHandled,
+  onOpenProfileTab,
+  onSetTabBarVisible,
 }) => {
-  const { logout, shouldShowNotificationModal, setShouldShowNotificationModal } = useAuth();
+  const { user, logout, shouldShowNotificationModal, setShouldShowNotificationModal } = useAuth();
+  const { clinicHomeEnabled, requestChatV2Enabled, refreshFlags } = useFeatureFlags();
+  const insets = useSafeAreaInsets();
   const [popularPets, setPopularPets] = useState<Pet[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -344,6 +514,9 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const [showBreedingOverview, setShowBreedingOverview] = useState(false);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showAdoptionRequests, setShowAdoptionRequests] = useState(false);
+  const [showClinics, setShowClinics] = useState(false);
+  const [servicesCategory, setServicesCategory] = useState<ServiceCategoryKey | null>(null);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [myBreedingRequests, setMyBreedingRequests] = useState<BreedingRequestPreview[]>([]);
   const [receivedBreedingRequests, setReceivedBreedingRequests] = useState<BreedingRequestPreview[]>([]);
@@ -351,12 +524,31 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const [responseDialog, setResponseDialog] = useState<{ request: BreedingRequestPreview; mode: 'approve' | 'reject' } | null>(null);
   const [responseNotes, setResponseNotes] = useState('');
   const [responding, setResponding] = useState(false);
+  const [myPets, setMyPets] = useState<Pet[]>([]);
+  const [petImageCandidateIndex, setPetImageCandidateIndex] = useState<Record<number, number>>({});
   const [shouldRestoreScroll, setShouldRestoreScroll] = useState(false);
   const [savedScrollPosition, setSavedScrollPosition] = useState<number | null>(null);
   const mainScrollRef = useRef<ScrollView | null>(null);
   const scrollOffsetRef = useRef(0);
   const addPetTriggerRef = useRef<number | null>(null);
   const breedingOverviewTriggerRef = useRef<number | null>(null);
+  const notificationsTriggerRef = useRef<number | null>(null);
+  const adoptionRequestsTriggerRef = useRef<number | null>(null);
+  const petDetailsTriggerRef = useRef<number | null>(null);
+  const hasNestedFullscreenFlow =
+    selectedPetId !== null ||
+    showAddPet ||
+    showChatList ||
+    showBreedingOverview ||
+    showNotifications ||
+    showAdoptionRequests ||
+    showClinics;
+
+  useEffect(() => {
+    if (!onSetTabBarVisible) return;
+    onSetTabBarVisible(!hasNestedFullscreenFlow);
+    return () => onSetTabBarVisible(true);
+  }, [hasNestedFullscreenFlow, onSetTabBarVisible]);
 
   // Handle notification permission granted
   const handleNotificationPermissionGranted = async () => {
@@ -372,6 +564,10 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     loadPopularPets();
     loadDashboardData();
   }, []);
+
+  useEffect(() => {
+    setPetImageCandidateIndex({});
+  }, [popularPets]);
 
   const loadPopularPets = async (
     type: PetFilterType = activeType,
@@ -415,11 +611,18 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     try {
       setDashboardLoading(true);
 
-      const [myRequestsResult, receivedRequestsResult, chatStatusResult, unreadCountResult] = await Promise.allSettled([
+      const [
+        myRequestsResult,
+        receivedRequestsResult,
+        chatStatusResult,
+        unreadCountResult,
+        myPetsResult,
+      ] = await Promise.allSettled([
         apiService.getMyBreedingRequests(),
         apiService.getReceivedBreedingRequests(),
         apiService.getUserChatStatus(),
         apiService.getUnreadNotificationsCount(),
+        apiService.getMyPets(),
       ]);
 
       // Debug: Log the results
@@ -451,8 +654,6 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         } : 'No requests');
         setMyBreedingRequests(parsed);
       } else {
-        console.warn('⚠️ Failed to load my breeding requests:', 
-          myRequestsResult.status === 'rejected' ? myRequestsResult.reason : myRequestsResult.value);
         setMyBreedingRequests([]);
       }
 
@@ -471,7 +672,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         } : 'No requests');
         setReceivedBreedingRequests(parsed);
       } else {
-        console.warn('⚠️ Failed to load received breeding requests:', 
+        console.warn('⚠️ Failed to load received breeding requests:',
           receivedRequestsResult.status === 'rejected' ? receivedRequestsResult.reason : receivedRequestsResult.value);
         setReceivedBreedingRequests([]);
       }
@@ -495,6 +696,23 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       } else {
         setUnreadNotifications(0);
       }
+
+      if (myPetsResult.status === 'fulfilled' && myPetsResult.value.success) {
+        const responseData = myPetsResult.value.data;
+        let petsList: Pet[] = [];
+
+        if (responseData) {
+          if (Array.isArray((responseData as PaginatedResponse<Pet>).results)) {
+            petsList = (responseData as PaginatedResponse<Pet>).results;
+          } else if (Array.isArray(responseData)) {
+            petsList = responseData as Pet[];
+          }
+        }
+
+        setMyPets(petsList);
+      } else {
+        setMyPets([]);
+      }
     } catch (error) {
       console.error('❌ HomeScreen - Error loading dashboard data:', error);
     } finally {
@@ -511,10 +729,9 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const executeSearch = () => {
     const trimmed = searchQuery.trim();
     setSearchQuery(trimmed);
-    
     // If there's a search query, navigate to pets screen with the query
-    if (trimmed && onNavigateToPets) {
-      onNavigateToPets(trimmed);
+    if (trimmed && onOpenAdoption) {
+      onOpenAdoption(trimmed);
     } else {
       // Otherwise, just filter the current screen
       filterAndLoad('all', trimmed);
@@ -526,6 +743,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     await Promise.all([
       loadPopularPets(activeType, searchQuery.trim()),
       loadDashboardData(),
+      refreshFlags(),
     ]);
     setRefreshing(false);
   };
@@ -540,6 +758,19 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   const captureScrollPosition = () => {
     setSavedScrollPosition(scrollOffsetRef.current);
     setShouldRestoreScroll(true);
+  };
+
+  const resetOverlayScreens = () => {
+    setSelectedPetId(null);
+    setShowAddPet(false);
+    setShowBreedingOverview(false);
+    setShowChatList(false);
+    setShowNotifications(false);
+    setShowAdoptionRequests(false);
+    setShowClinics(false);
+    setServicesCategory(null);
+    setResponseDialog(null);
+    setResponseNotes('');
   };
 
   const showPetDetails = (petId: number) => {
@@ -571,14 +802,28 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
   const openChatList = () => {
     captureScrollPosition();
+    resetOverlayScreens();
     setInitialChatFirebaseId(null);
     setShowChatList(true);
   };
 
   const openBreedingOverview = () => {
     captureScrollPosition();
+    resetOverlayScreens();
     loadDashboardData();
     setShowBreedingOverview(true);
+  };
+
+  const openClinics = () => {
+    captureScrollPosition();
+    resetOverlayScreens();
+    setShowClinics(true);
+  };
+
+  const openServices = (category?: ServiceCategoryKey) => {
+    captureScrollPosition();
+    resetOverlayScreens();
+    setServicesCategory(category || HOME_FEATURED_CATEGORIES[0]);
   };
 
   useEffect(() => {
@@ -593,8 +838,51 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   }, [triggerBreedingOverview, onBreedingOverviewHandled]);
 
   useEffect(() => {
+    if (
+      triggerNotifications &&
+      triggerNotifications !== notificationsTriggerRef.current
+    ) {
+      openNotifications();
+      notificationsTriggerRef.current = triggerNotifications;
+      onNotificationsHandled?.();
+    }
+  }, [triggerNotifications, onNotificationsHandled]);
+
+  useEffect(() => {
+    if (
+      triggerAdoptionRequests &&
+      triggerAdoptionRequests !== adoptionRequestsTriggerRef.current
+    ) {
+      captureScrollPosition();
+      resetOverlayScreens();
+      setShowAdoptionRequests(true);
+      adoptionRequestsTriggerRef.current = triggerAdoptionRequests;
+      onAdoptionRequestsHandled?.();
+    }
+  }, [triggerAdoptionRequests, onAdoptionRequestsHandled]);
+
+  useEffect(() => {
+    if (
+      triggerPetDetails &&
+      triggerPetDetails !== petDetailsTriggerRef.current
+    ) {
+      if (
+        typeof triggerPetDetailsId === 'number' &&
+        Number.isFinite(triggerPetDetailsId) &&
+        triggerPetDetailsId > 0
+      ) {
+        resetOverlayScreens();
+        showPetDetails(triggerPetDetailsId);
+      }
+      petDetailsTriggerRef.current = triggerPetDetails;
+      onPetDetailsHandled?.();
+    }
+  }, [triggerPetDetails, triggerPetDetailsId, onPetDetailsHandled]);
+
+  useEffect(() => {
     if (clinicChatFirebaseId) {
       captureScrollPosition();
+      resetOverlayScreens();
       setInitialChatFirebaseId(clinicChatFirebaseId);
       setShowChatList(true);
       onClinicChatHandled?.();
@@ -603,8 +891,15 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
   const openNotifications = () => {
     captureScrollPosition();
+    resetOverlayScreens();
     setUnreadNotifications(0);
     setShowNotifications(true);
+  };
+
+  const openAdoptionRequests = () => {
+    captureScrollPosition();
+    resetOverlayScreens();
+    setShowAdoptionRequests(true);
   };
 
   const handleRespondToRequest = (request: BreedingRequestPreview, action: 'approve' | 'reject') => {
@@ -675,6 +970,27 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
   );
 
   const totalBreedingRequests = myBreedingRequests.length + receivedBreedingRequests.length;
+  const unreadMessagesCount =
+    (typeof chatStatus?.unread_messages_count === 'number' && chatStatus.unread_messages_count >= 0
+      ? chatStatus.unread_messages_count
+      : undefined) ??
+    (chatStatus?.has_unread_messages ? 1 : 0);
+  const unavailablePets = useMemo(() => {
+    return myPets.filter((p) => getPetStatusAppearance(p.status, p.status_display).isUnavailable);
+  }, [myPets]);
+
+  // Time-based Arabic greeting in the hero. Recomputed per render — cheap.
+  const userGreeting = useMemo(() => {
+    const hour = new Date().getHours();
+    const namePart = (user?.first_name || '').trim();
+    const greetingBase = hour < 12 ? 'صباح الخير' : hour < 17 ? 'مساء النور' : 'مساء الخير';
+    return namePart ? `${greetingBase}، ${namePart}` : greetingBase;
+  }, [user?.first_name]);
+  const unavailablePetsCount = unavailablePets.length;
+  const shouldShowClinicsAction = clinicHomeEnabled;
+  const homeBottomSafePadding = getFloatingTabBarContentPadding(insets.bottom, 8);
+
+  // Simplified design: no personal pet cards on home; only a reminder if any are unavailable
 
   const renderPetCard = (pet: Pet) => {
     if (!pet) {
@@ -684,37 +1000,52 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
     console.log('🖼️ HomeScreen - Rendering pet card for:', pet.id, 'main_image:', pet.main_image);
 
-    const imageUrl =
-      pet.main_image?.replace('http://', 'https://') ||
-      'https://images.unsplash.com/photo-1534361960057-19889db9621e?ixlib=rb-4.0.3&auto=format&fit=crop&w=300&q=80';
+    const imageCandidates = buildImageCandidates(pet.main_image, PET_PLACEHOLDER_IMAGE);
+    const currentCandidateIndex = petImageCandidateIndex[pet.id] ?? 0;
+    const safeCandidateIndex = Math.min(currentCandidateIndex, imageCandidates.length - 1);
+    const imageUrl = imageCandidates[safeCandidateIndex];
+    const appearance = getPetStatusAppearance(pet.status, pet.status_display);
+    const isUnavailable = appearance.isUnavailable;
 
     return (
       <TouchableOpacity
         key={pet.id}
-        style={styles.petCard}
+        style={styles.petCardGrid}
         onPress={() => showPetDetails(pet.id)}
+        activeOpacity={0.85}
       >
-        <Image
-          source={{ uri: imageUrl }}
-          style={styles.petImage}
-          onError={(error) => {
-            console.log(
-              '❌ HomeScreen - Image load error for pet:',
-              pet.id,
-              'main_image:',
-              pet.main_image,
-              'error:',
-              error
-            );
-          }}
-          onLoad={() => {
-            console.log('✅ HomeScreen - Image loaded successfully for pet:', pet.id);
-          }}
-        />
-        <View style={styles.petInfo}>
-          <Text style={styles.petName}>{pet.name || 'غير محدد'}</Text>
-          <Text style={styles.petBreed}>{pet.breed_name || 'غير محدد'}</Text>
-          <Text style={styles.petAge}>{pet.age_display || 'غير محدد'}</Text>
+        <View style={styles.petImageWrapperGrid}>
+          <FastImage
+            source={{ uri: imageUrl, priority: FastImage.priority.normal }}
+            style={[styles.petImageGrid, isUnavailable && styles.petImageDimmed]}
+            resizeMode={FastImage.resizeMode.cover}
+            onError={() => {
+              const hasNextCandidate = safeCandidateIndex < imageCandidates.length - 1;
+              if (hasNextCandidate) {
+                setPetImageCandidateIndex((prev) => ({
+                  ...prev,
+                  [pet.id]: safeCandidateIndex + 1,
+                }));
+              }
+            }}
+          />
+          {isUnavailable && (
+            <>
+              <View style={styles.petImageOverlay} />
+              <View style={styles.petStatusBadge}>
+                <Text style={styles.petStatusText}>{appearance.label}</Text>
+              </View>
+            </>
+          )}
+          <View style={styles.favBtn}>
+            <FavHeartIcon size={19} />
+          </View>
+        </View>
+        <View style={styles.petInfoGrid}>
+          <Text style={styles.petNameGrid} numberOfLines={1}>{pet.name || 'غير محدد'}</Text>
+          <Text style={styles.petMetaGrid} numberOfLines={2}>
+            {pet.breed_name || pet.pet_type_display || ''}
+          </Text>
         </View>
       </TouchableOpacity>
     );
@@ -763,6 +1094,14 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         setShowNotifications(false);
         return true;
       }
+      if (showAdoptionRequests) {
+        setShowAdoptionRequests(false);
+        return true;
+      }
+      if (showClinics) {
+        setShowClinics(false);
+        return true;
+      }
       if (showAddPet) {
         setShowAddPet(false);
         return true;
@@ -776,7 +1115,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
     BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => BackHandler.removeEventListener('hardwareBackPress', onBackPress);
-  }, [responseDialog, responding, showBreedingOverview, showChatList, showNotifications, showAddPet, selectedPetId]);
+  }, [responseDialog, responding, showBreedingOverview, showChatList, showNotifications, showAdoptionRequests, showClinics, showAddPet, selectedPetId]);
 
   useEffect(() => {
     if (
@@ -786,7 +1125,9 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       !showAddPet &&
       !showChatList &&
       !showBreedingOverview &&
-      !showNotifications
+      !showNotifications &&
+      !showAdoptionRequests &&
+      !showClinics
     ) {
       const handle = InteractionManager.runAfterInteractions(() => {
         if (mainScrollRef.current) {
@@ -797,41 +1138,77 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 
       return () => handle.cancel();
     }
-  }, [shouldRestoreScroll, savedScrollPosition, selectedPetId, showAddPet, showChatList, showBreedingOverview, showNotifications]);
+  }, [shouldRestoreScroll, savedScrollPosition, selectedPetId, showAddPet, showChatList, showBreedingOverview, showNotifications, showAdoptionRequests, showClinics]);
 
-  const quickActions: QuickAction[] = [
+  const quickActions: QuickAction[] = useMemo(() => [
+    {
+      key: 'adoption',
+      label: 'تبني الآن',
+      icon: 'home' as AppIconName,
+      iconColor: '#E11D48',
+      onPress: () => onOpenAdoption && onOpenAdoption(),
+      bgColor: '#FCE7E7',  // rose pastel
+    },
+    {
+      key: 'matches',
+      label: 'مطابقة التزاوج',
+      icon: 'heart' as AppIconName,
+      iconColor: '#E11D48',
+      filled: true,
+      onPress: () => onOpenMatches && onOpenMatches(),
+      bgColor: '#D6F4F0',  // mint pastel
+    },
     {
       key: 'add',
       label: 'إضافة حيوان',
-      icon: '➕',
+      icon: 'plus' as AppIconName,
+      iconColor: '#0F766E',
       onPress: showAddPetScreen,
+      primary: true,
+      bgColor: '#D6F4F0',  // mint pastel — same as matches per design
     },
-    {
-      key: 'breeding',
-      label: 'طلبات التزاوج',
-      icon: '💞',
-      onPress: openBreedingOverview,
-    },
-    {
-      key: 'dogs',
-      label: 'كلاب',
-      icon: '🐕',
-      isFilter: true,
-      filterType: 'dogs',
-      onPress: () => filterAndLoad('dogs'),
-    },
-    {
-      key: 'cats',
-      label: 'قطط',
-      icon: '🐱',
-      isFilter: true,
-      filterType: 'cats',
-      onPress: () => filterAndLoad('cats'),
-    },
-  ];
+    // Inbox tiles are hidden when v2 is on — chat list is the primary inbox.
+    // Push deeplinks to BreedingRequestsOverview / AdoptionRequestsScreen still work
+    // (the screen-mode renders below remain reachable via triggerBreedingOverview /
+    // triggerAdoptionRequests). For history scans, AdoptionRequestsScreen stays
+    // accessible via Profile → "طلبات التبني".
+    ...(!requestChatV2Enabled ? [
+      {
+        key: 'breeding',
+        label: 'طلبات التزاوج',
+        icon: 'calendar' as AppIconName,
+        iconColor: '#3B82F6',
+        onPress: openBreedingOverview,
+      },
+      {
+        key: 'adoption_requests',
+        label: 'طلبات التبني',
+        icon: 'envelope' as AppIconName,
+        iconColor: '#8B5CF6',
+        onPress: openAdoptionRequests,
+      },
+    ] : []),
+    // The "Services" tile is intentionally omitted — the categorical
+    // services strip ("الخدمات البيطرية" with vaccination / dental /
+    // grooming / etc.) renders just below this grid and is a stronger
+    // entry point (one-tap drill into a specific category) than a
+    // generic Services tile that opens the same screen with no filter.
+    // Removed species filters from main nav per UX request
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [onOpenAdoption, onOpenMatches, requestChatV2Enabled]);
 
   if (selectedPetId) {
-    return <PetDetailsScreen petId={selectedPetId} onClose={hidePetDetails} />;
+    return (
+      <PetDetailsScreen
+        petId={selectedPetId}
+        onClose={hidePetDetails}
+        onAddPet={showAddPetScreen}
+        onOpenChat={(firebaseChatId) => {
+          setInitialChatFirebaseId(firebaseChatId);
+          setShowChatList(true);
+        }}
+      />
+    );
   }
 
   if (showAddPet) {
@@ -876,19 +1253,49 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     );
   }
 
+  if (showClinics) {
+    return (
+      <ClinicsScreen
+        onClose={() => setShowClinics(false)}
+      />
+    );
+  }
+
+  if (servicesCategory) {
+    return (
+      <ServicesScreen
+        initialCategory={servicesCategory}
+        onClose={() => setServicesCategory(null)}
+      />
+    );
+  }
+
+  if (showAdoptionRequests) {
+    return (
+      <AdoptionRequestsScreen
+        onClose={() => {
+          setShowAdoptionRequests(false);
+          loadDashboardData();
+        }}
+      />
+    );
+  }
+
   if (showBreedingOverview) {
     return (
       <>
-        <BreedingRequestsOverview
-          myRequests={myBreedingRequests}
-          receivedRequests={receivedBreedingRequests}
-          onClose={() => setShowBreedingOverview(false)}
-          onRefresh={loadDashboardData}
-          refreshing={dashboardLoading}
-          onRespond={handleRespondToRequest}
-          onOpenChat={handleOpenChatForRequest}
-          onOpenPetDetails={(pid) => showPetDetails(pid)}
-        />
+        {!requestChatV2Enabled ? (
+          <BreedingRequestsOverview
+            myRequests={myBreedingRequests}
+            receivedRequests={receivedBreedingRequests}
+            onClose={() => setShowBreedingOverview(false)}
+            onRefresh={loadDashboardData}
+            refreshing={dashboardLoading}
+            onRespond={handleRespondToRequest}
+            onOpenChat={handleOpenChatForRequest}
+            onOpenPetDetails={(pid) => showPetDetails(pid)}
+          />
+        ) : null}
         {responseDialog ? (
           <Modal
             transparent
@@ -947,6 +1354,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
     <ScrollView
       ref={mainScrollRef}
       style={styles.container}
+      contentContainerStyle={{ paddingBottom: homeBottomSafePadding }}
       refreshControl={
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
       }
@@ -955,86 +1363,158 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
       }}
       scrollEventThrottle={16}
     >
-      <View style={styles.header}>
-        <Image
-          source={require('../../../assets/icon.png')}
-          style={styles.headerLogo}
-          resizeMode="contain"
-        />
-        <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.headerIconButton} onPress={openNotifications}>
-            <Text style={styles.headerIcon}>🔔</Text>
-            {unreadNotifications > 0 ? (
-              <View style={styles.headerBadge}>
-                <Text style={styles.headerBadgeText}>
-                  {unreadNotifications > 99 ? '99+' : String(unreadNotifications)}
-                </Text>
-              </View>
-            ) : null}
+      <View style={styles.heroCard}>
+        <View style={styles.headerCentered}>
+          <TouchableOpacity
+            style={styles.avatarTouch}
+            onPress={() => onOpenProfileTab && onOpenProfileTab()}
+            accessibilityLabel="الملف الشخصي"
+          >
+            <View style={styles.avatar}>
+              {user?.profile_picture ? (
+                <Image source={{ uri: user.profile_picture }} style={styles.avatarImage} />
+              ) : (
+                <HeroAvatarFace size={74} />
+              )}
+            </View>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerIconButton} onPress={openChatList}>
-            <Text style={styles.headerIcon}>💬</Text>
-            {chatStatus?.has_unread_messages ? (
-              <View style={styles.headerBadge}>
-                <Text style={styles.headerBadgeText}>•</Text>
-              </View>
-            ) : null}
-          </TouchableOpacity>
+          <Text style={styles.greeting}>{userGreeting}</Text>
 
-          <TouchableOpacity style={styles.headerIconButton} onPress={handleLogout}>
-            <Text style={styles.headerIcon}>🔓</Text>
+          <View style={styles.searchCard}>
+            <TextInput
+              style={styles.searchInputCentered}
+              placeholder="ابحث عن سلالة أو خدمة..."
+              placeholderTextColor="#a0a1a5"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmitEditing={executeSearch}
+              returnKeyType="search"
+            />
+            <TouchableOpacity onPress={executeSearch} accessibilityLabel="بحث">
+              <SlidersIcon size={26} color="#2d9e99" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.actionsInsideHero}>
+          <TouchableOpacity
+            style={[styles.actionCard, styles.actionPink]}
+            onPress={() => onOpenAdoption && onOpenAdoption()}
+            activeOpacity={0.85}
+            accessibilityLabel="تبنّ الآن"
+          >
+            <AdoptionIllustration size={62} />
+            <Text style={styles.actionTitle}>تبنّ الآن</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionCard, styles.actionBlue]}
+            onPress={() => onOpenMatches && onOpenMatches()}
+            activeOpacity={0.85}
+            accessibilityLabel="مطابقة التزاوج"
+          >
+            <MatchesIllustration size={62} />
+            <Text style={styles.actionTitle}>مطابقة التزاوج</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionCard, styles.actionMint]}
+            onPress={showAddPetScreen}
+            activeOpacity={0.85}
+            accessibilityLabel="إضافة حيوان"
+          >
+            <AddPetIllustration size={62} />
+            <Text style={styles.actionTitle}>إضافة حيوان</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="ابحث بالسلالة أو النوع..."
-          placeholderTextColor="#95a5a6"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={executeSearch}
-          returnKeyType="search"
-        />
-        <TouchableOpacity style={styles.searchButton} onPress={executeSearch}>
-          <Text style={styles.searchButtonText}>🔍</Text>
-        </TouchableOpacity>
-      </View>
+      <HomeContextModule
+        unreadCount={unreadMessagesCount}
+        userPetsCount={myPets.length}
+        onOpenChatList={() => openChatList()}
+        onOpenAddPet={showAddPetScreen}
+      />
 
-      <View style={styles.quickActionsContainer}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {quickActions.map((action) => {
-            const isActiveFilter = action.isFilter && action.filterType === activeType;
-            return (
+      {shouldShowClinicsAction ? (
+        <View style={styles.section}>
+          <View style={styles.sectionHead}>
+            <Text style={styles.sectionTitleNew}>الخدمات البيطرية</Text>
+            <TouchableOpacity onPress={() => openServices()}>
+              <Text style={styles.sectionLink}>عرض</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.servicesGrid}>
+            <TouchableOpacity
+              style={styles.serviceCard}
+              onPress={() => openServices('vaccination')}
+              accessibilityRole="button"
+              accessibilityLabel="تطعيم"
+              activeOpacity={0.85}
+            >
+              <VaccinationIcon size={54} color="#39a9a4" />
+              <Text style={styles.serviceTitle}>تطعيم</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.serviceCard}
+              onPress={() => openServices('grooming')}
+              accessibilityRole="button"
+              accessibilityLabel="تنظيف وتجميل"
+              activeOpacity={0.85}
+            >
+              <GroomingIcon size={54} color="#39a9a4" />
+              <Text style={styles.serviceTitle}>تنظيف وتجميل</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.serviceCard}
+              onPress={() => openServices('dental')}
+              accessibilityRole="button"
+              accessibilityLabel="عناية الأسنان"
+              activeOpacity={0.85}
+            >
+              <DentalIcon size={54} color="#39a9a4" />
+              <Text style={styles.serviceTitle}>عناية الأسنان</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+
+      {unavailablePetsCount > 0 ? (
+        <View style={styles.section}>
+          <View style={styles.simpleUnavailableCard}>
+            <Text style={styles.simpleUnavailableTitle}>تذكير: لديك حيوانات غير متاحة</Text>
+            <Text style={styles.simpleUnavailableBody}>
+              يمكنك تعديل حالة الحيوان من الملف الشخصي ← حيواناتي.
+            </Text>
+            <View style={styles.simpleUnavailableList}>
+              {unavailablePets.slice(0, 3).map((p) => (
+                <View key={`unavail-${p.id}`} style={styles.simpleUnavailablePill}>
+                  <Text style={styles.simpleUnavailablePillText} numberOfLines={1}>
+                    {p.name || 'حيوان بدون اسم'}
+                  </Text>
+                </View>
+              ))}
+              {unavailablePetsCount > 3 ? (
+                <View style={styles.simpleUnavailablePillMore}>
+                  <Text style={styles.simpleUnavailablePillMoreText}>+{unavailablePetsCount - 3}</Text>
+                </View>
+              ) : null}
+            </View>
+            <View style={styles.simpleUnavailableActions}>
               <TouchableOpacity
-                key={action.key}
-                style={[
-                  styles.actionButton,
-                  isActiveFilter && styles.actionButtonActive,
-                ]}
-                onPress={action.onPress}
+                style={styles.simpleActionPrimary}
+                onPress={() => onOpenProfileTab && onOpenProfileTab()}
               >
-                <Text style={styles.actionIcon}>{action.icon}</Text>
-                <Text
-                  style={[
-                    styles.actionText,
-                    isActiveFilter && styles.actionTextActive,
-                  ]}
-                >
-                  {action.label}
-                </Text>
+                <Text style={styles.simpleActionPrimaryText}>إدارة حيواناتي</Text>
               </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
+            </View>
+          </View>
+        </View>
+      ) : null}
 
       <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>الحيوانات المتاحة</Text>
-          <TouchableOpacity onPress={() => loadPopularPets(activeType, searchQuery.trim())}>
-            <Text style={styles.seeAllText}>تحديث</Text>
+        <View style={styles.sectionHead}>
+          <Text style={styles.sectionTitleNew}>الحيوانات المتاحة</Text>
+          <TouchableOpacity onPress={() => onOpenAdoption && onOpenAdoption()}>
+            <Text style={styles.sectionLink}>عرض</Text>
           </TouchableOpacity>
         </View>
 
@@ -1046,9 +1526,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         ) : popularPets.length === 0 ? (
           <Text style={styles.emptyPetsText}>لا توجد حيوانات مطابقة لبحثك حالياً.</Text>
         ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <View style={styles.petsContainer}>{popularPets.map(renderPetCard)}</View>
-          </ScrollView>
+          <View style={styles.petsGrid}>{popularPets.slice(0, 4).map(renderPetCard)}</View>
         )}
       </View>
 
@@ -1103,7 +1581,323 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#eef5f5',
+  },
+  // ────────────────────────────────────────────────────────────────────
+  // Stitch home redesign v2 — design tokens from the user's HTML/CSS:
+  // teal #1cb7b2 / #169c97 / #cff6f1, pastels #ffdce2 / #d8eaff /
+  // #cdf5ef, text #1b1f22, muted #8a949b. Hero card wraps avatar +
+  // greeting + search + 3 action cards in one rgba-translucent surface.
+  // ────────────────────────────────────────────────────────────────────
+  heroCard: {
+    marginHorizontal: 4,
+    marginTop: 6,
+    paddingHorizontal: 14,
+    paddingTop: 18,
+    paddingBottom: 18,
+    borderRadius: 36,
+    backgroundColor: 'rgba(248, 252, 252, 0.72)',
+    shadowColor: '#185e63',
+    shadowOpacity: 0.08,
+    shadowRadius: 40,
+    shadowOffset: { width: 0, height: 20 },
+    elevation: 2,
+  },
+  headerCentered: {
+    paddingHorizontal: 6,
+    paddingTop: 6,
+    alignItems: 'center',
+  },
+  avatarTouch: { borderRadius: 43 },
+  avatar: {
+    width: 86,
+    height: 86,
+    borderRadius: 43,
+    backgroundColor: '#cfecdc',
+    marginBottom: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
+  },
+  avatarImage: { width: 86, height: 86, borderRadius: 43 },
+  greeting: {
+    fontSize: 31,
+    fontWeight: '800',
+    color: '#1b1f22',
+    textAlign: 'center',
+    lineHeight: 36,
+    letterSpacing: -0.2,
+  },
+  searchCard: {
+    marginTop: 18,
+    alignSelf: 'stretch',
+    height: 66,
+    borderRadius: 22,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: 'rgba(25,180,176,0.65)',
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    shadowColor: '#087278',
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 2,
+  },
+  searchInputCentered: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1b1f22',
+    textAlign: 'right',
+    paddingHorizontal: 8,
+  },
+  // Lives inside the heroCard, so no horizontal page padding here.
+  actionsInsideHero: {
+    flexDirection: 'row',
+    gap: 14,
+    marginTop: 22,
+  },
+  actionCard: {
+    flex: 1,
+    minHeight: 128,
+    borderRadius: 24,
+    paddingHorizontal: 8,
+    paddingTop: 14,
+    paddingBottom: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#185e63',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 2,
+  },
+  actionTitle: {
+    marginTop: 10,
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#1b1f22',
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  actionPink: { backgroundColor: '#ffdce2' },
+  actionBlue: { backgroundColor: '#d8eaff' },
+  actionMint: { backgroundColor: '#cdf5ef' },
+  sectionHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  sectionTitleNew: {
+    fontSize: 21,
+    fontWeight: '800',
+    color: '#1b1f22',
+  },
+  sectionLink: {
+    color: '#3d9f9b',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  servicesGrid: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  serviceCard: {
+    flex: 1,
+    minHeight: 142,
+    borderRadius: 24,
+    paddingVertical: 18,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#185e63',
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 1,
+  },
+  serviceTitle: {
+    marginTop: 10,
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1f1f1f',
+    textAlign: 'center',
+  },
+  petsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+  },
+  petCardGrid: {
+    width: '47%',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 2,
+  },
+  petImageWrapperGrid: {
+    width: '100%',
+    aspectRatio: 1,
+    backgroundColor: '#dfe9ef',
+    position: 'relative',
+  },
+  petImageGrid: {
+    width: '100%',
+    height: '100%',
+  },
+  favBtn: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.13,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 3,
+  },
+  petInfoGrid: {
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 16,
+  },
+  petNameGrid: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#1f1f1f',
+    textAlign: 'right',
+    lineHeight: 22,
+  },
+  petMetaGrid: {
+    fontSize: 14,
+    color: '#8d959c',
+    textAlign: 'right',
+    marginTop: 4,
+    lineHeight: 19,
+  },
+  // ────────────────────────────────────────────────────────────────────
+  // Stitch v1 hero — teal section that holds the greeting + avatar +
+  // action pills (bell/chat) + the floating white search card.
+  // ────────────────────────────────────────────────────────────────────
+  tealHero: {
+    backgroundColor: '#2DD4BF',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 22,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+  },
+  heroTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  heroLogo: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+  },
+  heroGreetingBlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  heroGreeting: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'right',
+  },
+  heroAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.6)',
+  },
+  heroAvatarFallback: {
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+  },
+  heroActionPill: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  heroActionBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: '#EF4444',
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  heroActionBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  heroSearchCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginTop: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  heroSearchFilterBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#E0F2F1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroSearchInput: {
+    flex: 1,
+    fontSize: 14,
+    color: '#0F172A',
+    paddingHorizontal: 10,
+    textAlign: 'right',
   },
   header: {
     flexDirection: 'row',
@@ -1180,31 +1974,382 @@ const styles = StyleSheet.create({
   },
   quickActionsContainer: {
     backgroundColor: '#fff',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
   },
-  actionButton: {
+  navGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  simpleUnavailableCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#f1d5d3',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.05,
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  simpleUnavailableTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#c0392b',
+    marginBottom: 6,
+  },
+  simpleUnavailableBody: {
+    fontSize: 13,
+    color: '#7f8c8d',
+    marginBottom: 12,
+    lineHeight: 19,
+  },
+  simpleUnavailableList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 12,
+  },
+  simpleUnavailablePill: {
+    backgroundColor: 'rgba(231, 76, 60, 0.08)',
+    borderColor: 'rgba(231, 76, 60, 0.18)',
+    borderWidth: 1,
+    marginRight: 8,
+    marginBottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  simpleUnavailablePillText: {
+    fontSize: 12,
+    color: '#c0392b',
+    fontWeight: '700',
+    maxWidth: 160,
+  },
+  simpleUnavailablePillMore: {
+    backgroundColor: 'rgba(52, 73, 94, 0.08)',
+    borderColor: 'rgba(52, 73, 94, 0.18)',
+    borderWidth: 1,
+    marginRight: 8,
+    marginBottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  simpleUnavailablePillMoreText: {
+    fontSize: 12,
+    color: '#34495e',
+    fontWeight: '700',
+  },
+  simpleUnavailableActions: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    marginRight: 14,
-    borderRadius: 10,
-    backgroundColor: '#f0f5f5',
+    justifyContent: 'space-between',
   },
-  actionButtonActive: {
+  simpleActionPrimary: {
     backgroundColor: '#02B7B4',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
   },
-  actionIcon: {
-    fontSize: 22,
+  simpleActionPrimaryText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  simpleActionLink: {
+    color: '#0f6c6a',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  emptyMyPetsCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    paddingVertical: 28,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#e6ecf1',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.05,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  emptyMyPetsEmoji: {
+    fontSize: 40,
+    marginBottom: 12,
+  },
+  emptyMyPetsTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2c3e50',
+    marginBottom: 6,
+  },
+  emptyMyPetsSubtitle: {
+    fontSize: 13,
+    color: '#7f8c8d',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  emptyMyPetsButton: {
+    backgroundColor: '#02B7B4',
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 20,
+  },
+  emptyMyPetsButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  myPetsAlertCard: {
+    backgroundColor: 'rgba(231, 76, 60, 0.08)',
+    borderColor: 'rgba(231, 76, 60, 0.18)',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+  },
+  myPetsAlertTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#c0392b',
     marginBottom: 4,
   },
-  actionText: {
-    fontSize: 12,
-    color: '#2c3e50',
-    fontWeight: '500',
+  myPetsAlertSubtitle: {
+    fontSize: 13,
+    color: '#c0392b',
+    opacity: 0.8,
+    lineHeight: 18,
   },
-  actionTextActive: {
+  myPetsContainer: {
+    flexDirection: 'row',
+    paddingVertical: 6,
+    paddingRight: 6,
+  },
+  myPetCard: {
+    width: 220,
+    marginRight: 14,
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e6ecf1',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  myPetImageWrapper: {
+    position: 'relative',
+    width: '100%',
+    height: 130,
+  },
+  myPetImage: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#dfe6e9',
+  },
+  myPetImageDimmed: {
+    opacity: 0.55,
+  },
+  myPetStatusChip: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  myPetStatusText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  myPetInfo: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  myPetInfoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  myPetName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2c3e50',
+    flex: 1,
+  },
+  myPetMeta: {
+    fontSize: 13,
+    color: '#7f8c8d',
+    marginBottom: 10,
+  },
+  myPetStatusNote: {
+    backgroundColor: 'rgba(52, 73, 94, 0.06)',
+    borderRadius: 10,
+    padding: 10,
+  },
+  myPetStatusNoteText: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#5d6d7e',
+  },
+  // Stitch v1 quick-action tile: rounded colored card with the icon
+  // sitting directly in the middle and the label centered below. No
+  // inner circle — the per-tile pastel bg is the chrome.
+  navItem: {
+    width: '31%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 22,
+    paddingHorizontal: 8,
+    borderRadius: 22,
+    backgroundColor: '#f7fafb',
+    borderWidth: 0,
+    marginBottom: 10,
+    gap: 10,
+  },
+  navItemActive: {
+    backgroundColor: '#e8fbfa',
+    borderColor: '#02B7B4',
+  },
+  navIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(255,255,255,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  // Kept for any legacy callers; new tiles use navIconCircle.
+  navIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  navIcon: { fontSize: 22 },
+  navIconActive: {},
+  navLabel: { fontSize: 13, color: '#1F2937', fontWeight: '700', textAlign: 'center' },
+  navLabelActive: { color: '#0e7f7c' },
+  // "Primary" tile emphasis — same size as siblings (so legacy 5-tile
+  // layout still wraps cleanly) but a teal-tinted background and
+  // teal-accented border to draw the eye to Add Pet.
+  navItemPrimary: {
+    backgroundColor: '#E8FBFA',
+    borderColor: '#02B7B4',
+    borderWidth: 1.5,
+  },
+  navLabelPrimary: {
+    color: '#0e7f7c',
+  },
+  servicesStripSection: {
+    marginHorizontal: 20,
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  servicesStripHint: {
+    fontSize: 12,
+    color: '#5f6c7b',
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  servicesStripContent: {
+    paddingVertical: 4,
+    gap: 10,
+  },
+  serviceTile: {
+    width: 92,
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e5edf4',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Stitch v1: emoji sits inside a soft mint circle for a cleaner, more
+  // app-like service tile (vs. floating naked emoji on white card).
+  serviceTileIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#E0F2F1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  serviceTileEmoji: {
+    fontSize: 22,
+  },
+  serviceTileLabel: {
+    fontSize: 12,
+    color: '#1c344d',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  adoptionPromo: {
+    marginHorizontal: 20,
+    marginTop: 10,
+    marginBottom: 24,
+    padding: 20,
+    borderRadius: 16,
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#c9edef',
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  adoptionPromoContent: {
+    flex: 1,
+  },
+  adoptionPromoTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#026b6a',
+    marginBottom: 6,
+  },
+  adoptionPromoSubtitle: {
+    fontSize: 14,
+    color: '#4f6f72',
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+  adoptionPromoButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#02B7B4',
+    borderRadius: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+  },
+  adoptionPromoButtonText: {
     color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  adoptionPromoIcon: {
+    marginLeft: 16,
   },
   section: {
     marginTop: 20,
@@ -1242,30 +2387,78 @@ const styles = StyleSheet.create({
   petsContainer: {
     flexDirection: 'row',
   },
+  // Stitch v1 pet card: square image dominant, then a tight info row
+  // (name on the start, heart on the end) and a small breed/subtitle.
   petCard: {
-    width: 160,
-    marginRight: 15,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 12,
+    width: 150,
+    marginEnd: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
     overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  petImageWrapper: {
+    position: 'relative',
+    width: '100%',
+    height: 150,
   },
   petImage: {
     width: '100%',
-    height: 120,
+    height: 150,
     backgroundColor: '#e1e8ed',
+    borderRadius: 0,
+  },
+  petImageDimmed: {
+    opacity: 0.85,
+  },
+  petImageOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(28, 52, 77, 0.45)',
+  },
+  petStatusBadge: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    backgroundColor: 'rgba(12, 31, 50, 0.85)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  petStatusText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   petInfo: {
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  petInfoTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   petName: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#2c3e50',
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1F2937',
+    flex: 1,
+    marginEnd: 6,
+    textAlign: 'right',
   },
   petBreed: {
-    fontSize: 14,
-    color: '#7f8c8d',
+    fontSize: 11,
+    color: '#64748B',
     marginTop: 2,
+    textAlign: 'right',
   },
   petAge: {
     fontSize: 12,
@@ -1349,7 +2542,7 @@ const styles = StyleSheet.create({
   },
   closeIconText: {
     fontSize: 18,
-    color: '#34495e',
+    color: '#64748B',
   },
   overlayTitle: {
     flex: 1,
