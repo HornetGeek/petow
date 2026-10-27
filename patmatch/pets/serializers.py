@@ -538,9 +538,15 @@ class PetSerializer(PetEngagementMixin, serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
-        if not request or not request.user.is_authenticated or request.user.id != instance.owner_id:
-            for key in ('owner_email', 'latitude', 'longitude', 'vaccination_certificate',
-                        'health_certificate', 'disease_free_certificate', 'additional_certificate'):
+        is_authenticated = bool(request and request.user.is_authenticated)
+        is_owner = is_authenticated and request.user.id == instance.owner_id
+        if not is_owner:
+            private_fields = ['owner_email', 'vaccination_certificate',
+                              'health_certificate', 'disease_free_certificate',
+                              'additional_certificate']
+            if not is_authenticated:
+                private_fields.extend(('latitude', 'longitude'))
+            for key in private_fields:
                 data.pop(key, None)
         # Fix image URLs - if it's an external URL, use the raw value instead of Django's processed URL
         if instance.main_image:
