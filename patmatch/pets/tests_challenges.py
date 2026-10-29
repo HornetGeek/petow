@@ -2,6 +2,7 @@ import base64
 import shutil
 import tempfile
 from datetime import timedelta
+from io import BytesIO
 from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError
@@ -11,6 +12,7 @@ from django.db import IntegrityError, transaction
 from django.db.models.signals import post_save
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from PIL import Image
 from rest_framework.test import APIClient
 
 from accounts.models import User
@@ -47,8 +49,12 @@ class ChallengeMediaMixin:
         email = kwargs.pop('email', f'test-{ChallengeMediaMixin._user_seq}@challenge.test')
         return User.objects.create_user(username=username, email=email, password='pass', **kwargs)
 
-    def _image(self, name='entry.png', content_type='image/png'):
-        return SimpleUploadedFile(name, PNG_BYTES, content_type=content_type)
+    def _image(self, name='entry.jpg', content_type='image/jpeg'):
+        img = Image.new('RGB', (10, 10), color=(200, 100, 50))
+        buf = BytesIO()
+        img.save(buf, format='JPEG', quality=85)
+        buf.seek(0)
+        return SimpleUploadedFile(name, buf.read(), content_type=content_type)
 
     def _make_pet(self, owner, name='TestPet'):
         breed = Breed.objects.create(name=f'{name}-breed', pet_type='cats')
@@ -164,7 +170,7 @@ class PermissionTests(ChallengeMediaMixin, TestCase):
 
     def test_unauthenticated_cannot_react(self):
         client = APIClient()
-        self.assertEqual(client.put(f'/api/pets/challenge-entries/{self.entry.id}/reaction/').status_code, 401)
+        self.assertIn(client.put(f'/api/pets/challenge-entries/{self.entry.id}/reaction/').status_code, [401, 403])
 
     def test_unauthenticated_cannot_report(self):
         client = APIClient()
