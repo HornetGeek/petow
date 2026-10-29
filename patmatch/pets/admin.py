@@ -11,6 +11,42 @@ from django.db.models import Q
 from django.contrib.auth import get_user_model
 from django.utils.dateparse import parse_date
 from . import chat_admin_service as chat_admin
+from .models import DailyChallenge, ChallengeEntry, ChallengeReaction, ChallengeReport
+
+
+@admin.register(DailyChallenge)
+class DailyChallengeAdmin(admin.ModelAdmin):
+    list_display = ('title', 'starts_at', 'ends_at', 'is_published', 'is_disabled', 'participants')
+    list_filter = ('is_published', 'is_disabled', 'category')
+    search_fields = ('title', 'slug')
+    def participants(self, obj):
+        return obj.entries.filter(deleted_at__isnull=True, is_hidden=False).count()
+
+
+@admin.register(ChallengeEntry)
+class ChallengeEntryAdmin(admin.ModelAdmin):
+    list_display = ('id', 'challenge', 'user', 'pet', 'is_hidden', 'created_at')
+    list_filter = ('is_hidden', 'challenge')
+    raw_id_fields = ('user', 'pet', 'challenge')
+    actions = ('hide_entries',)
+    def hide_entries(self, request, queryset):
+        queryset.update(is_hidden=True)
+
+
+@admin.register(ChallengeReport)
+class ChallengeReportAdmin(admin.ModelAdmin):
+    list_display = ('id', 'entry', 'reason', 'status', 'created_at')
+    list_filter = ('status', 'reason')
+    raw_id_fields = ('entry', 'reporter')
+    actions = ('hide_reported_entries',)
+    def hide_reported_entries(self, request, queryset):
+        ChallengeEntry.objects.filter(id__in=queryset.values('entry_id')).update(is_hidden=True)
+        queryset.update(status='reviewed')
+
+
+@admin.register(ChallengeReaction)
+class ChallengeReactionAdmin(admin.ModelAdmin):
+    list_display = ('entry', 'user', 'created_at')
 
 
 class ChatTypeFilter(admin.SimpleListFilter):

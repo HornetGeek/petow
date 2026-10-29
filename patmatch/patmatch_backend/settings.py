@@ -333,6 +333,8 @@ REST_FRAMEWORK = {
     ],
     'EXCEPTION_HANDLER': 'patmatch_backend.api_exceptions.localized_exception_handler',
     'DEFAULT_THROTTLE_RATES': {
+        'challenge_entry': '10/day',
+        'challenge_report': '20/day',
         'google_maps_autocomplete': '60/minute',
         'google_maps_geocode': '30/minute',
         'pet_share_open': '60/minute',

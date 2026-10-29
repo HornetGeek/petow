@@ -491,6 +491,80 @@ class UserBlock(models.Model):
         constraints = [models.UniqueConstraint(fields=['blocker', 'blocked'], name='pets_user_block_pair_uniq')]
 
 
+class DailyChallenge(models.Model):
+    slug = models.SlugField(unique=True)
+    title = models.CharField(max_length=100)
+    description = models.CharField(max_length=240)
+    category = models.CharField(max_length=40, default='community')
+    cover = models.ImageField(upload_to='challenges/covers/', blank=True)
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+    is_published = models.BooleanField(default=False)
+    is_disabled = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['is_published', 'is_disabled', 'starts_at', 'ends_at'], name='challenge_schedule_idx')]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        from zoneinfo import ZoneInfo
+        if self.is_published:
+            if not self.starts_at or not self.ends_at or self.starts_at >= self.ends_at:
+                raise ValidationError('A published challenge needs a valid time window.')
+            if DailyChallenge.objects.filter(is_published=True, is_disabled=False,
+                    starts_at__lt=self.ends_at, ends_at__gt=self.starts_at).exclude(pk=self.pk).exists():
+                raise ValidationError('Featured challenges cannot overlap.')
+            local_day = self.starts_at.astimezone(ZoneInfo('Africa/Cairo')).date()
+            for other_start in DailyChallenge.objects.filter(is_published=True, is_disabled=False).exclude(pk=self.pk).values_list('starts_at', flat=True):
+                if other_start and other_start.astimezone(ZoneInfo('Africa/Cairo')).date() == local_day:
+                    raise ValidationError('Only one featured challenge can start on a Cairo calendar day.')
+
+    def __str__(self):
+        return self.title
+
+
+class ChallengeEntry(models.Model):
+    challenge = models.ForeignKey(DailyChallenge, on_delete=models.CASCADE, related_name='entries')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    pet = models.ForeignKey(Pet, on_delete=models.SET_NULL, null=True, blank=True)
+    image = models.ImageField(upload_to='challenges/entries/')
+    thumbnail = models.ImageField(upload_to='challenges/thumbs/', blank=True)
+    caption = models.CharField(max_length=160, blank=True)
+    is_hidden = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['challenge', 'user'], condition=models.Q(deleted_at__isnull=True), name='challenge_one_active_entry')]
+        indexes = [models.Index(fields=['challenge', 'is_hidden', 'deleted_at', '-created_at'], name='challenge_gallery_idx')]
+
+
+class ChallengeReaction(models.Model):
+    entry = models.ForeignKey(ChallengeEntry, on_delete=models.CASCADE, related_name='reactions')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['entry', 'user'], name='challenge_one_reaction')]
+
+
+class ChallengeReport(models.Model):
+    entry = models.ForeignKey(ChallengeEntry, on_delete=models.CASCADE, related_name='reports')
+    reporter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    reason = models.CharField(max_length=32, choices=[
+        ('inappropriate', 'محتوى غير مناسب'), ('spam', 'إزعاج أو إعلان'),
+        ('safety', 'مشكلة أمان'), ('other', 'سبب آخر'),
+    ])
+    details = models.CharField(max_length=500, blank=True)
+    status = models.CharField(max_length=16, default='open')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['entry', 'reporter'], name='challenge_one_report')]
+
+
 class StoryReplyRequest(models.Model):
     STATUS_PENDING = 'pending'
     STATUS_APPROVED = 'approved'

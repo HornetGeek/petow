@@ -1,11 +1,19 @@
 from django.urls import path
 from . import views
 from .availability_views import AvailabilityChecksView, PetAvailabilityView
-from . import sharing, story_replies
+from . import sharing, story_replies, challenges
 
 app_name = 'pets'
 
 urlpatterns = [
+    path('challenges/current/', challenges.current),
+    path('challenges/archives/', challenges.archives),
+    path('challenges/<int:challenge_id>/', challenges.detail),
+    path('challenges/<int:challenge_id>/entries/', challenges.entries),
+    path('challenges/<int:challenge_id>/entries/create/', challenges.create_entry),
+    path('challenge-entries/<int:entry_id>/', challenges.entry_detail),
+    path('challenge-entries/<int:entry_id>/reaction/', challenges.reaction),
+    path('challenge-entries/<int:entry_id>/report/', challenges.report),
     path('public/<int:pet_id>/', sharing.public_pet, name='public-pet-share'),
     path('public/<int:pet_id>/shares/<uuid:share_id>/', sharing.public_share, name='public-pet-share-session'),
     path('public/<int:pet_id>/shares/<uuid:share_id>/open/', sharing.record_public_share_open, name='public-pet-share-open'),
