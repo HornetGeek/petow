@@ -1293,6 +1293,10 @@ class ChatRoom(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True, help_text="هل المحادثة نشطة")
+    admin_last_message_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    admin_last_message_preview = models.CharField(max_length=120, blank=True, default='')
+    admin_message_count = models.PositiveIntegerField(null=True, blank=True)
+    admin_summary_version = models.PositiveBigIntegerField(default=0)
 
     def __str__(self):
         return f"ChatRoom-{self.id}"
@@ -1669,8 +1673,9 @@ class ChatRoom(models.Model):
         ).order_by('-updated_at')
 
     class Meta:
-        verbose_name = "غرفة محادثة"
-        verbose_name_plural = "غرف المحادثة"
+        verbose_name = 'Chat Conversation'
+        verbose_name_plural = 'Chat Conversations'
+        permissions = [('view_chat_conversation', 'Can view private chat conversations')]
         ordering = ['-updated_at']
         indexes = [
             models.Index(fields=['is_active', 'updated_at'], name='pets_chatro_is_acti_6cab74_idx'),

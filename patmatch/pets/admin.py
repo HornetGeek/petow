@@ -1,4 +1,54 @@
 from django.contrib import admin
+from django.contrib.admin.models import LogEntry
+from django.contrib.contenttypes.models import ContentType
+from django.core import signing
+from django.core.paginator import Paginator
+from django.http import Http404, HttpResponseForbidden, JsonResponse
+from django.shortcuts import render, get_object_or_404
+from django.urls import path, reverse
+from django.utils.html import format_html
+from django.db.models import Q
+from django.contrib.auth import get_user_model
+from django.utils.dateparse import parse_date
+from . import chat_admin_service as chat_admin
+
+
+class ChatTypeFilter(admin.SimpleListFilter):
+    title = 'conversation type'
+    parameter_name = 'chat_type'
+    def lookups(self, request, model_admin):
+        return [('adoption', 'Adoption'), ('breeding', 'Breeding'), ('story', 'Story reply'), ('clinic', 'Clinic')]
+    def queryset(self, request, queryset):
+        field = {'adoption': 'adoption_request', 'breeding': 'breeding_request', 'story': 'story_reply_request', 'clinic': 'clinic_patient'}.get(self.value())
+        return queryset.filter(**{f'{field}__isnull': False}) if field else queryset
+
+
+class ChatStatusFilter(admin.SimpleListFilter):
+    title = 'conversation status'
+    parameter_name = 'chat_status'
+    def lookups(self, request, model_admin):
+        return [('active', 'Active'), ('archived', 'Archived')]
+    def queryset(self, request, queryset):
+        if self.value() in ('active', 'archived'):
+            return queryset.filter(is_active=self.value() == 'active')
+        return queryset
+
+
+class ChatDateRangeFilter(admin.SimpleListFilter):
+    title = 'last message date'
+    parameter_name = 'date_range'
+    def lookups(self, request, model_admin):
+        return [('custom', 'Custom range')]
+    def expected_parameters(self):
+        return ['date_range', 'from', 'to']
+    def queryset(self, request, queryset):
+        start = parse_date(request.GET.get('from', ''))
+        end = parse_date(request.GET.get('to', ''))
+        if start:
+            queryset = queryset.filter(admin_last_message_at__date__gte=start)
+        if end:
+            queryset = queryset.filter(admin_last_message_at__date__lte=end)
+        return queryset
 from django.utils import timezone
 from django.utils.html import mark_safe
 from .models import (
@@ -420,16 +470,185 @@ class SavedSearchMatchAdmin(admin.ModelAdmin):
 
 @admin.register(ChatRoom)
 class ChatRoomAdmin(admin.ModelAdmin):
-    list_display = ['__str__', 'firebase_chat_id', 'created_at', 'updated_at', 'is_active']
-    list_filter = ['is_active', 'created_at', 'updated_at']
-    search_fields = ['breeding_request__requester__first_name', 'breeding_request__target_pet__owner__first_name', 'firebase_chat_id']
-    readonly_fields = ['created_at', 'updated_at', 'firebase_chat_id']
-    
+    list_display = ['conversation_link', 'people', 'kind', 'pet', 'status', 'admin_last_message_preview', 'admin_last_message_at', 'admin_message_count']
+    list_filter = [ChatTypeFilter, ChatStatusFilter, ChatDateRangeFilter, 'created_at']
+    search_fields = ['=id', '=firebase_chat_id', '=breeding_request__requester__id', '=breeding_request__target_pet__owner__id', '=adoption_request__adopter__id', '=adoption_request__pet__owner__id', '=story_reply_request__sender__id', '=story_reply_request__owner__id', '=clinic_staff__id', '=clinic_patient__linked_user__id', 'breeding_request__requester__first_name', 'breeding_request__requester__last_name', 'breeding_request__requester__email', 'breeding_request__requester__phone', 'breeding_request__target_pet__owner__first_name', 'breeding_request__target_pet__owner__email', 'adoption_request__adopter__first_name', 'adoption_request__adopter__email', 'adoption_request__adopter__phone', 'adoption_request__pet__owner__first_name', 'adoption_request__pet__owner__email', 'story_reply_request__sender__email', 'story_reply_request__owner__email', 'clinic_staff__email', 'clinic_patient__linked_user__email', 'breeding_request__target_pet__name', 'adoption_request__pet__name']
+    ordering = ['-admin_last_message_at', '-pk']
+    list_per_page = 25
+    show_full_result_count = False
+    change_list_template = 'admin/pets/chatroom/change_list.html'
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_active and request.user.is_staff and (request.user.is_superuser or request.user.has_perm('pets.view_chat_conversation'))
+
+    def has_module_permission(self, request):
+        return self.has_view_permission(request)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related(
-            'breeding_request__requester',
-            'breeding_request__target_pet__owner'
-        )
+        return super().get_queryset(request).select_related(*chat_admin.ROOM_RELATIONS)
+
+    def get_search_fields(self, request):
+        fields = [field for field in self.search_fields if not (field == '=id' or field.endswith('__id'))]
+        for relation in ('breeding_request__target_pet__owner', 'adoption_request__adopter',
+                         'adoption_request__pet__owner', 'story_reply_request__sender',
+                         'story_reply_request__owner', 'clinic_staff', 'clinic_patient__linked_user'):
+            fields.extend(f'{relation}__{name}' for name in ('first_name', 'last_name', 'phone'))
+        return fields
+
+    def get_search_results(self, request, queryset, search_term):
+        base = queryset
+        found, duplicates = super().get_search_results(request, queryset, search_term)
+        if search_term.strip().isdecimal():
+            user_id = int(search_term.strip())
+            id_paths = [field[1:] for field in self.search_fields if field == '=id' or field.endswith('__id')]
+            numeric = Q()
+            for path in id_paths:
+                numeric |= Q(**{path: user_id})
+            found = found | base.filter(numeric)
+        return found, duplicates
+
+    def get_model_perms(self, request):
+        return {'view': self.has_view_permission(request)}
+
+    def get_urls(self):
+        custom = [
+            path('user-search/', self.admin_site.admin_view(self.user_search), name='pets_chatroom_user_search'),
+            path('<int:room_id>/viewer/', self.admin_site.admin_view(self.viewer), name='pets_chatroom_viewer'),
+            path('find-between-users/', self.admin_site.admin_view(self.find_pair), name='pets_chatroom_find_pair'),
+        ]
+        return custom + super().get_urls()
+
+    def user_search(self, request):
+        denied = self._allowed(request)
+        if denied:
+            return denied
+        term = request.GET.get('q', '').strip()[:100]
+        if len(term) < 2:
+            return JsonResponse({'results': []})
+        q = Q(email__icontains=term) | Q(first_name__icontains=term) | Q(last_name__icontains=term) | Q(phone__icontains=term)
+        if term.isdecimal():
+            q |= Q(pk=int(term))
+        users = get_user_model().objects.filter(q).order_by('pk')[:20]
+        return JsonResponse({'results': [{'id': u.pk, 'label': f'{u.get_full_name() or u.email} · {u.email} (#{u.pk})'} for u in users]})
+
+    @admin.display(description='Conversation')
+    def conversation_link(self, obj):
+        return format_html('<a href="{}">Room #{}</a>', reverse('admin:pets_chatroom_viewer', args=[obj.pk]), obj.pk)
+
+    @admin.display(description='Participants')
+    def people(self, obj):
+        people = chat_admin.participants(obj)
+        if not people:
+            return '—'
+        links = []
+        for person in people:
+            avatar = format_html('<img src="{}" alt="" width="24" height="24" style="border-radius:50%;object-fit:cover;vertical-align:middle"> ', person.profile_picture.url) if person.profile_picture else ''
+            link = format_html('<a href="{}">{} ({})</a>', reverse('admin:accounts_user_change', args=[person.pk]), person.get_full_name() or person.email, person.pk)
+            links.append(format_html('{}{}', avatar, link))
+        return format_html('{} · {}', *links)
+
+    @admin.display(description='Type')
+    def kind(self, obj):
+        return chat_admin.context(obj)[0]
+
+    @admin.display(description='Pet')
+    def pet(self, obj):
+        pet = chat_admin.context(obj)[2]
+        return pet.name if pet else '—'
+
+    @admin.display(description='Status')
+    def status(self, obj):
+        return chat_admin.context(obj)[1]
+
+    def _allowed(self, request):
+        if not self.has_view_permission(request):
+            return HttpResponseForbidden('Chat conversation permission required')
+        return None
+
+    def viewer(self, request, room_id):
+        denied = self._allowed(request)
+        if denied:
+            return denied
+        room = get_object_or_404(chat_admin.rooms(), pk=room_id)
+        people = chat_admin.participants(room)
+        if not people:
+            raise Http404
+        try:
+            exact_pair = chat_admin.room_is_exact_pair(room, {people[0].pk, people[1].pk})
+        except Exception:
+            return render(request, 'admin/pets/chatroom/viewer.html', {**self.admin_site.each_context(request), 'title': 'Conversation unavailable', 'room': room, 'people': people, 'messages': [], 'error': 'Chat storage is unavailable.', 'context_info': chat_admin.context(room)})
+        if not exact_pair:
+            raise Http404
+        LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(ChatRoom).pk, object_id=room.pk, object_repr=str(room), action_flag=4, change_message='Viewed private chat conversation')
+        before = None
+        if request.GET.get('cursor'):
+            try:
+                before = signing.loads(request.GET['cursor'], salt='chat-admin-cursor', max_age=86400)
+                if before['room'] != room.pk:
+                    raise ValueError
+                from datetime import datetime
+                before = datetime.fromisoformat(before['time']), before['id']
+            except (signing.BadSignature, KeyError, ValueError):
+                raise Http404
+        try:
+            messages, next_cursor = chat_admin.message_page(room, before)
+            error = None
+        except Exception:
+            messages, next_cursor, error = [], None, 'Chat storage is unavailable.'
+        cursor = signing.dumps({'room': room.pk, 'time': next_cursor[0].isoformat(), 'id': next_cursor[1]}, salt='chat-admin-cursor') if next_cursor else None
+        return render(request, 'admin/pets/chatroom/viewer.html', {**self.admin_site.each_context(request), 'title': f'Conversation #{room.pk}', 'room': room, 'people': people, 'messages': messages, 'cursor': cursor, 'error': error, 'context_info': chat_admin.context(room)})
+
+    def find_pair(self, request):
+        denied = self._allowed(request)
+        if denied:
+            return denied
+        a = request.GET.get('a', '').strip()
+        b = request.GET.get('b', '').strip()
+        matched = []
+        combined = []
+        combined_cursor = None
+        error = None
+        if a.isdecimal() and b.isdecimal() and a != b:
+            LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(ChatRoom).pk, object_id=f'{a}:{b}', object_repr=f'User pair {a}, {b}', action_flag=4, change_message='Viewed private chat pair')
+            try:
+                matched = [r for r in chat_admin.pair_rooms(int(a), int(b)) if {p.pk for p in chat_admin.participants(r)} == {int(a), int(b)} and chat_admin.room_is_exact_pair(r, {int(a), int(b)})]
+            except Exception:
+                error = 'Chat storage is unavailable.'
+            cursors = {}
+            if request.GET.get('cursor'):
+                try:
+                    cursors = signing.loads(request.GET['cursor'], salt='chat-admin-pair', max_age=86400)
+                    if cursors.get('a') != int(a) or cursors.get('b') != int(b):
+                        raise ValueError
+                except (signing.BadSignature, ValueError):
+                    raise Http404
+            pool = []
+            try:
+                from datetime import datetime
+                for room in matched:
+                    value = cursors.get(str(room.pk))
+                    before = (datetime.fromisoformat(value[0]), value[1]) if value else None
+                    page, _ = chat_admin.message_page(room, before)
+                    pool.extend(page)
+                selected = sorted(pool, key=lambda m: (m['timestamp'], m['room'].pk, m['id']), reverse=True)[:50]
+                combined = list(reversed(selected))
+                if len(pool) >= 50:
+                    for message in selected:
+                        cursors[str(message['room'].pk)] = (message['timestamp'].isoformat(), message['id'])
+                    cursors.update({'a': int(a), 'b': int(b)})
+                    combined_cursor = signing.dumps(cursors, salt='chat-admin-pair')
+            except Exception:
+                error = 'Chat storage is unavailable.'
+        return render(request, 'admin/pets/chatroom/pair.html', {**self.admin_site.each_context(request), 'title': 'Find Chats Between Users', 'a': a, 'b': b, 'matched': matched, 'combined': combined, 'combined_cursor': combined_cursor, 'error': error})
 
 
 @admin.register(AdoptionRequest)

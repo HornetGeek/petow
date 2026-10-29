@@ -20,10 +20,12 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.views.static import serve
 from accounts import views as account_views
+from pets.chat_admin_sync import sync_summary
 
 handler500 = 'patmatch_backend.api_exceptions.server_error'
 
 urlpatterns = [
+    path('internal/chat-admin-summary/', sync_summary, name='chat-admin-summary-sync'),
     path('admin/', admin.site.urls),
     
     # API endpoints
