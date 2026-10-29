@@ -25,6 +25,8 @@ CAIRO = ZoneInfo('Africa/Cairo')
 
 
 class ChallengeMediaMixin:
+    _user_seq = 0
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -39,6 +41,11 @@ class ChallengeMediaMixin:
         shutil.rmtree(cls._media_dir, ignore_errors=True)
         post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
         super().tearDownClass()
+
+    def _make_user(self, username, **kwargs):
+        ChallengeMediaMixin._user_seq += 1
+        email = kwargs.pop('email', f'test-{ChallengeMediaMixin._user_seq}@challenge.test')
+        return User.objects.create_user(username=username, email=email, password='pass', **kwargs)
 
     def _image(self, name='entry.png', content_type='image/png'):
         return SimpleUploadedFile(name, PNG_BYTES, content_type=content_type)
@@ -60,7 +67,7 @@ class ChallengeMediaMixin:
 
 class SchedulingTests(ChallengeMediaMixin, TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='scheduler', password='pass')
+        self.user = self._make_user('scheduler')
         now = timezone.now()
         self.active = DailyChallenge.objects.create(
             slug='active', title='Active', description='desc',
@@ -69,7 +76,7 @@ class SchedulingTests(ChallengeMediaMixin, TestCase):
         )
 
     def test_cairo_date_boundary(self):
-        start = timezone.now().astimezone(Cairo).replace(hour=10, minute=0, second=0, microsecond=0)
+        start = timezone.now().astimezone(CAIRO).replace(hour=10, minute=0, second=0, microsecond=0)
         utc_start = start.astimezone(timezone.utc)
         second = DailyChallenge(
             slug='same-day', title='Same day', description='desc',
@@ -143,8 +150,8 @@ class PermissionTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.owner = User.objects.create_user(username='perm-owner', password='pass')
-        self.other = User.objects.create_user(username='perm-other', password='pass')
+        self.owner = self._make_user('perm-owner')
+        self.other = self._make_user('perm-other')
         self.entry = self._make_entry(self.challenge, self.owner)
 
     def test_unauthenticated_cannot_create_entry(self):
@@ -185,8 +192,8 @@ class IdempotencyTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.user = User.objects.create_user(username='idem-user', password='pass')
-        self.other = User.objects.create_user(username='idem-other', password='pass')
+        self.user = self._make_user('idem-user')
+        self.other = self._make_user('idem-other')
         self.other_entry = self._make_entry(self.challenge, self.other)
 
     def test_repeated_create_returns_same_entry(self):
@@ -250,7 +257,7 @@ class MediaValidationTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.user = User.objects.create_user(username='media-user', password='pass')
+        self.user = self._make_user('media-user')
 
     def _post(self, image_file):
         client = APIClient()
@@ -282,10 +289,10 @@ class GalleryAndModerationTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.viewer = User.objects.create_user(username='gallery-viewer', password='pass')
-        self.author_a = User.objects.create_user(username='author-a', password='pass')
-        self.author_b = User.objects.create_user(username='author-b', password='pass')
-        self.author_c = User.objects.create_user(username='author-c', password='pass')
+        self.viewer = self._make_user('gallery-viewer')
+        self.author_a = self._make_user('author-a')
+        self.author_b = self._make_user('author-b')
+        self.author_c = self._make_user('author-c')
         self.entry_a = self._make_entry(self.challenge, self.author_a)
         self.entry_b = self._make_entry(self.challenge, self.author_b)
         self.entry_c = self._make_entry(self.challenge, self.author_c)
@@ -338,8 +345,8 @@ class ReactionLifecycleTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.user = User.objects.create_user(username='react-user', password='pass')
-        self.other = User.objects.create_user(username='react-other', password='pass')
+        self.user = self._make_user('react-user')
+        self.other = self._make_user('react-other')
         self.entry = self._make_entry(self.challenge, self.other)
 
     def test_put_creates_reaction(self):
@@ -382,8 +389,8 @@ class EntryLifecycleTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.owner = User.objects.create_user(username='life-owner', password='pass')
-        self.viewer = User.objects.create_user(username='life-viewer', password='pass')
+        self.owner = self._make_user('life-owner')
+        self.viewer = self._make_user('life-viewer')
         self.entry = self._make_entry(self.challenge, self.owner)
 
     def test_soft_delete_sets_deleted_at(self):
@@ -436,9 +443,9 @@ class PaginationTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.user = User.objects.create_user(username='page-user', password='pass')
+        self.user = self._make_user('page-user')
         for i in range(25):
-            u = User.objects.create_user(username=f'page-{i}', password='pass')
+            u = self._make_user(f'page-{i}')
             self._make_entry(self.challenge, u)
 
     def test_cursor_pagination_returns_next_token(self):
@@ -462,8 +469,8 @@ class ReportValidationTests(ChallengeMediaMixin, TestCase):
             starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1),
             is_published=True,
         )
-        self.reporter = User.objects.create_user(username='reporter', password='pass')
-        self.author = User.objects.create_user(username='report-author', password='pass')
+        self.reporter = self._make_user('reporter')
+        self.author = self._make_user('report-author')
         self.entry = self._make_entry(self.challenge, self.author)
 
     def test_valid_reason_creates_report(self):
