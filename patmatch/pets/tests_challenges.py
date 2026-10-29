@@ -14,7 +14,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from accounts.signals import claim_invites_when_user_updates
+from clinics.signals import claim_invites_when_user_updates
 from .models import Breed, ChallengeEntry, ChallengeReaction, ChallengeReport, DailyChallenge, Pet, UserBlock
 
 PNG_BYTES = base64.b64decode(
@@ -24,15 +24,19 @@ PNG_BYTES = base64.b64decode(
 CAIRO = ZoneInfo('Africa/Cairo')
 
 
-@override_settings(MEDIA_ROOT=tempfile.mkdtemp())
 class ChallengeMediaMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         post_save.disconnect(receiver=claim_invites_when_user_updates, sender=User)
+        cls._media_dir = tempfile.mkdtemp()
+        cls._override = override_settings(MEDIA_ROOT=cls._media_dir)
+        cls._override.enable()
 
     @classmethod
     def tearDownClass(cls):
+        cls._override.disable()
+        shutil.rmtree(cls._media_dir, ignore_errors=True)
         post_save.connect(receiver=claim_invites_when_user_updates, sender=User)
         super().tearDownClass()
 
