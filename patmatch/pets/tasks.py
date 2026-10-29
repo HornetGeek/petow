@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from .models import NotificationOutbox
 from .notification_events import NotificationEventDeferred, NotificationEventPermanentError, dispatch_notification_event
+from patmatch_backend.monitoring import capture_handled
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,8 @@ def process_notification_outbox_event(self, event_id):
     except Exception as exc:  # noqa: BLE001
         should_retry, retry_delay = _mark_event_retry_or_failed(event_id, str(exc))
         logger.exception("Outbox event %s failed", event_id)
+        if not should_retry:
+            capture_handled(exc, module='notifications', operation='process_outbox_event')
 
         if should_retry and settings.NOTIFICATIONS_DELIVERY_MODE == 'async':
             process_notification_outbox_event.apply_async(

@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "chats",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "participantUids", "arrayConfig": "CONTAINS"},
+        {"fieldPath": "permissionStatus", "order": "ASCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

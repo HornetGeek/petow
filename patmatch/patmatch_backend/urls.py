@@ -21,6 +21,8 @@ from django.conf.urls.static import static
 from django.views.static import serve
 from accounts import views as account_views
 
+handler500 = 'patmatch_backend.api_exceptions.server_error'
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     

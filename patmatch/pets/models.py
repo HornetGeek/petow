@@ -426,6 +426,7 @@ class Story(models.Model):
     )
     image = models.ImageField(upload_to=story_image_upload_path)
     caption = models.CharField(max_length=160, blank=True, default='')
+    allow_replies = models.BooleanField(default=True)
     expires_at = models.DateTimeField(db_index=True)
     is_hidden = models.BooleanField(default=False, db_index=True)
     hidden_by = models.ForeignKey(
@@ -479,6 +480,39 @@ class Story(models.Model):
         self.hidden_reason = ''
         self.hidden_at = None
         self.save(update_fields=['is_hidden', 'hidden_by', 'hidden_reason', 'hidden_at', 'updated_at'])
+
+
+class UserBlock(models.Model):
+    blocker = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='blocked_users')
+    blocked = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='blocked_by_users')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['blocker', 'blocked'], name='pets_user_block_pair_uniq')]
+
+
+class StoryReplyRequest(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [(STATUS_PENDING, 'Pending'), (STATUS_APPROVED, 'Approved'), (STATUS_REJECTED, 'Rejected')]
+
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='sent_story_replies')
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='received_story_replies')
+    story = models.ForeignKey(Story, on_delete=models.SET_NULL, null=True, related_name='reply_requests')
+    original_story_id = models.PositiveBigIntegerField()
+    initial_text = models.TextField(max_length=1000)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    idempotency_key = models.CharField(max_length=100)
+    chat_room = models.OneToOneField('ChatRoom', on_delete=models.SET_NULL, null=True, blank=True, related_name='story_reply')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['sender', 'owner'], name='pets_story_reply_pair_uniq'),
+            models.UniqueConstraint(fields=['sender', 'idempotency_key'], name='pets_story_reply_idem_uniq'),
+        ]
 
 
 class StoryView(models.Model):
@@ -855,6 +889,8 @@ class Notification(models.Model):
         ('pet_status_changed', _('Pet status changed')),
         ('system_message', _('System message')),
         ('chat_message_received', _('New message received')),
+        ('story_reply_received', _('Story reply received')),
+        ('story_reply_approved', _('Story reply approved')),
         ('pet_nearby', _('A new pet is nearby')),
         ('adoption_pet_nearby', _('An adoptable pet is nearby')),
         ('saved_search_match', _('New saved-search match')),
@@ -1130,6 +1166,9 @@ class NotificationOutbox(models.Model):
     EVENT_ADOPTION_REQUEST_RECEIVED = 'adoption_request_received'
     EVENT_ADOPTION_REQUEST_APPROVED = 'adoption_request_approved'
     EVENT_CHAT_MESSAGE_RECEIVED = 'chat_message_received'
+    EVENT_STORY_REPLY_RECEIVED = 'story_reply_received'
+    EVENT_STORY_REPLY_APPROVED = 'story_reply_approved'
+    EVENT_CHAT_PERMISSION_SYNC = 'chat_permission_sync'
     EVENT_CLINIC_INVITE_PUSH = 'clinic_invite_push'
     EVENT_CLINIC_BROADCAST_PUSH = 'clinic_broadcast_push'
     EVENT_CLINIC_CHAT_MESSAGE_PUSH = 'clinic_chat_message_push'
@@ -1147,6 +1186,9 @@ class NotificationOutbox(models.Model):
         (EVENT_ADOPTION_REQUEST_RECEIVED, 'Adoption request received'),
         (EVENT_ADOPTION_REQUEST_APPROVED, 'Adoption request approved'),
         (EVENT_CHAT_MESSAGE_RECEIVED, 'Chat message received'),
+        (EVENT_STORY_REPLY_RECEIVED, 'Story reply received'),
+        (EVENT_STORY_REPLY_APPROVED, 'Story reply approved'),
+        (EVENT_CHAT_PERMISSION_SYNC, 'Chat permission sync'),
         (EVENT_CLINIC_INVITE_PUSH, 'Clinic invite push'),
         (EVENT_CLINIC_BROADCAST_PUSH, 'Clinic broadcast push'),
         (EVENT_CLINIC_CHAT_MESSAGE_PUSH, 'Clinic chat message push'),
@@ -1194,6 +1236,10 @@ class NotificationOutbox(models.Model):
 
 class ChatRoom(models.Model):
     """غرفة محادثة بين مالكين حيوانات - metadata فقط، الرسائل في Firebase"""
+    story_reply_request = models.OneToOneField(
+        'StoryReplyRequest', on_delete=models.CASCADE, null=True, blank=True,
+        related_name='pending_room',
+    )
     breeding_request = models.OneToOneField(
         BreedingRequest, 
         on_delete=models.CASCADE,
@@ -1276,6 +1322,9 @@ class ChatRoom(models.Model):
                 if getattr(self.adoption_request, 'pet', None):
                     pet_owner = getattr(self.adoption_request.pet, 'owner', None)
                 add_participant(pet_owner)
+            elif self.story_reply_request_id:
+                add_participant(self.story_reply_request.sender)
+                add_participant(self.story_reply_request.owner)
             elif self.clinic_patient:
                 # محادثة عيادة
                 add_participant(self.clinic_staff)
@@ -1329,6 +1378,7 @@ class ChatRoom(models.Model):
             bool(self.breeding_request),
             bool(self.adoption_request),
             bool(self.clinic_patient),
+            bool(self.story_reply_request_id),
         ]
 
         if not any(links):
@@ -1343,6 +1393,12 @@ class ChatRoom(models.Model):
             import uuid
             self.firebase_chat_id = f"chat_{uuid.uuid4().hex[:16]}"
         super().save(*args, **kwargs)
+        from .notification_events import enqueue_notification_event
+        from uuid import uuid4
+        enqueue_notification_event(
+            NotificationOutbox.EVENT_CHAT_PERMISSION_SYNC, self.pk,
+            f'chat_permission_sync:{self.pk}:{uuid4().hex}',
+        )
 
     def archive(self):
         """أرشفة المحادثة"""
@@ -1358,9 +1414,37 @@ class ChatRoom(models.Model):
         """التحقق من إمكانية وصول المستخدم للمحادثة"""
         try:
             participants = self.get_participants()
-            return any(p.id == user.id for p in participants)
+            if not any(p.id == user.id for p in participants):
+                return False
+            if len(participants) == 2 and UserBlock.objects.filter(
+                models.Q(blocker=participants[0], blocked=participants[1]) |
+                models.Q(blocker=participants[1], blocked=participants[0])
+            ).exists():
+                return False
+            return True
         except:
             return False
+
+    def adoption_send_eligible(self):
+        if not self.adoption_request_id or self.adoption_request.status != 'approved':
+            return False
+        adopter = self.adoption_request.adopter
+        if adopter.is_verified:
+            return True
+        from accounts.models import AccountVerification
+        latest = AccountVerification.objects.filter(user=adopter).order_by('-created_at', '-id').values_list('status', flat=True).first()
+        return latest == 'approved'
+
+    def can_user_send(self, user):
+        if not self.is_active or not self.can_user_access(user):
+            return False
+        if self.story_reply_request_id:
+            return self.story_reply_request.status == 'approved'
+        if self.adoption_request_id:
+            return self.adoption_send_eligible()
+        if self.breeding_request_id:
+            return self.breeding_request.status == 'approved'
+        return bool(self.clinic_patient_id)
 
     def get_chat_context(self):
         """الحصول على السياق الكامل للمحادثة للـ Firebase"""
@@ -1464,6 +1548,25 @@ class ChatRoom(models.Model):
                         'is_active': self.is_active,
                     }
                 }
+            elif self.story_reply_request_id:
+                reply = self.story_reply_request
+                return {
+                    'chat_id': self.firebase_chat_id,
+                    'type': 'story_reply',
+                    'story_reply': {
+                        'id': reply.id, 'status': reply.status,
+                        'story_id': reply.original_story_id,
+                        'initial_text': reply.initial_text,
+                        'sender_id': reply.sender_id, 'owner_id': reply.owner_id,
+                    },
+                    'pet': None,
+                    'participants': self.get_participants_data(),
+                    'metadata': {
+                        'created_at': self.created_at.isoformat(),
+                        'updated_at': self.updated_at.isoformat(),
+                        'is_active': self.is_active,
+                    },
+                }
             elif self.clinic_patient:
                 # محادثة عيادة
                 patient = self.clinic_patient
@@ -1521,7 +1624,9 @@ class ChatRoom(models.Model):
             models.Q(breeding_request__target_pet__owner=user) |
             models.Q(adoption_request__adopter=user) |
             models.Q(adoption_request__pet__owner=user) |
-            models.Q(clinic_patient__linked_user=user),
+            models.Q(clinic_patient__linked_user=user) |
+            models.Q(story_reply_request__sender=user) |
+            models.Q(story_reply_request__owner=user),
             is_active=True
         ).select_related(
             'breeding_request__requester',
@@ -1545,7 +1650,9 @@ class ChatRoom(models.Model):
             models.Q(breeding_request__target_pet__owner=user) |
             models.Q(adoption_request__adopter=user) |
             models.Q(adoption_request__pet__owner=user) |
-            models.Q(clinic_patient__linked_user=user),
+            models.Q(clinic_patient__linked_user=user) |
+            models.Q(story_reply_request__sender=user) |
+            models.Q(story_reply_request__owner=user),
             is_active=False
         ).select_related(
             'breeding_request__requester',

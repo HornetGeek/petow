@@ -34,6 +34,8 @@ from .models import (
     StoryView,
     StoryReport,
     StoryReaction,
+    StoryReplyRequest,
+    UserBlock,
     EngagementEvent,
     SavedSearch,
     SavedSearchMatch,
@@ -70,6 +72,7 @@ from django.db.models.functions import Coalesce, Cast, Floor
 from django.core.files.storage import default_storage
 
 logger = logging.getLogger(__name__)
+from patmatch_backend.monitoring import capture_handled
 
 
 def _pet_likes_table_available():
@@ -170,6 +173,8 @@ CHAT_ROOM_SELECT_RELATED_FIELDS = (
     'clinic_patient__clinic',
     'clinic_patient__owner',
     'clinic_patient__linked_user',
+    'story_reply_request__sender',
+    'story_reply_request__owner',
 )
 
 REQUEST_STATUS_LABELS = {
@@ -391,6 +396,19 @@ def build_request_center_cards(request):
         chats = ChatRoom.objects.filter(id__in=chat_ids, is_active=True).select_related(*CHAT_ROOM_SELECT_RELATED_FIELDS)
         cards.extend(_build_chat_card(chat, unread_by_room.get(chat.id, 0), request) for chat in chats)
 
+    for reply in StoryReplyRequest.objects.filter(owner=user, status='pending').select_related('sender', 'chat_room').order_by('-created_at')[:50]:
+        cards.append({
+            'id': f'story_reply_{reply.id}', 'object_id': reply.id, 'kind': 'story_reply',
+            'status': reply.status, 'status_label': _('Pending'),
+            'title': _('Replied to your story'),
+            'subtitle': reply.sender.get_full_name() or reply.sender.email,
+            'primary_image': None, 'created_at': reply.created_at, 'updated_at': reply.updated_at,
+            'requires_action': True, 'action_label': _('Review'),
+            'deep_link': f'petow://story-reply?request_id={reply.id}',
+            'metadata': {'request_id': reply.id, 'story_id': reply.original_story_id,
+                         'chat_room_id': reply.chat_room_id, 'firebase_chat_id': reply.chat_room.firebase_chat_id if reply.chat_room else None,
+                         'initial_text': reply.initial_text},
+        })
     cards.extend(_build_storefront_booking_card(item, request) for item in _get_user_storefront_bookings(user)[:30])
     cards.sort(key=lambda card: (_request_card_priority(card), -(card.get('updated_at') or card.get('created_at')).timestamp()))
     return cards
@@ -550,12 +568,7 @@ class HomeDigestView(APIView):
         )
         service_items = [serialize_service_card(service, request=request) for service in services_queryset]
 
-        active_stories = (
-            Story.objects
-            .filter(is_hidden=False, deleted_at__isnull=True, expires_at__gt=timezone.now())
-            .select_related('author', 'pet', 'pet__breed')
-            .order_by('-created_at')[:6]
-        )
+        active_stories = active_story_queryset(request.user)[:6]
         story_items = StorySerializer(active_stories, many=True, context={'request': request}).data
 
         modules = [
@@ -951,10 +964,17 @@ class BreedListView(generics.ListAPIView):
     authentication_classes = []  # No authentication needed
 
 
-def active_story_queryset():
+def active_story_queryset(user=None):
+    blocked_ids = []
+    if user and user.is_authenticated:
+        blocked_ids = list(UserBlock.objects.filter(
+            Q(blocker=user) | Q(blocked=user)
+        ).values_list('blocker_id', 'blocked_id'))
+    hidden_author_ids = {other for a, b in blocked_ids for other in (a, b) if other != getattr(user, 'id', None)}
     return (
         Story.objects
         .filter(is_hidden=False, deleted_at__isnull=True, expires_at__gt=timezone.now())
+        .exclude(author_id__in=hidden_author_ids)
         .select_related('author', 'pet', 'pet__breed')
         .prefetch_related('reactions__user')
         .annotate(reaction_count=Count('reactions', distinct=True))
@@ -1008,7 +1028,7 @@ class StoryListCreateView(generics.ListCreateAPIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def get_queryset(self):
-        return active_story_queryset()
+        return active_story_queryset(self.request.user)
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -1079,7 +1099,7 @@ class MyStoriesView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return active_story_queryset().filter(author=self.request.user)
+        return active_story_queryset(self.request.user).filter(author=self.request.user)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1105,7 +1125,7 @@ class StoryDeleteView(generics.DestroyAPIView):
 @permission_classes([IsAuthenticated])
 def mark_story_viewed(request, story_id):
     try:
-        story = active_story_queryset().get(pk=story_id)
+        story = active_story_queryset(request.user).get(pk=story_id)
     except Story.DoesNotExist:
         return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1125,7 +1145,7 @@ def mark_story_viewed(request, story_id):
 @permission_classes([IsAuthenticated])
 def report_story(request, story_id):
     try:
-        story = active_story_queryset().get(pk=story_id)
+        story = active_story_queryset(request.user).get(pk=story_id)
     except Story.DoesNotExist:
         return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1162,7 +1182,7 @@ def report_story(request, story_id):
 @permission_classes([IsAuthenticated])
 def react_to_story(request, story_id):
     try:
-        story = active_story_queryset().get(pk=story_id)
+        story = active_story_queryset(request.user).get(pk=story_id)
     except Story.DoesNotExist:
         return Response({'error': 'القصة غير موجودة'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1757,6 +1777,9 @@ def respond_to_breeding_request(request, request_id):
 
         breeding_request.response_message = response_message
         breeding_request.save()
+        linked_room = ChatRoom.objects.filter(breeding_request=breeding_request).first()
+        if linked_room:
+            linked_room.save(update_fields=['updated_at'])
 
         enqueue_notification_event(
             event_type=event_type,
@@ -1941,7 +1964,7 @@ def send_chat_message_notification(request):
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-        if not chat_room.can_user_access(request.user):
+        if not chat_room.can_user_send(request.user):
             return Response(
                 {'error': 'غير مصرح لك بالوصول إلى هذه المحادثة'},
                 status=status.HTTP_403_FORBIDDEN
@@ -2008,8 +2031,10 @@ def chat_rooms(request):
             Q(breeding_request__target_pet__owner_id=request.user.id) |
             Q(adoption_request__adopter_id=request.user.id) |
             Q(adoption_request__pet__owner_id=request.user.id) |
-            Q(clinic_patient__linked_user_id=request.user.id),
-            is_active=True
+            Q(clinic_patient__linked_user_id=request.user.id) |
+            Q(story_reply_request__sender_id=request.user.id) |
+            Q(story_reply_request__owner_id=request.user.id),
+            Q(is_active=True) | Q(story_reply_request__status='pending')
         ).select_related(
             *CHAT_ROOM_SELECT_RELATED_FIELDS
         ).order_by('-updated_at')
@@ -2034,7 +2059,8 @@ def chat_rooms(request):
         })
         
     except Exception as e:
-        logger.error(f"Error fetching chat rooms: {str(e)}")
+        logger.exception('Error fetching chat rooms')
+        capture_handled(e, module='chat', operation='list_rooms')
         return Response(
             {'error': 'خطأ في تحميل المحادثات'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -2247,6 +2273,7 @@ def create_chat_room(request):
         
     except Exception as exc:
         logger.exception("Error creating chat room")
+        capture_handled(exc, module='chat', operation='create_room')
         return Response(
             {'error': 'خطأ في إنشاء المحادثة'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -2527,7 +2554,7 @@ def upload_chat_image(request):
                 {'error': 'المحادثة غير موجودة'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        if not chat_room.can_user_access(request.user):
+        if not chat_room.can_user_send(request.user):
             return Response(
                 {'error': 'غير مسموح لك بإرسال صور في هذه المحادثة'},
                 status=status.HTTP_403_FORBIDDEN
@@ -2791,7 +2818,10 @@ def respond_to_adoption_request(request, request_id):
                 )
 
         adoption_request.save()
-    
+        linked_room = ChatRoom.objects.filter(adoption_request=adoption_request).first()
+        if linked_room:
+            linked_room.save(update_fields=['updated_at'])
+
     return Response({
         'message': message,
         'adoption_request': AdoptionRequestSerializer(adoption_request).data

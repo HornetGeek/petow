@@ -49,6 +49,11 @@ def _chat_requester_verification_status(chat_room):
 
 def _chat_status(chat_room):
     """Canonical request/chat phase shared by context and status serializers."""
+    if chat_room.story_reply_request_id:
+        if chat_room.story_reply_request.status == 'pending':
+            return 'pending'
+        if chat_room.story_reply_request.status == 'rejected':
+            return 'rejected'
     if not chat_room.is_active:
         # Kept backward-compatible for older clients. New clients render
         # inactive rooms as archived based on the separate is_active field.
@@ -156,6 +161,7 @@ class StorySerializer(serializers.ModelSerializer):
             'pet',
             'image',
             'caption',
+            'allow_replies',
             'created_at',
             'expires_at',
             'is_mine',
@@ -265,7 +271,7 @@ class StoryCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Story
-        fields = ['image', 'caption', 'pet']
+        fields = ['image', 'caption', 'pet', 'allow_replies']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1257,6 +1263,7 @@ class ChatRoomSerializer(serializers.ModelSerializer):
 
 class ChatRoomListSerializer(serializers.ModelSerializer):
     """سيريلايزر مبسط لقائمة المحادثات"""
+    story_reply_status = serializers.SerializerMethodField()
     other_participant = serializers.SerializerMethodField()
     other_participant_is_verified = serializers.SerializerMethodField()
     other_participant_avatar = serializers.SerializerMethodField()
@@ -1266,11 +1273,14 @@ class ChatRoomListSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatRoom
         fields = [
-            'id', 'firebase_chat_id', 'created_at', 'updated_at',
+            'id', 'firebase_chat_id', 'created_at', 'updated_at', 'is_active', 'story_reply_status',
             'other_participant', 'other_participant_is_verified',
             'other_participant_avatar', 'pet_name', 'pet_image'
         ]
     
+    def get_story_reply_status(self, obj):
+        return obj.story_reply_request.status if obj.story_reply_request_id else None
+
     def get_other_participant(self, obj):
         """اسم المشارك الآخر"""
         try:
@@ -1410,6 +1420,11 @@ class ChatContextSerializer(serializers.ModelSerializer):
                 pet = getattr(obj.adoption_request, 'pet', None)
                 if pet and getattr(pet, 'owner_id', None) == user_id:
                     return 'owner'
+            if obj.story_reply_request_id:
+                if obj.story_reply_request.sender_id == user_id:
+                    return 'requester'
+                if obj.story_reply_request.owner_id == user_id:
+                    return 'owner'
             if obj.clinic_patient:
                 if getattr(obj, 'clinic_staff_id', None) == user_id:
                     return 'clinic_staff'
@@ -1459,6 +1474,8 @@ class ChatStatusSerializer(serializers.ModelSerializer):
             return 'adoption'
         if obj.clinic_patient:
             return 'clinic'
+        if obj.story_reply_request_id:
+            return 'story_reply'
         return None
 
     def get_request_status(self, obj):
@@ -1470,6 +1487,8 @@ class ChatStatusSerializer(serializers.ModelSerializer):
                 return obj.adoption_request.status
             if obj.clinic_patient:
                 return 'active' if obj.is_active else 'archived'
+            if obj.story_reply_request_id:
+                return obj.story_reply_request.status
         except Exception:
             pass
         return None

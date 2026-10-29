@@ -26,6 +26,8 @@ PET_DETAIL_TYPES = {
 
 CHAT_TYPES = {
     'chat_message_received',
+    'story_reply_received',
+    'story_reply_approved',
     'clinic_chat_message',
 }
 

@@ -1,7 +1,7 @@
 from django.urls import path
 from . import views
 from .availability_views import AvailabilityChecksView, PetAvailabilityView
-from . import sharing
+from . import sharing, story_replies
 
 app_name = 'pets'
 
@@ -23,6 +23,12 @@ urlpatterns = [
     path('', views.PetListCreateView.as_view(), name='pet-list-create'),
     path('map/markers/', views.PetMapMarkersView.as_view(), name='pet-map-markers'),
     path('stories/', views.StoryListCreateView.as_view(), name='story-list-create'),
+    path('stories/<int:story_id>/reply/', story_replies.reply_to_story, name='story-reply'),
+    path('stories/<int:story_id>/preview/', story_replies.story_preview, name='story-reply-preview'),
+    path('story-replies/<int:reply_id>/<str:action>/', story_replies.respond_to_story_reply, name='story-reply-respond'),
+    path('users/<int:user_id>/block/', story_replies.block_user, name='user-block'),
+    path('users/blocks/', story_replies.blocked_users, name='blocked-users'),
+    path('chat/firebase-token/', story_replies.firebase_token, name='firebase-token'),
     path('stories/my/', views.MyStoriesView.as_view(), name='my-stories'),
     path('stories/<int:pk>/', views.StoryDeleteView.as_view(), name='story-delete'),
     path('stories/<int:story_id>/view/', views.mark_story_viewed, name='story-view'),

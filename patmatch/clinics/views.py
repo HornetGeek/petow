@@ -2210,11 +2210,13 @@ class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         try:
             is_valid = serializer.is_valid()
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 'Unexpected platform admin clinic service validation error',
                 extra=log_context,
             )
+            from patmatch_backend.monitoring import capture_handled
+            capture_handled(exc, module='clinics', operation='create_service_validation')
             return Response(
                 {
                     'error': 'حدث خطأ غير متوقع أثناء التحقق من بيانات الخدمة',
@@ -2241,11 +2243,13 @@ class PlatformAdminClinicServiceViewSet(viewsets.ModelViewSet):
                 extra=log_context,
             )
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 'Unexpected platform admin clinic service create error',
                 extra=log_context,
             )
+            from patmatch_backend.monitoring import capture_handled
+            capture_handled(exc, module='clinics', operation='create_service')
             return Response(
                 {
                     'error': 'حدث خطأ غير متوقع أثناء إنشاء الخدمة',
