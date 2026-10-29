@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function approvedChat(chatId) {
+      let chat = get(/databases/$(database)/documents/chats/$(chatId));
+      return signedIn()
+        && request.auth.uid in chat.data.participantUids
+        && chat.data.permissionStatus == 'approved'
+        && chat.data.isActive == true;
+    }
+    match /chats/{chatId} {
+      allow read: if signedIn()
+        && request.auth.uid in resource.data.participantUids
+        && resource.data.permissionStatus == 'approved';
+      allow create, delete: if false;
+      allow update: if approvedChat(chatId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'updatedAt', 'lastMessage', 'lastMessageType', 'lastMessageAt',
+          'lastMessageSenderId', 'unreadCount'
+        ]);
+      match /messages/{messageId} {
+        allow read: if approvedChat(chatId);
+        allow create: if approvedChat(chatId)
+          && request.resource.data.senderUid == request.auth.uid
+          && request.resource.data.senderId == int(request.auth.uid)
+          && request.resource.data.type in ['text', 'image']
+          && request.resource.data.keys().hasAll(['text', 'senderId', 'senderUid', 'type', 'timestamp'])
+          && !('storyId' in request.resource.data)
+          && !('storyReplyRequestId' in request.resource.data);
+        allow update: if approvedChat(chatId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']);
+        allow delete: if false;
+      }
+    }
+  }
+}

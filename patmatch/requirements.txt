@@ -41,3 +41,4 @@ firebase-admin==6.4.0
 # Additional Utilities
 defusedxml==0.7.1
 dj-database-url==2.1.0
+sentry-sdk==2.73.0

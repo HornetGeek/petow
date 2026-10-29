@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.conf import settings
+from django.contrib.auth.models import AnonymousUser
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
@@ -164,6 +165,21 @@ class PetEngagementSerializerRegressionTests(TestCase):
 
         self.assertEqual(data['likes_count'], 0)
         self.assertFalse(data['is_liked'])
+
+    def test_pet_detail_shares_coordinates_with_authenticated_viewer(self):
+        data = PetSerializer(self.pet, context={'request': self._request()}).data
+
+        self.assertEqual(data['latitude'], '24.71360000')
+        self.assertEqual(data['longitude'], '46.67530000')
+        self.assertNotIn('owner_email', data)
+
+    def test_pet_detail_hides_coordinates_from_guest(self):
+        request = self.factory.get('/api/pets/')
+        request.user = AnonymousUser()
+        data = PetSerializer(self.pet, context={'request': request}).data
+
+        self.assertNotIn('latitude', data)
+        self.assertNotIn('longitude', data)
 
 
 class AdoptionPushPayloadRegressionTests(TestCase):

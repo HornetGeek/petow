@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 TRANSACTIONAL_NOTIFICATION_TYPES = {
     'chat_message_received',
+    'story_reply_received',
+    'story_reply_approved',
     'breeding_request_received',
     'breeding_request_approved',
     'breeding_request_rejected',
@@ -58,6 +60,8 @@ REMINDER_NOTIFICATION_TYPES = {
 
 CHAT_NOTIFICATION_TYPES = {
     'chat_message_received',
+    'story_reply_received',
+    'story_reply_approved',
     'clinic_chat_message',
 }
 
@@ -282,6 +286,7 @@ def _send_push_notification(user, title, message, data=None, notification=None):
     if not devices and user.fcm_token:
         devices = [type('LegacyDevice', (), {'token': user.fcm_token, 'language': user.preferred_language})()]
     delivered = False
+    last_failure = None
     for device in devices:
         localized_title, localized_message = title, message
         if notification:
@@ -302,6 +307,10 @@ def _send_push_notification(user, title, message, data=None, notification=None):
             delivered = success or delivered
         except Exception as exc:
             logger.error("Error sending push notification to user %s: %s", user.id, exc)
+            last_failure = exc
+    if last_failure and not delivered:
+        from patmatch_backend.monitoring import capture_handled
+        capture_handled(last_failure, module='notifications', operation='send_push')
     return delivered
 
 

@@ -1,6 +1,16 @@
 from django.utils.translation import gettext as _
 from rest_framework.exceptions import ErrorDetail
 from rest_framework.views import exception_handler
+from django.http import JsonResponse
+from django.views.defaults import server_error as default_server_error
+
+
+def server_error(request):
+    if not request.path.startswith('/api/'):
+        return default_server_error(request)
+    return JsonResponse({'error': {'code': 'INTERNAL_SERVER_ERROR',
+                                   'message': 'An unexpected error occurred.',
+                                   'request_id': getattr(request, 'request_id', None)}}, status=500)
 
 
 def _codes(value):

@@ -37,6 +37,7 @@ from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
 logger = logging.getLogger(__name__)
+from patmatch_backend.monitoring import capture_handled
 
 
 def _error(code, message, http_status=status.HTTP_400_BAD_REQUEST):
@@ -379,7 +380,8 @@ def register(request):
             )
 
         except Exception as e:
-            logger.error(f"Error creating user: {str(e)}")
+            logger.exception('Error creating user')
+            capture_handled(e, module='auth', operation='create_user')
             return _error("account_creation_failed", _("Could not create the account."), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response(

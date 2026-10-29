@@ -16,6 +16,9 @@ import logging
 import dj_database_url
 from decouple import config
 from celery.schedules import crontab
+from .monitoring import init_sentry
+
+init_sentry()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -32,6 +35,16 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
 logger = logging.getLogger(__name__)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {'request_id': {'()': 'patmatch_backend.monitoring.RequestIdLogFilter'}},
+    'formatters': {'request': {'format': '%(levelname)s %(name)s request_id=%(request_id)s %(message)s'}},
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': 'request',
+                             'filters': ['request_id']}},
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+}
 
 
 # Application definition
@@ -61,6 +74,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'patmatch_backend.monitoring.RequestContextMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -380,6 +394,7 @@ CORS_ALLOW_METHODS = [
 ]
 
 CORS_EXPOSE_HEADERS = [
+    'x-request-id',
     'content-length',
     'content-range',
     'x-total-count',
