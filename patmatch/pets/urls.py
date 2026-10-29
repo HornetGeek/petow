@@ -1,17 +1,59 @@
 from django.urls import path
 from . import views
+from .availability_views import AvailabilityChecksView, PetAvailabilityView
+from . import sharing, story_replies, challenges
 
 app_name = 'pets'
 
 urlpatterns = [
+    path('challenges/current/', challenges.current),
+    path('challenges/archives/', challenges.archives),
+    path('challenges/<int:challenge_id>/', challenges.detail),
+    path('challenges/<int:challenge_id>/entries/', challenges.entries),
+    path('challenges/<int:challenge_id>/entries/create/', challenges.create_entry),
+    path('challenge-entries/<int:entry_id>/', challenges.entry_detail),
+    path('challenge-entries/<int:entry_id>/reaction/', challenges.reaction),
+    path('challenge-entries/<int:entry_id>/report/', challenges.report),
+    path('public/<int:pet_id>/', sharing.public_pet, name='public-pet-share'),
+    path('public/<int:pet_id>/shares/<uuid:share_id>/', sharing.public_share, name='public-pet-share-session'),
+    path('public/<int:pet_id>/shares/<uuid:share_id>/open/', sharing.record_public_share_open, name='public-pet-share-open'),
+    path('referrals/claim/', sharing.claim_referral_view, name='claim-referral'),
+    path('referrals/summary/', sharing.referral_summary, name='referral-summary'),
+    path('referrals/wallet/', sharing.referral_wallet, name='referral-wallet'),
+    path('share-assets/<uuid:asset_id>/', sharing.share_asset, name='pet-share-asset'),
+    path('<int:pet_id>/shares/', sharing.create_share, name='pet-create-share'),
+    path('<int:pet_id>/shares/<uuid:share_id>/', sharing.share_status, name='pet-share-status'),
+    path('<int:pet_id>/shares/<uuid:share_id>/assets/', sharing.request_asset, name='pet-share-request-asset'),
     # السلالات
     path('breeds/', views.BreedListView.as_view(), name='breed-list'),
     
     # الحيوانات
     path('', views.PetListCreateView.as_view(), name='pet-list-create'),
     path('map/markers/', views.PetMapMarkersView.as_view(), name='pet-map-markers'),
+    path('stories/', views.StoryListCreateView.as_view(), name='story-list-create'),
+    path('stories/<int:story_id>/reply/', story_replies.reply_to_story, name='story-reply'),
+    path('stories/<int:story_id>/preview/', story_replies.story_preview, name='story-reply-preview'),
+    path('story-replies/<int:reply_id>/<str:action>/', story_replies.respond_to_story_reply, name='story-reply-respond'),
+    path('users/<int:user_id>/block/', story_replies.block_user, name='user-block'),
+    path('users/blocks/', story_replies.blocked_users, name='blocked-users'),
+    path('chat/firebase-token/', story_replies.firebase_token, name='firebase-token'),
+    path('stories/my/', views.MyStoriesView.as_view(), name='my-stories'),
+    path('stories/<int:pk>/', views.StoryDeleteView.as_view(), name='story-delete'),
+    path('stories/<int:story_id>/view/', views.mark_story_viewed, name='story-view'),
+    path('stories/<int:story_id>/react/', views.react_to_story, name='story-react'),
+    path('stories/<int:story_id>/reactions/', views.story_reactions, name='story-reactions'),
+    path('stories/<int:story_id>/report/', views.report_story, name='story-report'),
+    path('request-center/', views.RequestCenterView.as_view(), name='request-center'),
+    path('saved-searches/', views.SavedSearchListCreateView.as_view(), name='saved-search-list-create'),
+    path('saved-searches/preview/', views.UnsavedSearchPreviewView.as_view(), name='saved-search-preview-unsaved'),
+    path('saved-searches/<int:pk>/', views.SavedSearchDetailView.as_view(), name='saved-search-detail'),
+    path('saved-searches/<int:pk>/preview/', views.SavedSearchPreviewView.as_view(), name='saved-search-preview'),
+    path('home/digest/', views.HomeDigestView.as_view(), name='home-digest'),
     path('<int:pk>/', views.PetDetailView.as_view(), name='pet-detail'),
+    path('availability-checks/', AvailabilityChecksView.as_view(), name='availability-checks'),
+    path('<int:pk>/availability/', PetAvailabilityView.as_view(), name='pet-availability'),
     path('my/', views.MyPetsView.as_view(), name='my-pets'),
+    path('engagement-events/', views.create_engagement_event, name='engagement-events'),
     
     # العيادات البيطرية
     path('veterinary-clinics/', views.VeterinaryClinicListView.as_view(), name='veterinary-clinic-list'),
@@ -37,6 +79,7 @@ urlpatterns = [
     path('favorites/', views.FavoriteListCreateView.as_view(), name='favorite-list-create'),
     path('favorites/<int:pk>/', views.FavoriteDetailView.as_view(), name='favorite-detail'),
     path('<int:pet_id>/toggle-favorite/', views.toggle_favorite, name='toggle-favorite'),
+    path('<int:pet_id>/toggle-like/', views.toggle_pet_like, name='toggle-pet-like'),
     
     # إحصائيات
     path('stats/', views.pet_stats, name='pet-stats'),

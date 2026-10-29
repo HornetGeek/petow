@@ -2,6 +2,7 @@
 نظام الإشعارات المحسن عبر الإيميل.
 """
 from datetime import timedelta
+from html import escape
 import logging
 
 from django.db import transaction
@@ -20,7 +21,39 @@ logger = logging.getLogger(__name__)
 
 
 def _display_name(user):
-    return user.get_full_name() or user.first_name or "صديقنا"
+    fallback = "Friend" if getattr(user, "preferred_language", "ar") == "en" else "صديقنا"
+    return user.get_full_name() or user.first_name or fallback
+
+
+def _send_english_event_email(*, user, subject, title, lines, app_link, fallback_link, reason, metadata):
+    """Send a compact LTR version while keeping user-provided values escaped in HTML."""
+    safe_lines = [str(line) for line in lines if line not in (None, "")]
+    text_body = (
+        f"Hello {_display_name(user)},\n\n"
+        + "\n".join(safe_lines)
+        + f"\n\nOpen in Petow: {app_link}\nWeb alternative: {fallback_link}"
+        + f"\n\nWhy you received this email: {reason}\n\nThe Petow team"
+    )
+    html_body = build_rtl_email_html(
+        title=title,
+        body_html="".join(
+            f'<p style="margin:0 0 10px;">{escape(line)}</p>' for line in safe_lines
+        ),
+        primary_label="Open in Petow",
+        primary_url=app_link,
+        secondary_label="Web alternative",
+        secondary_url=fallback_link,
+        why_you_received=f"Why you received this email: {reason}",
+        language="en",
+    )
+    return send_email_payload(
+        to_email=user.email,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        category=EMAIL_CATEGORY_TRANSACTIONAL,
+        metadata=metadata,
+    )
 
 
 def send_breeding_request_email(breeding_request):
@@ -38,6 +71,28 @@ def send_breeding_request_email(breeding_request):
         subject = f"طلب تزاوج جديد لحيوانك {target_pet.name}"
         app_link = f"petow://breeding-request/{breeding_request.id}"
         fallback_link = f"https://petow.app/requests/breeding/{breeding_request.id}"
+
+        if receiver.preferred_language == "en":
+            lines = [
+                f"You received a new breeding request for {target_pet.name}.",
+                f"From: {_display_name(requester)}",
+                f"Requester's pet: {requester_pet.name}",
+                f"Proposed meeting date: {breeding_request.meeting_date or 'Not specified'}",
+                f"Contact number: {breeding_request.contact_phone}",
+            ]
+            if breeding_request.message:
+                lines.append(f"Message: {breeding_request.message}")
+            _send_english_event_email(
+                user=receiver,
+                subject=f"New breeding request for {target_pet.name}",
+                title=f"New breeding request for {target_pet.name}",
+                lines=lines,
+                app_link=app_link,
+                fallback_link=fallback_link,
+                reason="A new breeding request was sent for your pet.",
+                metadata={'email_type': 'breeding_request_received', 'breeding_request_id': breeding_request.id, 'receiver_id': receiver.id},
+            )
+            return
 
         text_body = (
             f"مرحباً {_display_name(receiver)},\n\n"
@@ -115,6 +170,26 @@ def send_breeding_request_approved_email(breeding_request):
         subject = f"تم قبول طلب التزاوج مع {target_pet.name}!"
         app_link = f"petow://breeding-request/{breeding_request.id}"
         fallback_link = f"https://petow.app/requests/breeding/{breeding_request.id}"
+
+        if requester.preferred_language == "en":
+            lines = [
+                f"Your breeding request with {target_pet.name} was approved.",
+                f"Pet owner: {_display_name(receiver)}",
+                f"Meeting date: {breeding_request.meeting_date or 'Not specified'}",
+            ]
+            if breeding_request.response_message:
+                lines.append(f"Owner message: {breeding_request.response_message}")
+            _send_english_event_email(
+                user=requester,
+                subject=f"Breeding request with {target_pet.name} approved",
+                title="Breeding request approved ✅",
+                lines=lines,
+                app_link=app_link,
+                fallback_link=fallback_link,
+                reason="A breeding request you sent was approved.",
+                metadata={'email_type': 'breeding_request_approved', 'breeding_request_id': breeding_request.id, 'requester_id': requester.id},
+            )
+            return
 
         text_body = (
             f"مرحباً {_display_name(requester)},\n\n"
@@ -197,6 +272,24 @@ def send_adoption_request_email(adoption_request):
         app_link = f"petow://adoption-request/{adoption_request.id}"
         fallback_link = f"https://petow.app/requests/adoption/{adoption_request.id}"
 
+        if pet_owner.preferred_language == "en":
+            _send_english_event_email(
+                user=pet_owner,
+                subject=f"New adoption request for {pet.name}",
+                title=f"New adoption request for {pet.name}",
+                lines=[
+                    f"Applicant: {adoption_request.adopter_name}",
+                    f"Email: {adoption_request.adopter_email}",
+                    f"Phone: {adoption_request.adopter_phone}",
+                    f"Reason for adoption: {adoption_request.reason_for_adoption}",
+                ],
+                app_link=app_link,
+                fallback_link=fallback_link,
+                reason="A new adoption request was sent for your pet.",
+                metadata={'email_type': 'adoption_request_received', 'adoption_request_id': adoption_request.id, 'owner_id': pet_owner.id},
+            )
+            return
+
         text_body = (
             f"مرحباً {_display_name(pet_owner)},\n\n"
             f"لديك طلب تبني جديد لحيوانك {pet.name}.\n\n"
@@ -270,6 +363,26 @@ def send_adoption_request_approved_email(adoption_request):
         subject = f"تم قبول طلب تبني {pet.name}!"
         app_link = f"petow://adoption-request/{adoption_request.id}"
         fallback_link = f"https://petow.app/requests/adoption/{adoption_request.id}"
+
+        if adopter.preferred_language == "en":
+            lines = [
+                f"Your adoption request for {pet.name} was approved.",
+                f"Pet owner: {_display_name(pet_owner)}",
+                f"Owner phone: {pet_owner.phone}",
+            ]
+            if adoption_request.notes:
+                lines.append(f"Owner notes: {adoption_request.notes}")
+            _send_english_event_email(
+                user=adopter,
+                subject=f"Your adoption request for {pet.name} was approved",
+                title="Adoption request approved ✅",
+                lines=lines,
+                app_link=app_link,
+                fallback_link=fallback_link,
+                reason="An adoption request you sent was approved.",
+                metadata={'email_type': 'adoption_request_approved', 'adoption_request_id': adoption_request.id, 'adopter_id': adopter.id},
+            )
+            return
 
         text_body = (
             f"مرحباً {_display_name(adopter)},\n\n"
@@ -515,6 +628,33 @@ def send_daily_unread_messages_reminder(target_date=None):
             secondary_url=fallback_link,
             why_you_received="سبب استلامك لهذا البريد: تنبيه يومي بوجود رسائل غير مقروءة.",
         )
+
+        if user.preferred_language == "en":
+            subject = f"You have {unread_count} unread messages in Petow"
+            sender_line = f"Messages from: {', '.join(sorted(senders))}\n" if senders else ""
+            text_body = (
+                f"Hello {_display_name(user)},\n\n"
+                f"You have {unread_count} unread messages.\n{sender_line}\n"
+                "Please review your conversations and reply when you can.\n"
+                f"Open conversations: {app_link}\nWeb alternative: {fallback_link}\n\n"
+                "You received this daily reminder because unread messages are waiting. "
+                "You can disable reminders in notification settings.\n\nThe Petow team"
+            )
+            safe_senders = escape(', '.join(sorted(senders)))
+            html_body = build_rtl_email_html(
+                title=f"You have {unread_count} unread messages",
+                body_html=(
+                    f'<p style="margin:0 0 10px;">Hello {escape(_display_name(user))}, you have messages waiting for your reply.</p>'
+                    f'<p style="margin:0 0 10px;"><strong>Unread messages:</strong> {unread_count}</p>'
+                    + (f'<p style="margin:0 0 10px;"><strong>Senders:</strong> {safe_senders}</p>' if senders else '')
+                ),
+                primary_label="Open conversations",
+                primary_url=app_link,
+                secondary_label="Web alternative",
+                secondary_url=fallback_link,
+                why_you_received="You received this daily reminder because unread messages are waiting.",
+                language="en",
+            )
 
         try:
             send_email_payload(

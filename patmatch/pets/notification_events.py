@@ -20,6 +20,10 @@ from .notifications import (
 logger = logging.getLogger(__name__)
 
 
+class NotificationEventDeferred(Exception):
+    """Policy postponement that does not consume the transport retry budget."""
+
+
 class NotificationEventPermanentError(Exception):
     """Raised when an outbox event cannot be processed and should not be retried."""
 
@@ -29,6 +33,9 @@ def _process_pet_created(object_id, payload):
         pet = Pet.objects.get(id=object_id)
     except Pet.DoesNotExist as exc:
         raise NotificationEventPermanentError(f"Pet {object_id} not found") from exc
+
+    if pet.discovery_paused_at:
+        return
 
     if pet.status == 'available_for_adoption':
         notify_new_adoption_pet(
@@ -194,6 +201,22 @@ def _process_clinic_chat_message_push(object_id, payload):
     notification.save(update_fields=['extra_data', 'updated_at'])
 
 
+def _process_clinic_booking_push(object_id, payload):
+    notification = _get_notification_or_raise(object_id)
+    push_type = payload.get('push_type') or notification.type or 'clinic_booking_new'
+    delivered = deliver_outbox_notification_push(
+        notification,
+        title=payload.get('title'),
+        message=payload.get('message'),
+        push_payload=payload.get('push_payload') or {},
+        push_type=push_type,
+    )
+    extra_data = notification.extra_data if isinstance(notification.extra_data, dict) else {}
+    extra_data['delivered'] = bool(delivered)
+    notification.extra_data = extra_data
+    notification.save(update_fields=['extra_data', 'updated_at'])
+
+
 def _process_account_verification_approved_push(object_id, payload):
     notification = _get_notification_or_raise(object_id)
     delivered = deliver_outbox_notification_push(
@@ -209,7 +232,17 @@ def _process_account_verification_approved_push(object_id, payload):
     notification.save(update_fields=['extra_data', 'updated_at'])
 
 
+def _process_pet_availability_push(object_id, payload):
+    from .availability import deliver_check_push
+    deliver_check_push(object_id, payload)
+
+
+from .story_reply_delivery import (
+    process_story_reply_received, process_story_reply_approved, process_chat_permission_sync,
+)
+
 EVENT_HANDLERS = {
+    NotificationOutbox.EVENT_PET_AVAILABILITY_PUSH: _process_pet_availability_push,
     NotificationOutbox.EVENT_PET_CREATED: _process_pet_created,
     NotificationOutbox.EVENT_BREEDING_REQUEST_RECEIVED: _process_breeding_request_received,
     NotificationOutbox.EVENT_BREEDING_REQUEST_APPROVED: _process_breeding_request_approved,
@@ -217,9 +250,13 @@ EVENT_HANDLERS = {
     NotificationOutbox.EVENT_ADOPTION_REQUEST_RECEIVED: _process_adoption_request_received,
     NotificationOutbox.EVENT_ADOPTION_REQUEST_APPROVED: _process_adoption_request_approved,
     NotificationOutbox.EVENT_CHAT_MESSAGE_RECEIVED: _process_chat_message_received,
+    NotificationOutbox.EVENT_STORY_REPLY_RECEIVED: process_story_reply_received,
+    NotificationOutbox.EVENT_STORY_REPLY_APPROVED: process_story_reply_approved,
+    NotificationOutbox.EVENT_CHAT_PERMISSION_SYNC: process_chat_permission_sync,
     NotificationOutbox.EVENT_CLINIC_INVITE_PUSH: _process_clinic_invite_push,
     NotificationOutbox.EVENT_CLINIC_BROADCAST_PUSH: _process_clinic_broadcast_push,
     NotificationOutbox.EVENT_CLINIC_CHAT_MESSAGE_PUSH: _process_clinic_chat_message_push,
+    NotificationOutbox.EVENT_CLINIC_BOOKING_PUSH: _process_clinic_booking_push,
     NotificationOutbox.EVENT_ACCOUNT_VERIFICATION_APPROVED_PUSH: _process_account_verification_approved_push,
 }
 

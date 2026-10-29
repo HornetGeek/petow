@@ -53,6 +53,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "pets_count",
             "date_joined",
             "fcm_token",
+            "preferred_language",
             "notify_breeding_requests",
             "notify_adoption_pets",
             "notification_settings",
@@ -70,6 +71,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     def get_pets_count(self, obj):
         return obj.pets.count()
+
+    def validate_phone(self, value):
+        # Blank clears the phone (older clients send "" when the field is emptied).
+        if not value:
+            return ""
+        return CustomRegisterSerializer().validate_phone(value)
 
     def get_notification_settings(self, obj):
         settings_obj, _ = UserNotificationSettings.objects.get_or_create(user=obj)
@@ -154,6 +161,7 @@ class UserSerializer(serializers.ModelSerializer):
             "phone",
             "is_phone_verified",
             "fcm_token",
+            "preferred_language",
             "user_type",
             "auth_provider",
         ]
@@ -173,14 +181,15 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
             "last_name",
             "phone",
             "address",
+            "preferred_language",
             "password1",
             "password2",
         ]
         extra_kwargs = {
             "phone": {
-                "required": False,
-                "allow_blank": True,
-                "help_text": "رقم الهاتف (اختياري)",
+                "required": True,
+                "allow_blank": False,
+                "help_text": "رقم الهاتف (مطلوب)",
             },
             "first_name": {"required": True},
             "last_name": {"required": True},
@@ -190,7 +199,7 @@ class CustomRegisterSerializer(serializers.ModelSerializer):
     def validate_phone(self, value):
         """التحقق من صحة رقم الهاتف وتطبيعه إلى E.164"""
         if not value:
-            return ""
+            raise serializers.ValidationError("رقم الهاتف مطلوب")
 
         # إزالة المسافات والرموز الإضافية الشائعة
         raw = re.sub(r"[\s\-\(\)]", "", str(value).strip())

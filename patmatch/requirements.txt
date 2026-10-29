@@ -17,6 +17,7 @@ psycopg2-binary==2.9.7
 
 # Image Processing
 Pillow==9.5.0
+qrcode==7.4.2
 
 # HTTP & API
 requests==2.32.4
@@ -40,3 +41,4 @@ firebase-admin==6.4.0
 # Additional Utilities
 defusedxml==0.7.1
 dj-database-url==2.1.0
+sentry-sdk==2.73.0

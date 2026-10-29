@@ -39,6 +39,7 @@ class BrevoEmailBackend(BaseEmailBackend):
         self.api_key = getattr(settings, 'BREVO_API_KEY', '')
         self.from_email = getattr(settings, 'BREVO_FROM_EMAIL', '')
         self.from_name = getattr(settings, 'BREVO_FROM_NAME', 'Petow')
+        self.reply_to_email = getattr(settings, 'BREVO_REPLY_TO_EMAIL', '')
         self.api_url = 'https://api.brevo.com/v3/smtp/email'
         self.timeout_seconds = max(
             1.0,
@@ -136,8 +137,9 @@ class BrevoEmailBackend(BaseEmailBackend):
             "textContent": text_content
         }
 
-        if message.reply_to:
-            email_data["replyTo"] = {"email": message.reply_to[0]}
+        reply_to_email = message.reply_to[0] if message.reply_to else self.reply_to_email
+        if reply_to_email:
+            email_data["replyTo"] = {"email": reply_to_email}
 
         return email_data, self._resolve_category(message)
 

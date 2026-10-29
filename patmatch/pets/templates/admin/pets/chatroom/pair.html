@@ -1,0 +1,38 @@
+{% extends 'admin/base_site.html' %}
+{% block content %}
+<p><a href="{% url 'admin:pets_chatroom_changelist' %}">← Chat Conversations</a></p>
+<form method="get" id="pair-form">
+<label>User A <input type="search" class="user-picker" data-target="a" autocomplete="off" placeholder="Search name, email, phone or ID" required></label><input type="hidden" id="a" name="a" value="{{ a }}"><span id="a-results"></span>
+<label>User B <input type="search" class="user-picker" data-target="b" autocomplete="off" placeholder="Search name, email, phone or ID" required></label><input type="hidden" id="b" name="b" value="{{ b }}"><span id="b-results"></span>
+<button type="submit">Find chats</button></form>
+<script>
+for (const input of document.querySelectorAll('.user-picker')) {
+  const key = input.dataset.target, hidden = document.getElementById(key), results = document.getElementById(key + '-results');
+  if (hidden.value) input.value = 'User #' + hidden.value;
+  let timer;
+  input.addEventListener('input', () => {
+    hidden.value = ''; results.replaceChildren(); clearTimeout(timer);
+    if (input.value.trim().length < 2) return;
+    timer = setTimeout(async () => {
+      try {
+        const response = await fetch('{% url "admin:pets_chatroom_user_search" %}?q=' + encodeURIComponent(input.value.trim()));
+        if (!response.ok) return;
+        const data = await response.json(); results.replaceChildren();
+        for (const user of data.results) {
+          const button = document.createElement('button'); button.type = 'button'; button.textContent = user.label;
+          button.addEventListener('click', () => { hidden.value = user.id; input.value = user.label; results.replaceChildren(); });
+          results.append(button);
+        }
+      } catch (_) { results.textContent = 'User search unavailable'; }
+    }, 250);
+  });
+}
+document.getElementById('pair-form').addEventListener('submit', event => {
+  if (!document.getElementById('a').value || !document.getElementById('b').value) event.preventDefault();
+});
+</script>
+{% if a and b %}<h2>Matching conversations</h2><ul>{% for room in matched %}<li><a href="{% url 'admin:pets_chatroom_viewer' room.pk %}">Room #{{ room.pk }}</a> · {{ room.admin_message_count|default_if_none:'—' }} messages</li>{% empty %}<li>No one-to-one conversations found.</li>{% endfor %}</ul>
+<h2>Combined timeline</h2>{% if error %}<p class="errornote">{{ error }}</p>{% endif %}
+{% for message in combined %}<p><a href="{% url 'admin:pets_chatroom_viewer' message.room.pk %}">Room #{{ message.room.pk }}</a> · {{ message.room_context.0 }}{% if message.room_context.2 %} · {{ message.room_context.2.name }}{% endif %} · User {{ message.sender_id }} · {{ message.timestamp }}<br>{{ message.text }}{% if message.image_url %}<br><a href="{{ message.image_url }}" rel="noopener noreferrer">View image</a>{% endif %}</p>{% empty %}<p>No messages.</p>{% endfor %}
+{% if combined_cursor %}<a href="?a={{ a|urlencode }}&amp;b={{ b|urlencode }}&amp;cursor={{ combined_cursor|urlencode }}">Load older messages</a>{% endif %}{% endif %}
+{% endblock %}

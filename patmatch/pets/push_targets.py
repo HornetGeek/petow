@@ -20,12 +20,23 @@ ADOPTION_REQUEST_TYPES = {
 PET_DETAIL_TYPES = {
     'pet_nearby',
     'adoption_pet_nearby',
+    'saved_search_match',
     'pet_status_changed',
 }
 
 CHAT_TYPES = {
     'chat_message_received',
+    'story_reply_received',
+    'story_reply_approved',
     'clinic_chat_message',
+}
+
+CLINIC_BOOKING_TYPES = {
+    'clinic_booking_new',
+    'clinic_booking_confirmed',
+    'clinic_booking_rejected',
+    'clinic_booking_counter_proposed',
+    'clinic_booking_completed',
 }
 
 SYSTEM_PROFILE_TYPES = {
@@ -73,6 +84,9 @@ def build_mobile_deep_link(notification_type: Any, context: Optional[Dict[str, A
     n_type = _normalize_type(notification_type)
     ctx: Dict[str, Any] = context or {}
 
+    if n_type == 'pet_availability_check':
+        return _with_query('petow://pet-availability', 'pet_id', _pick_value(ctx, ('pet_id', 'related_pet')))
+
     if n_type in BREEDING_REQUEST_TYPES:
         request_id = _pick_value(ctx, ('breeding_request_id', 'request_id'))
         return _with_query('petow://breeding-requests', 'breeding_request_id', request_id)
@@ -83,11 +97,22 @@ def build_mobile_deep_link(notification_type: Any, context: Optional[Dict[str, A
 
     if n_type in PET_DETAIL_TYPES:
         pet_id = _pick_value(ctx, ('pet_id', 'related_pet', 'target_id'))
-        return _with_query('petow://pet-details', 'pet_id', pet_id)
+        if pet_id:
+            return _with_query('petow://pet-details', 'pet_id', pet_id)
+        saved_search_id = _pick_value(ctx, ('saved_search_id',))
+        return _with_query('petow://saved-search', 'saved_search_id', saved_search_id)
 
     if n_type in CHAT_TYPES:
         chat_id = _pick_value(ctx, ('firebase_chat_id', 'chat_id', 'chat_room_id'))
         return _with_query('petow://clinic-chat', 'firebase_chat_id', chat_id)
+
+    if n_type in CLINIC_BOOKING_TYPES:
+        booking_id = _pick_value(ctx, ('booking_public_id', 'public_id', 'booking_id'))
+        if n_type == 'clinic_booking_new':
+            if booking_id:
+                return f"petow-clinics://appointments?filter=requests&booking_public_id={quote(booking_id)}"
+            return 'petow-clinics://appointments?filter=requests'
+        return _with_query('petow://clinic-booking', 'booking_public_id', booking_id)
 
     if n_type in {'clinic_invite', 'clinic_broadcast'}:
         return _with_query('petow://notifications', 'type', n_type)
@@ -114,12 +139,17 @@ def build_web_url(notification_type: Any, context: Optional[Dict[str, Any]] = No
         pet_id = _pick_value(ctx, ('pet_id', 'related_pet', 'target_id'))
         if pet_id:
             return '/pets/{pet_id}'.format(pet_id=quote(pet_id))
+        if n_type == 'saved_search_match':
+            return '/profile'
         return '/profile'
 
     if n_type in CHAT_TYPES:
         chat_id = _pick_value(ctx, ('firebase_chat_id', 'chat_id', 'chat_room_id'))
         if chat_id:
             return '/chat/{chat_id}'.format(chat_id=quote(chat_id))
+        return '/profile'
+
+    if n_type in CLINIC_BOOKING_TYPES:
         return '/profile'
 
     if n_type in SYSTEM_PROFILE_TYPES:

@@ -33,7 +33,13 @@ def build_rtl_email_html(
     secondary_url: Optional[str] = None,
     why_you_received: str = "",
     support_whatsapp: str = "201272011482",
+    language: str = "ar",
 ) -> str:
+    language = language if language in {"ar", "en"} else "ar"
+    direction = "rtl" if language == "ar" else "ltr"
+    support_label = "للدعم" if language == "ar" else "Support"
+    team_label = "فريق" if language == "ar" else "The"
+    team_suffix = "" if language == "ar" else " team"
     primary_cta_html = ""
     if primary_label and primary_url:
         primary_cta_html = (
@@ -61,8 +67,8 @@ def build_rtl_email_html(
 
     whatsapp_link = f"https://wa.me/{support_whatsapp}"
     return f"""
-    <html lang="ar" dir="rtl">
-      <body style="margin:0;padding:0;background:#f8fafc;font-family:'Tajawal',Arial,sans-serif;color:#0f172a;">
+    <html lang="{language}" dir="{direction}">
+      <body style="margin:0;padding:0;background:#f8fafc;font-family:'Tajawal',Arial,sans-serif;color:#0f172a;text-align:{'right' if direction == 'rtl' else 'left'};">
         <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
           <tr>
             <td align="center" style="padding:24px 12px;">
@@ -80,10 +86,10 @@ def build_rtl_email_html(
                     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;" />
                     {why_you_received_html}
                     <p style="margin:0 0 8px;color:#334155;font-size:13px;line-height:1.8;">
-                      للدعم: <a href="{whatsapp_link}" style="color:#0ea5e9;text-decoration:none;">+{support_whatsapp}</a>
+                      {support_label}: <a href="{whatsapp_link}" style="color:#0ea5e9;text-decoration:none;">+{support_whatsapp}</a>
                     </p>
                     <p style="margin:0;color:#334155;font-size:13px;line-height:1.8;">
-                      فريق <strong>{BRAND_NAME}</strong>
+                      {team_label} <strong>{BRAND_NAME}</strong>{team_suffix}
                     </p>
                   </td>
                 </tr>

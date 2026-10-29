@@ -16,6 +16,9 @@ import logging
 import dj_database_url
 from decouple import config
 from celery.schedules import crontab
+from .monitoring import init_sentry
+
+init_sentry()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -32,6 +35,16 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
 logger = logging.getLogger(__name__)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {'request_id': {'()': 'patmatch_backend.monitoring.RequestIdLogFilter'}},
+    'formatters': {'request': {'format': '%(levelname)s %(name)s request_id=%(request_id)s %(message)s'}},
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': 'request',
+                             'filters': ['request_id']}},
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+}
 
 
 # Application definition
@@ -61,12 +74,15 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'patmatch_backend.monitoring.RequestContextMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.locale.LocaleMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'patmatch_backend.middleware.UserPreferredLocaleMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -130,6 +146,13 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/4.2/topics/i18n/
 
 LANGUAGE_CODE = 'ar'
+
+LANGUAGES = [
+    ('ar', 'العربية'),
+    ('en', 'English'),
+]
+
+LOCALE_PATHS = [BASE_DIR / 'locale']
 
 TIME_ZONE = 'Africa/Cairo'
 
@@ -249,12 +272,16 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ROUTES = {
+    'pets.share_tasks.render_share_asset': {'queue': 'share_cards'},
     'pets.tasks.process_notification_outbox_event': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.sweep_notification_outbox': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.run_lifecycle_engagement_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.run_auto_manage_requests': {'queue': CELERY_NOTIFICATION_QUEUE},
     'pets.tasks.run_daily_unread_email_reminders': {'queue': CELERY_NOTIFICATION_QUEUE},
 }
+# autodiscover_tasks() only loads pets/tasks.py; share_tasks must be imported explicitly
+# or the worker rejects render_share_asset as unregistered.
+CELERY_IMPORTS = ('pets.share_tasks',)
 CELERY_BEAT_SCHEDULE = {
     'notification-outbox-sweep': {
         'task': 'pets.tasks.sweep_notification_outbox',
@@ -299,14 +326,19 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.TokenAuthentication',
+        'patmatch_backend.authentication.PreferredLanguageTokenAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],
+    'EXCEPTION_HANDLER': 'patmatch_backend.api_exceptions.localized_exception_handler',
     'DEFAULT_THROTTLE_RATES': {
+        'challenge_entry': '10/day',
+        'challenge_report': '20/day',
         'google_maps_autocomplete': '60/minute',
         'google_maps_geocode': '30/minute',
+        'pet_share_open': '60/minute',
+        'referral_wallet': '30/minute',
     },
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20
@@ -364,6 +396,7 @@ CORS_ALLOW_METHODS = [
 ]
 
 CORS_EXPOSE_HEADERS = [
+    'x-request-id',
     'content-length',
     'content-range',
     'x-total-count',
@@ -426,6 +459,7 @@ BREVO_SMTP_USER = config('BREVO_SMTP_USER', default='')
 BREVO_FROM_EMAIL = config('BREVO_FROM_EMAIL', default='')
 BREVO_FROM_NAME = config('BREVO_FROM_NAME', default='Petow')
 BREVO_SERVER_EMAIL = config('BREVO_SERVER_EMAIL', default='')
+BREVO_REPLY_TO_EMAIL = config('BREVO_REPLY_TO_EMAIL', default='')
 BREVO_REQUEST_TIMEOUT_SECONDS = config('BREVO_REQUEST_TIMEOUT_SECONDS', default=10, cast=float)
 BREVO_MAX_RETRIES = config('BREVO_MAX_RETRIES', default=2, cast=int)
 BREVO_RETRY_BACKOFF_SECONDS = config('BREVO_RETRY_BACKOFF_SECONDS', default=0.75, cast=float)
@@ -478,3 +512,35 @@ else:
     else:
         # Fall back to SMTP only if no Brevo credentials are configured
         EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+
+
+# Enable after clients with owner availability controls have shipped.
+PET_AVAILABILITY_ENABLED = config('PET_AVAILABILITY_ENABLED', default=False, cast=bool)
+PET_AVAILABILITY_ROLLOUT_PERCENT = config('PET_AVAILABILITY_ROLLOUT_PERCENT', default=100, cast=int)
+PET_AVAILABILITY_AUTO_PAUSE = config('PET_AVAILABILITY_AUTO_PAUSE', default=False, cast=bool)
+PET_AVAILABILITY_INTERVAL_DAYS = config('PET_AVAILABILITY_INTERVAL_DAYS', default=30, cast=int)
+PET_AVAILABILITY_REMINDER_DAYS = config('PET_AVAILABILITY_REMINDER_DAYS', default=7, cast=int)
+PET_AVAILABILITY_GRACE_DAYS = config('PET_AVAILABILITY_GRACE_DAYS', default=14, cast=int)
+PET_AVAILABILITY_APPROVAL_DAYS = config('PET_AVAILABILITY_APPROVAL_DAYS', default=3, cast=int)
+PET_AVAILABILITY_APPROVAL_REMINDER_DAYS = config('PET_AVAILABILITY_APPROVAL_REMINDER_DAYS', default=7, cast=int)
+CELERY_BEAT_SCHEDULE['pet-availability-hourly'] = {
+    'task': 'pets.tasks.run_pet_availability_checks', 'schedule': crontab(minute=20),
+}
+CELERY_TASK_ROUTES['pets.tasks.run_pet_availability_checks'] = {'queue': CELERY_NOTIFICATION_QUEUE}
+
+# Point earning is separately gated from referral qualification. Keep both
+# settings disabled/empty until the ledger audit and pilot review pass.
+PETOW_POINTS_ENABLED = config('PETOW_POINTS_ENABLED', default=False, cast=bool)
+PETOW_POINTS_COHORT_IDS = config('PETOW_POINTS_COHORT_IDS', default='')
+PETOW_PUBLIC_SITE_URL = config('PETOW_PUBLIC_SITE_URL', default='https://www.petow.app')
+POSTHOG_PROJECT_TOKEN = config('POSTHOG_PROJECT_TOKEN', default='')
+POSTHOG_CAPTURE_HOST = config('POSTHOG_CAPTURE_HOST', default='https://us.i.posthog.com')
+CELERY_BEAT_SCHEDULE['share-card-assets-daily'] = {
+    'task': 'pets.share_tasks.prune_share_assets', 'schedule': crontab(hour=4, minute=10),
+}
+CELERY_BEAT_SCHEDULE['referral-expiry-daily'] = {
+    'task': 'pets.share_tasks.expire_referrals', 'schedule': crontab(hour=4, minute=20),
+}
+CELERY_BEAT_SCHEDULE['referral-points-daily'] = {
+    'task': 'pets.share_tasks.reconcile_referral_points', 'schedule': crontab(hour=4, minute=30),
+}

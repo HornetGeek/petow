@@ -1,0 +1,22 @@
+{% extends 'admin/base_site.html' %}
+{% load tz %}
+{% block content %}
+<style>
+.chat-shell{max-width:980px;margin:auto;background:var(--body-bg);border:1px solid var(--hairline-color);border-radius:12px;overflow:hidden}.chat-head{padding:20px;background:var(--darkened-bg);display:flex;gap:16px;align-items:center;flex-wrap:wrap}.chat-user{display:flex;align-items:center;gap:8px}.chat-user img{width:36px;height:36px;border-radius:50%;object-fit:cover}.chat-history{padding:22px;background:var(--body-bg)}.chat-row{display:flex;margin:12px 0}.chat-row.right{justify-content:flex-end}.chat-bubble{max-width:min(75%,600px);padding:12px 15px;border-radius:14px;background:var(--darkened-bg);overflow-wrap:anywhere}.chat-row.right .chat-bubble{background:var(--selected-row)}.chat-bubble img{max-width:100%;max-height:360px;object-fit:contain}.chat-meta{font-size:11px;opacity:.7;margin-top:6px}.chat-nav{padding:14px 22px}.chat-text{white-space:pre-wrap}
+@media(max-width:600px){.chat-bubble{max-width:90%}.chat-history{padding:10px}}
+</style>
+<p><a href="{% url 'admin:pets_chatroom_changelist' %}">← Chat Conversations</a></p>
+<div class="chat-shell">
+<div class="chat-head"><strong>Conversation #{{ room.pk }}</strong>
+{% for person in people %}<span class="chat-user">{% if person.profile_picture %}<img src="{{ person.profile_picture.url }}" alt="">{% endif %}<a href="{% url 'admin:accounts_user_change' person.pk %}">{{ person.get_full_name|default:person.email }} ({{ person.pk }})</a></span>{% endfor %}
+<span>{{ context_info.0 }}{% if context_info.2 %} · {{ context_info.2.name }}{% endif %} · {{ context_info.1 }}</span><span>Created {{ room.created_at|localtime }}</span><span>{{ room.admin_message_count|default_if_none:'—' }} messages</span></div>
+{% if error %}<p class="errornote">{{ error }}</p>{% endif %}
+<div class="chat-nav">{% if cursor %}<a href="?cursor={{ cursor|urlencode }}">Load older messages</a>{% endif %}</div>
+<div class="chat-history">
+{% for message in messages %}
+<div class="chat-row {% if message.sender_id == people.1.pk %}right{% endif %}"><div class="chat-bubble"><strong>{% if message.sender_id == people.0.pk %}{{ people.0.get_full_name|default:people.0.email }}{% else %}{{ people.1.get_full_name|default:people.1.email }}{% endif %}</strong>
+{% if message.type == 'system' %}<em>System message</em>{% endif %}
+<div class="chat-text">{{ message.text }}</div>{% if message.image_url %}<a href="{{ message.image_url }}" rel="noopener noreferrer"><img src="{{ message.image_url }}" alt="Chat image"></a>{% endif %}<div class="chat-meta">{{ message.timestamp|localtime|date:'Y-m-d H:i:s T' }}</div></div></div>
+{% empty %}{% if not error %}<p>No messages in this page.</p>{% endif %}{% endfor %}
+</div></div>
+{% endblock %}
